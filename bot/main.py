@@ -995,23 +995,27 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         else:                stars = "⭐"
 
         adx_val = item.get('adx', 0)
-        if adx_val >= 50:   adx_level, adx_bar = "強", "▰▰▰▰"
-        elif adx_val >= 30: adx_level, adx_bar = "中", "▰▰▰▱"
-        elif adx_val >= 20: adx_level, adx_bar = "低", "▰▰▱▱"
-        else:               adx_level, adx_bar = "弱", "▰▱▱▱"
+        if adx_val >= 50:   adx_level, adx_bar = "強", "■■■■"
+        elif adx_val >= 30: adx_level, adx_bar = "中", "■■■□"
+        elif adx_val >= 20: adx_level, adx_bar = "低", "■■□□"
+        else:               adx_level, adx_bar = "弱", "■□□□"
         medal   = ["🥇","🥈","🥉","#4","#5"][idx-1]
 
         # 方向：用顏色+文字，不堆疊其他圖示
         dir_display = "🟩<b>多</b>" if item['dir'] == "多" else "🟥<b>空</b>"
 
-        # 主力動向精簡：費率 + 多空比轉百分比
+        # 主力動向精簡：方向標籤 + 費率數字 + 多空比百分比
         sentiment = item.get('sentiment_note','')
-        fr_match  = next((p for p in sentiment.split('，') if '費率' in p), '')
-        ls_ratio  = item.get('ls_ratio', 1.0)
-        long_pct  = round(ls_ratio / (ls_ratio + 1) * 100)
-        short_pct = 100 - long_pct
-        ls_display = f"多{long_pct}%:空{short_pct}%"
-        sentiment_short = f"{fr_match}  {ls_display}".strip()
+        if '主力偏多' in sentiment:   dir_tag = "偏多"
+        elif '主力偏空' in sentiment: dir_tag = "偏空"
+        else:                         dir_tag = "中性"
+        # 只取費率數字（去除括號和前綴文字）
+        fr_match   = next((p for p in sentiment.split('，') if '費率' in p), '')
+        fr_num_str = fr_match.split('費率')[-1].strip('（）').strip() if fr_match else '0%'
+        ls_ratio   = item.get('ls_ratio', 1.0)
+        long_pct   = round(ls_ratio / (ls_ratio + 1) * 100)
+        short_pct  = 100 - long_pct
+        sentiment_short = f"{dir_tag}  費率{fr_num_str}  多{long_pct}%:空{short_pct}%"
 
         # ── 標題行 ──
         html_message += (f"{medal} <b>{item['asset']}</b>  {dir_display}  "
