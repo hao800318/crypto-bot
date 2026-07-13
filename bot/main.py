@@ -131,6 +131,29 @@ def get_market_avg_funding_rate():
             pass
     return sum(rates) / len(rates) if rates else 0.0
 
+def get_candle_range_since(inst_id, since_ts, bar="1H"):
+    """取得 since_ts 以來所有 K 線的最高價和最低價。
+    用於偵測監控間隔中曾觸碰的價格極值，防止漏掉 TP/SL/填單事件。
+    回傳 (range_high, range_low) 或 (None, None)。
+    """
+    try:
+        url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar}&limit=30"
+        res = requests.get(url, timeout=3).json()
+        if res.get('code') == '0' and res['data']:
+            df = pd.DataFrame(res['data'],
+                              columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
+            df['ts']   = df['ts'].astype(float) / 1000   # ms → seconds
+            df['high'] = df['high'].astype(float)
+            df['low']  = df['low'].astype(float)
+            # 包含 since_ts 之前 1 根 K 線（防止邊界漏算）
+            margin = 3600 if bar == "1H" else 14400
+            df = df[df['ts'] >= since_ts - margin]
+            if not df.empty:
+                return float(df['high'].max()), float(df['low'].min())
+    except:
+        pass
+    return None, None
+
 def check_market_deterioration(inst_id, direction, tf):
     """已成交持倉的市場局勢惡化偵測。
     檢查三個指標：BTC趨勢逆向、ADX跌破20（趨勢消失）、資金費率極端逆向。
@@ -520,16 +543,27 @@ def analyze_position(pos):
     tp2   = pos['tp2']
     tp3   = pos['tp3']
 
+    # ── 取得上次監控後的 K 線高低點（防止 TP/SL/填單事件在監控間隔中被漏掉）──
+    since_ts = pos.get('last_checked_ts', pos.get('reported_at', time.time() - 3600))
+    bar      = "1H" if "1H" in pos.get('tf', '1H') else "4H"
+    rng_high, rng_low = get_candle_range_since(inst_id, since_ts, bar)
+    # 回退到現價作為保底
+    effective_high = max(rng_high, current_price) if rng_high else current_price
+    effective_low  = min(rng_low,  current_price) if rng_low  else current_price
+    # 更新本次監控時間戳
+    pos['last_checked_ts'] = time.time()
+
     # ── 先確認限價單是否已被成交 ──
-    # 多單：需等價格回踩到 entry（低於進場點）才算成交
-    # 空單：需等價格反彈到 entry（高於進場點）才算成交
+    # 用 K 線高低點判斷（比只看現價更準確，防止進場點在兩次監控間被觸碰後反彈）
     if not pos.get('filled', False):
-        if dir == "多" and current_price <= entry:
+        filled_by_candle = (
+            (dir == "多" and effective_low  <= entry) or
+            (dir == "空" and effective_high >= entry)
+        )
+        if filled_by_candle:
             pos['filled'] = True
-            print(f"✅ {pos['asset']} 多單已觸碰進場點 {format_price(entry)}，開始監控 TP/SL")
-        elif dir == "空" and current_price >= entry:
-            pos['filled'] = True
-            print(f"✅ {pos['asset']} 空單已觸碰進場點 {format_price(entry)}，開始監控 TP/SL")
+            how = "K線低點" if dir == "多" else "K線高點"
+            print(f"✅ {pos['asset']} {dir}單已由{how}觸碰進場點 {format_price(entry)}，開始監控 TP/SL")
         else:
             # 限價單尚未成交，僅顯示等待狀態，不觸發任何警報
             gap_pct = abs(current_price - entry) / entry * 100
@@ -552,33 +586,38 @@ def analyze_position(pos):
     elif oi_change > 5:
         whale_warn += f"\n📈 OI 上升 {oi_change:.1f}%，主力持續加倉"
 
-    # ── 持倉狀態判定 ──
+    # ── 持倉狀態判定（用 K 線高低點而非現價，防止監控間隔中的事件被漏掉）──
     if dir == "多":
         dist_to_sl_pct = (current_price - sl) / entry * 100
-        if current_price <= sl:
+        # 止損：用 K 線低點（只要低點碰過 SL 就算觸發）
+        if effective_low <= sl:
             status = "🔴 止損觸發"
-            action = f"⛔ 已觸及止損位 {format_price(sl)}，<b>建議立即平倉</b>"
+            action = (f"⛔ K線低點 {format_price(effective_low)} 已觸及止損位 {format_price(sl)}，"
+                      f"現價 {format_price(current_price)}｜<b>建議立即平倉</b>")
             push = True
-        elif current_price >= tp3:
+        # 止盈：用 K 線高點（只要高點碰過 TP 就算達標）
+        elif effective_high >= tp3:
             status = "🟣 全部止盈"
-            action = f"🎯 已達止盈3 {format_price(tp3)}，<b>建議全數平倉</b>"
+            action = (f"🎯 K線高點 {format_price(effective_high)} 已達止盈3 {format_price(tp3)}，"
+                      f"現價 {format_price(current_price)}｜<b>建議全數平倉</b>")
             push = True
-        elif current_price >= tp2:
+        elif effective_high >= tp2:
             status = "🔵 止盈2達標"
-            action = f"✅ 已達止盈2，<b>建議再平倉30%</b>，止損上移至止盈1（{format_price(tp1)}）"
+            action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈2 {format_price(tp2)}，"
+                      f"現價 {format_price(current_price)}｜<b>建議再平倉30%</b>，止損上移至止盈1（{format_price(tp1)}）")
             push = True
-        elif current_price >= tp1:
+        elif effective_high >= tp1:
             status = "🟢 止盈1達標"
-            action = f"✅ 已達止盈1，<b>建議平倉50%</b>，止損上移至成本（{format_price(entry)}）"
+            action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈1 {format_price(tp1)}，"
+                      f"現價 {format_price(current_price)}｜<b>建議平倉50%</b>，止損上移至成本（{format_price(entry)}）")
             push = True
         elif dist_to_sl_pct < 0.5:
             status = "⚠️ 接近止損"
-            action = f"⚠️ 距止損僅 {dist_to_sl_pct:.2f}%，<b>建議收緊止損或現價平倉</b>"
+            action = f"⚠️ 距止損僅 {dist_to_sl_pct:.2f}%，現價 {format_price(current_price)}｜<b>建議收緊止損或現價平倉</b>"
             push = True
         else:
             status = "🔄 持倉中"
             action = f"持倉正常，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%"
-            # 市場局勢惡化偵測（只在正常持倉時才額外檢查）
             deteri = check_market_deterioration(inst_id, dir, pos.get('tf','1H'))
             if deteri:
                 status = "🚨 局勢惡化"
@@ -588,25 +627,31 @@ def analyze_position(pos):
                 push = bool(whale_warn)
     else:  # 空
         dist_to_sl_pct = (sl - current_price) / entry * 100
-        if current_price >= sl:
+        # 止損：用 K 線高點
+        if effective_high >= sl:
             status = "🔴 止損觸發"
-            action = f"⛔ 已觸及止損位 {format_price(sl)}，<b>建議立即平倉</b>"
+            action = (f"⛔ K線高點 {format_price(effective_high)} 已觸及止損位 {format_price(sl)}，"
+                      f"現價 {format_price(current_price)}｜<b>建議立即平倉</b>")
             push = True
-        elif current_price <= tp3:
+        # 止盈：用 K 線低點
+        elif effective_low <= tp3:
             status = "🟣 全部止盈"
-            action = f"🎯 已達止盈3 {format_price(tp3)}，<b>建議全數平倉</b>"
+            action = (f"🎯 K線低點 {format_price(effective_low)} 已達止盈3 {format_price(tp3)}，"
+                      f"現價 {format_price(current_price)}｜<b>建議全數平倉</b>")
             push = True
-        elif current_price <= tp2:
+        elif effective_low <= tp2:
             status = "🔵 止盈2達標"
-            action = f"✅ 已達止盈2，<b>建議再平倉30%</b>，止損下移至止盈1（{format_price(tp1)}）"
+            action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈2 {format_price(tp2)}，"
+                      f"現價 {format_price(current_price)}｜<b>建議再平倉30%</b>，止損下移至止盈1（{format_price(tp1)}）")
             push = True
-        elif current_price <= tp1:
+        elif effective_low <= tp1:
             status = "🟢 止盈1達標"
-            action = f"✅ 已達止盈1，<b>建議平倉50%</b>，止損下移至成本（{format_price(entry)}）"
+            action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈1 {format_price(tp1)}，"
+                      f"現價 {format_price(current_price)}｜<b>建議平倉50%</b>，止損下移至成本（{format_price(entry)}）")
             push = True
         elif dist_to_sl_pct < 0.5:
             status = "⚠️ 接近止損"
-            action = f"⚠️ 距止損僅 {dist_to_sl_pct:.2f}%，<b>建議收緊止損或現價平倉</b>"
+            action = f"⚠️ 距止損僅 {dist_to_sl_pct:.2f}%，現價 {format_price(current_price)}｜<b>建議收緊止損或現價平倉</b>"
             push = True
         else:
             status = "🔄 持倉中"
@@ -943,16 +988,17 @@ def scan_worker_thread(msg_title, target_chat_id):
                 )
                 if not exists:
                     active_positions.append({
-                        'asset':       sig['asset'],
-                        'dir':         sig['dir'],
-                        'tf':          sig['tf'],
-                        'entry':       sig['entry'],
-                        'sl':          sig['sl'],
-                        'tp1':         sig['tp1'],
-                        'tp2':         sig['tp2'],
-                        'tp3':         sig['tp3'],
-                        'reported_at': now_ts,
-                        'filled':      False,   # 限價單尚未成交
+                        'asset':            sig['asset'],
+                        'dir':              sig['dir'],
+                        'tf':               sig['tf'],
+                        'entry':            sig['entry'],
+                        'sl':               sig['sl'],
+                        'tp1':              sig['tp1'],
+                        'tp2':              sig['tp2'],
+                        'tp3':              sig['tp3'],
+                        'reported_at':      now_ts,
+                        'last_checked_ts':  now_ts,   # 用於 K 線高低點回顧
+                        'filled':           False,    # 限價單尚未成交
                     })
         print(f"📌 已加入持倉監控，目前追蹤 {len(active_positions)} 筆")
     else:
