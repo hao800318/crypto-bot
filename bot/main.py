@@ -125,6 +125,9 @@ def run_strategy_scan():
     all_signals = []
 
     total = len(all_assets)
+    scan_start = time.time()
+    print(f"⏱️ 掃描開始時間：{datetime.datetime.now().strftime('%H:%M:%S')}")
+
     for idx, asset in enumerate(all_assets, 1):
         print(f"\r🔍 正在掃描全網標的 [{idx}/{total}]: {asset}...", end="", flush=True)
         for tf in ["1h", "4h"]:
@@ -132,7 +135,8 @@ def run_strategy_scan():
             if res:
                 all_signals.append(res)
 
-    print("\n✨ 全網掃描完畢！正在依勝率權選最強 5 大資產...")
+    elapsed = time.time() - scan_start
+    print(f"\n✨ 全網掃描完畢！耗時：{elapsed:.1f} 秒（共 {total} 支幣種 × 2 時框）")
 
     # 🎯 核心過濾：根據量化勝率評分（score）從大到小排序，只取前 5 名
     all_signals.sort(key=lambda x: x['score'], reverse=True)
