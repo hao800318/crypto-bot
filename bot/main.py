@@ -417,9 +417,41 @@ def run_position_monitor():
     to_remove = []
 
     for pos in positions:
-        # 超過 24 小時自動過期
         age_hours = (time.time() - pos['reported_at']) / 3600
+
+        # 超過 24 小時 → 發出最後警告再移除
         if age_hours > 24:
+            inst_id = pos['asset'] + '-USDT-SWAP'
+            current_price = get_current_price(inst_id)
+            oi_change = get_open_interest_change(inst_id)
+            fr, ls_ratio = get_market_sentiment(inst_id)
+            price_str = format_price(current_price) if current_price else "無法取得"
+
+            if current_price:
+                if pos['dir'] == "多":
+                    pnl_pct = (current_price - pos['entry']) / pos['entry'] * 100
+                    trend = "獲利中" if pnl_pct > 0 else "虧損中"
+                else:
+                    pnl_pct = (pos['entry'] - current_price) / pos['entry'] * 100
+                    trend = "獲利中" if pnl_pct > 0 else "虧損中"
+                pnl_label = f"{'📈' if pnl_pct > 0 else '📉'} {trend} {pnl_pct:+.2f}%"
+            else:
+                pnl_label = "無法計算損益"
+
+            if oi_change < -3 or (pos['dir'] == "多" and ls_ratio < 0.95) or (pos['dir'] == "空" and ls_ratio > 1.05):
+                recommendation = "⚠️ 主力動向偏向不利，<b>建議現價平倉</b>，勿繼續持有"
+            elif abs(pnl_pct if current_price else 0) < 0.5:
+                recommendation = "🔄 盤整超過 24 小時，趨勢動能減弱，<b>建議計劃性平倉 50% 降低風險</b>"
+            elif pnl_pct > 0:
+                recommendation = f"✅ 目前獲利，建議<b>止損移至成本保護利潤</b>，剩餘倉位等待止盈2"
+            else:
+                recommendation = "⛔ 虧損超過 24 小時未止損，<b>建議立即平倉停損</b>，等待下次訊號"
+
+            expiry_alert = (pos, f"⏰ 持倉超過24H",
+                f"現價：<code>{price_str}</code>  {pnl_label}\n"
+                f"   OI變化：{oi_change:+.1f}% | 多空比：{ls_ratio:.2f}\n"
+                f"   {recommendation}")
+            alerts.append(expiry_alert)
             to_remove.append(pos)
             continue
 
@@ -550,7 +582,7 @@ def scan_worker_thread(msg_title, target_chat_id):
         if resp.json().get("ok"):
             print(f"✅ 「盤面冷靜」訊息發送成功")
 
-def send_positions_summary(chat_id):
+def send_holding_summary(chat_id):
     """發送目前所有活躍持倉的狀態總覽"""
     with active_positions_lock:
         positions = list(active_positions)
@@ -628,9 +660,9 @@ def handle_telegram_updates():
                             t.daemon = True
                             t.start()
 
-                        elif text.startswith("/positions"):
-                            print(f"📋 收到 /positions 指令")
-                            t = threading.Thread(target=send_positions_summary, args=(chat_id,))
+                        elif text.startswith("/holding"):
+                            print(f"📋 收到 /holding 指令")
+                            t = threading.Thread(target=send_holding_summary, args=(chat_id,))
                             t.daemon = True
                             t.start()
 
