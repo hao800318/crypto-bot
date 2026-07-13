@@ -177,17 +177,28 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         messages = chunks
 
     text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    for msg in messages:
-        requests.post(text_url, json={"chat_id": str(target_chat_id), "text": msg, "parse_mode": "HTML"})
+    for i, msg in enumerate(messages):
+        resp = requests.post(text_url, json={"chat_id": str(target_chat_id), "text": msg, "parse_mode": "HTML"})
+        result = resp.json()
+        if result.get("ok"):
+            print(f"✅ 訊息 {i+1}/{len(messages)} 發送成功 → chat_id={target_chat_id}")
+        else:
+            print(f"❌ 訊息 {i+1}/{len(messages)} 發送失敗：{result}")
 
 # ==================== 📡 5. 原生無衝突監聽引擎 ====================
 def scan_worker_thread(msg_title, target_chat_id):
     valid_signals = run_strategy_scan()
+    print(f"📊 掃描結果：共找到 {len(valid_signals)} 組信號，準備發送至 chat_id={target_chat_id}")
     if valid_signals:
         send_html_report_via_requests(valid_signals, mode_title=msg_title, target_chat_id=target_chat_id)
     else:
         text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(text_url, json={"chat_id": str(target_chat_id), "text": "📭 全網通掃完畢，當前盤面極其冷靜，暫無新交叉信號。"})
+        resp = requests.post(text_url, json={"chat_id": str(target_chat_id), "text": "📭 全網通掃完畢，當前盤面極其冷靜，暫無新交叉信號。"})
+        result = resp.json()
+        if result.get("ok"):
+            print(f"✅ 「盤面冷靜」訊息發送成功")
+        else:
+            print(f"❌ 「盤面冷靜」訊息發送失敗：{result}")
 
 def handle_telegram_updates():
     print("🤖 幣圈分析師【Replit專屬·全網長短線無衝突版】雷達正在開機...")
