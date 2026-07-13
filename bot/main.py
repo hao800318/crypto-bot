@@ -719,7 +719,9 @@ def analyze_position(pos):
         full_action += f"\n{whale_warn}"
 
     # 加入 OI/多空比 狀態補充
-    full_action += f"\n📊 主力資料：OI變化{oi_change:+.1f}% | 多空比{ls_ratio:.2f} | 費率{fr*100:.4f}%"
+    long_pct  = round(ls_ratio / (ls_ratio + 1) * 100)
+    short_pct = 100 - long_pct
+    full_action += f"\n📊 主力資料：OI變化{oi_change:+.1f}% | 多{long_pct}%:空{short_pct}% | 費率{fr*100:.4f}%"
 
     # ── 累計記錄 TP 達標旗標（只增不減，跨監控週期保留）──
     if pos.get('filled'):
