@@ -942,46 +942,49 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
     la_tz = pytz.timezone('America/Los_Angeles')
     now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
 
-    html_message = f"🎯 <b>【幣圈分析師 終極精選版 - {mode_title}】</b>\n"
-    html_message += f"🔥 <b>戰術核心</b>：<code>MA8/EMA89交叉 ＋ RSI勝率 ＋ 主力動向確認</code>\n"
-    html_message += f"⏰ <b>監控時間</b>：<code>{now_str}</code> (加州太平洋時間 PT)\n"
-    html_message += "───────────────────────\n\n"
-    html_message += f"📋 <b>當前全網勝率最高【精選 5 強方案】（依勝率由高到低排序）：</b>\n\n"
+    html_message = f"<b>【{mode_title}】</b>  <code>{now_str} PT</code>\n"
+    html_message += "─────────────────────────\n"
 
     for idx, item in enumerate(valid_signals, 1):
         win_rate = item.get('win_rate', 70)
-        # 勝率星級
-        if win_rate >= 88:
-            stars = "⭐⭐⭐⭐⭐"
-        elif win_rate >= 82:
-            stars = "⭐⭐⭐⭐"
-        elif win_rate >= 75:
-            stars = "⭐⭐⭐"
-        elif win_rate >= 65:
-            stars = "⭐⭐"
-        else:
-            stars = "⭐"
+        if win_rate >= 88:   stars = "⭐⭐⭐⭐⭐"
+        elif win_rate >= 82: stars = "⭐⭐⭐⭐"
+        elif win_rate >= 75: stars = "⭐⭐⭐"
+        elif win_rate >= 65: stars = "⭐⭐"
+        else:                stars = "⭐"
 
         adx_val = item.get('adx', 0)
         vol_ok  = item.get('vol_confirmed', False)
-        vol_tag = "✅量能確認" if vol_ok else "⚠️量能偏低"
-        adx_tag = f"ADX {adx_val}"
+        vol_tag = "量能✅" if vol_ok else "量能⚠️"
+        medal   = ["🥇","🥈","🥉","#4","#5"][idx-1]
 
-        dir_display = "🟢 <b>做多</b>" if item['dir'] == "多" else "🔴 <b>做空</b>"
-        html_message += f"{'🥇' if idx==1 else '🥈' if idx==2 else '🥉' if idx==3 else '🔹'} <b>#{idx} {item['asset']}</b>  {dir_display}  <b>{item['leverage']} 【{item['order_type']} | {item['tf']}】</b>\n"
-        html_message += f"   • 🏆 <b>預估勝率</b>：<code>{win_rate}%</code>  {stars}\n"
-        html_message += f"   • 📈 <b>趨勢強度</b>：<code>{adx_tag}</code>  <code>{vol_tag}</code>\n"
-        html_message += f"   • 📡 <b>主力動向</b>：<code>{item['sentiment_note']}</code>\n"
-        html_message += f"   • 📊 <b>進場策略判定</b>：<code>{item['entry_type']}</code>\n"
-        html_message += f"   • 📝 <b>建議進場點位</b>：<code>{format_price(item['entry'])}</code>\n"
-        html_message += f"   • 🟢 <b>止盈 1 (平倉 50%)</b>：<code>{format_price(item['tp1'])}</code>\n"
-        html_message += f"   • 🔵 <b>止盈 2 (平倉 30%)</b>：<code>{format_price(item['tp2'])}</code>\n"
-        html_message += f"   • 🟣 <b>止盈 3 (平倉 20%)</b>：<code>{format_price(item['tp3'])}</code>\n"
-        html_message += f"   • 🔴 <b>ATR動態止損位</b>：<code>{format_price(item['sl'])}</code>\n\n"
+        # 方向：用顏色+文字，不堆疊其他圖示
+        dir_display = "🟢 <b>多</b>" if item['dir'] == "多" else "🔴 <b>空</b>"
 
-    html_message += "───────────────────────\n"
-    html_message += "💡 <i>勝率 = RSI ＋ 成交量 ＋ 多時框 ＋ 主力動向 ＋ BTC方向 綜合計算</i>\n"
-    html_message += "⚠️ <i>槓桿僅供參考，請依個人風險承受能力調整。</i>"
+        # 主力動向精簡（去掉長串說明，只保留關鍵數字）
+        sentiment = item.get('sentiment_note','')
+        fr_match  = next((p for p in sentiment.split('，') if '費率' in p), '')
+        ls_match  = next((p for p in sentiment.split('，') if '多空比' in p), '')
+        sentiment_short = f"{fr_match} {ls_match}".strip('，').strip()
+
+        # ── 標題行 ──
+        html_message += (f"{medal} <b>{item['asset']}</b>  {dir_display}  "
+                         f"<b>{item['leverage']}</b>  {item['tf']}  "
+                         f"<b>{win_rate}%</b> {stars}\n")
+        # ── 趨勢 + 主力 ──
+        html_message += f"ADX {adx_val}  {vol_tag}  |  {sentiment_short}\n"
+        # ── 進場 / 止損 ──
+        html_message += (f"進場 <code>{format_price(item['entry'])}</code>   "
+                         f"止損 <code>{format_price(item['sl'])}</code>\n")
+        # ── TP ──
+        html_message += (f"TP1 <code>{format_price(item['tp1'])}</code>  "
+                         f"TP2 <code>{format_price(item['tp2'])}</code>  "
+                         f"TP3 <code>{format_price(item['tp3'])}</code>\n")
+        # ── TP1後止損提示 ──
+        html_message += f"▸ TP1達標後，止損移至開倉位 <code>{format_price(item['entry'])}</code>\n"
+        html_message += "─────────────────────────\n"
+
+    html_message += "<i>勝率 = RSI＋成交量＋多時框＋主力動向＋BTC方向  |  槓桿僅供參考</i>"
 
     text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     resp = requests.post(text_url, json={"chat_id": str(target_chat_id), "text": html_message, "parse_mode": "HTML"})
