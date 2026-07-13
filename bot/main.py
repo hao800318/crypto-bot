@@ -961,7 +961,7 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         medal   = ["🥇","🥈","🥉","#4","#5"][idx-1]
 
         # 方向：用顏色+文字，不堆疊其他圖示
-        dir_display = "🟢 <b>多</b>" if item['dir'] == "多" else "🔴 <b>空</b>"
+        dir_display = "🟩<b>多</b>" if item['dir'] == "多" else "🟥<b>空</b>"
 
         # 主力動向精簡（去掉長串說明，只保留關鍵數字）
         sentiment = item.get('sentiment_note','')
