@@ -154,36 +154,46 @@ def fetch_candle_sync(asset, tf):
                 order_type = "短線單" if tf == "1h" else "長線單"
                 tf_tag = "1H短線" if tf == "1h" else "4H長線"
 
-                if direction == "多":
-                    if current_rsi > 65:
-                        entry_price = (current_price + current_ema89) / 2
-                        entry_type = f"⚠️ {tf_tag}過熱，建議等回調多單掛接"
-                        sl_price = current_ema89 * 0.985
-                        tp1 = entry_price * 1.030
-                        tp2 = entry_price * 1.060
-                        tp3 = entry_price * 1.100
-                    else:
-                        entry_price = current_price
-                        entry_type = f"🚀 {tf_tag}動能健康，回調機率小，可現價追多"
-                        sl_price = entry_price * 0.985
-                        tp1 = entry_price * 1.015
-                        tp2 = entry_price * 1.030
-                        tp3 = entry_price * 1.050
+                # ─── 錨定進場點邏輯 ───
+                # 1H：交叉後短線回踩 MA8 是最佳掛單位（指標值穩定，不隨 tick 跳動）
+                # 4H：交叉後大週期通常回踩 EMA89 才是真正安全進場位
+                current_ma8 = c_last['MA8']
+
+                if tf == "1h":
+                    anchor_entry = current_ma8       # 1H 掛 MA8
+                    anchor_label = f"MA8={format_price(current_ma8)}"
+                    sl_pct_long  = 0.985             # 止損在 MA8 下方 1.5%
+                    sl_pct_short = 1.015
+                    tp_ratios_long  = (1.015, 1.030, 1.050)
+                    tp_ratios_short = (0.985, 0.970, 0.950)
                 else:
-                    if current_rsi < 35:
-                        entry_price = (current_price + current_ema89) / 2
-                        entry_type = f"⚠️ {tf_tag}超賣，建議等反彈高空掛接"
-                        sl_price = current_ema89 * 1.015
-                        tp1 = entry_price * 0.970
-                        tp2 = entry_price * 0.940
-                        tp3 = entry_price * 0.900
+                    anchor_entry = current_ema89     # 4H 掛 EMA89
+                    anchor_label = f"EMA89={format_price(current_ema89)}"
+                    sl_pct_long  = 0.982             # 止損在 EMA89 下方 1.8%
+                    sl_pct_short = 1.018
+                    tp_ratios_long  = (1.030, 1.060, 1.100)
+                    tp_ratios_short = (0.970, 0.940, 0.900)
+
+                if direction == "多":
+                    entry_price = anchor_entry
+                    if current_rsi > 65:
+                        entry_type = f"⚠️ {tf_tag}RSI過熱({current_rsi:.1f})，掛限價等回踩 {anchor_label}"
                     else:
-                        entry_price = current_price
-                        entry_type = f"🚀 {tf_tag}空頭動能強，回彈機率小，可現價空"
-                        sl_price = entry_price * 1.015
-                        tp1 = entry_price * 0.985
-                        tp2 = entry_price * 0.970
-                        tp3 = entry_price * 0.950
+                        entry_type = f"📌 {tf_tag}掛限價單於 {anchor_label}（交叉後回踩最佳位）"
+                    sl_price = entry_price * sl_pct_long
+                    tp1 = entry_price * tp_ratios_long[0]
+                    tp2 = entry_price * tp_ratios_long[1]
+                    tp3 = entry_price * tp_ratios_long[2]
+                else:
+                    entry_price = anchor_entry
+                    if current_rsi < 35:
+                        entry_type = f"⚠️ {tf_tag}RSI超賣({current_rsi:.1f})，掛限價等反彈至 {anchor_label}"
+                    else:
+                        entry_type = f"📌 {tf_tag}掛限價單於 {anchor_label}（交叉後反彈最佳位）"
+                    sl_price = entry_price * sl_pct_short
+                    tp1 = entry_price * tp_ratios_short[0]
+                    tp2 = entry_price * tp_ratios_short[1]
+                    tp3 = entry_price * tp_ratios_short[2]
 
                 return {
                     "asset": asset.split('-')[0],
