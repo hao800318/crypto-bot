@@ -267,7 +267,203 @@ def run_strategy_scan():
     print(f"📊 掃描結果：共找到 {len(all_signals)} 組信號，精選前 {len(top_5_signals)} 名")
     return top_5_signals
 
-# ==================== 🚀 5. 動態精度渲染發送引擎 ====================
+# ==================== 📊 5. 持倉監控系統 ====================
+active_positions = []          # 儲存已播報的訊號
+active_positions_lock = threading.Lock()
+
+def get_current_price(inst_id):
+    try:
+        url = f"{BASE_URL}/api/v5/market/ticker?instId={inst_id}"
+        res = requests.get(url, timeout=3).json()
+        if res.get('code') == '0':
+            return float(res['data'][0]['last'])
+    except:
+        pass
+    return None
+
+def get_open_interest_change(inst_id):
+    """回傳最近兩筆 OI 的變化率（正=OI增加=主力加倉，負=OI減少=主力撤退）"""
+    try:
+        url = f"{BASE_URL}/api/v5/rubik/stat/contracts/open-interest-volume?instId={inst_id}&period=1H"
+        res = requests.get(url, timeout=3).json()
+        if res.get('code') == '0' and len(res.get('data', [])) >= 2:
+            oi_new = float(res['data'][0][1])
+            oi_old = float(res['data'][1][1])
+            if oi_old > 0:
+                return (oi_new - oi_old) / oi_old * 100
+    except:
+        pass
+    return 0.0
+
+def get_volume_spike(inst_id):
+    """比較最新 1H 成交量 vs 過去 5 根均值，>2倍視為異常量能"""
+    try:
+        url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar=1H&limit=6"
+        res = requests.get(url, timeout=3).json()
+        if res.get('code') == '0' and len(res['data']) >= 6:
+            vols = [float(r[5]) for r in res['data']]
+            latest_vol = vols[0]
+            avg_vol = sum(vols[1:]) / 5
+            if avg_vol > 0:
+                return latest_vol / avg_vol
+    except:
+        pass
+    return 1.0
+
+def analyze_position(pos):
+    """分析持倉狀態，回傳 (狀態標籤, 建議訊息, 是否需要推送)"""
+    inst_id = pos['asset'] + '-USDT-SWAP'
+    current_price = get_current_price(inst_id)
+    if current_price is None:
+        return None, None, False
+
+    dir   = pos['dir']
+    entry = pos['entry']
+    sl    = pos['sl']
+    tp1   = pos['tp1']
+    tp2   = pos['tp2']
+    tp3   = pos['tp3']
+
+    oi_change  = get_open_interest_change(inst_id)
+    vol_spike  = get_volume_spike(inst_id)
+    fr, ls_ratio = get_market_sentiment(inst_id)
+
+    # ── 主力異常信號判斷 ──
+    whale_warn = ""
+    if vol_spike >= 2.5:
+        whale_warn = f"⚡ 異常量能！成交量是均量 {vol_spike:.1f} 倍"
+    if oi_change < -5:
+        whale_warn += f"\n📉 OI 下降 {oi_change:.1f}%，主力正在撤退"
+    elif oi_change > 5:
+        whale_warn += f"\n📈 OI 上升 {oi_change:.1f}%，主力持續加倉"
+
+    # ── 持倉狀態判定 ──
+    if dir == "多":
+        dist_to_sl_pct = (current_price - sl) / entry * 100
+        if current_price <= sl:
+            status = "🔴 止損觸發"
+            action = f"⛔ 已觸及止損位 {format_price(sl)}，<b>建議立即平倉</b>"
+            push = True
+        elif current_price >= tp3:
+            status = "🟣 全部止盈"
+            action = f"🎯 已達止盈3 {format_price(tp3)}，<b>建議全數平倉</b>"
+            push = True
+        elif current_price >= tp2:
+            status = "🔵 止盈2達標"
+            action = f"✅ 已達止盈2，<b>建議再平倉30%</b>，止損上移至止盈1（{format_price(tp1)}）"
+            push = True
+        elif current_price >= tp1:
+            status = "🟢 止盈1達標"
+            action = f"✅ 已達止盈1，<b>建議平倉50%</b>，止損上移至成本（{format_price(entry)}）"
+            push = True
+        elif dist_to_sl_pct < 0.5:
+            status = "⚠️ 接近止損"
+            action = f"⚠️ 距止損僅 {dist_to_sl_pct:.2f}%，<b>建議收緊止損或現價平倉</b>"
+            push = True
+        else:
+            # 無重大事件，只在有巨鯨異常時推送
+            status = "🔄 持倉中"
+            action = f"持倉正常，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%"
+            push = bool(whale_warn)
+    else:  # 空
+        dist_to_sl_pct = (sl - current_price) / entry * 100
+        if current_price >= sl:
+            status = "🔴 止損觸發"
+            action = f"⛔ 已觸及止損位 {format_price(sl)}，<b>建議立即平倉</b>"
+            push = True
+        elif current_price <= tp3:
+            status = "🟣 全部止盈"
+            action = f"🎯 已達止盈3 {format_price(tp3)}，<b>建議全數平倉</b>"
+            push = True
+        elif current_price <= tp2:
+            status = "🔵 止盈2達標"
+            action = f"✅ 已達止盈2，<b>建議再平倉30%</b>，止損下移至止盈1（{format_price(tp1)}）"
+            push = True
+        elif current_price <= tp1:
+            status = "🟢 止盈1達標"
+            action = f"✅ 已達止盈1，<b>建議平倉50%</b>，止損下移至成本（{format_price(entry)}）"
+            push = True
+        elif dist_to_sl_pct < 0.5:
+            status = "⚠️ 接近止損"
+            action = f"⚠️ 距止損僅 {dist_to_sl_pct:.2f}%，<b>建議收緊止損或現價平倉</b>"
+            push = True
+        else:
+            status = "🔄 持倉中"
+            action = f"持倉正常，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%"
+            push = bool(whale_warn)
+
+    full_action = action
+    if whale_warn:
+        full_action += f"\n{whale_warn}"
+
+    # 加入 OI/多空比 狀態補充
+    full_action += f"\n📊 主力資料：OI變化{oi_change:+.1f}% | 多空比{ls_ratio:.2f} | 費率{fr*100:.4f}%"
+
+    return status, full_action, push
+
+def run_position_monitor():
+    """每小時 xx:30 執行，監控所有活躍持倉"""
+    with active_positions_lock:
+        positions = list(active_positions)
+
+    if not positions:
+        print("📭 無活躍持倉需要監控")
+        return
+
+    la_tz = pytz.timezone('America/Los_Angeles')
+    now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
+
+    alerts = []
+    to_remove = []
+
+    for pos in positions:
+        # 超過 24 小時自動過期
+        age_hours = (time.time() - pos['reported_at']) / 3600
+        if age_hours > 24:
+            to_remove.append(pos)
+            continue
+
+        status, action, push = analyze_position(pos)
+        if status is None:
+            continue
+
+        if push:
+            alerts.append((pos, status, action))
+
+        # 止損觸發或全部止盈 → 移除追蹤
+        if status in ("🔴 止損觸發", "🟣 全部止盈"):
+            to_remove.append(pos)
+
+    # 清理過期 / 已結束的持倉
+    with active_positions_lock:
+        for p in to_remove:
+            if p in active_positions:
+                active_positions.remove(p)
+
+    if not alerts:
+        print(f"✅ 持倉監控完成，{len(positions)} 筆持倉狀態正常")
+        return
+
+    # 發送警報
+    msg = f"🔔 <b>【持倉監控警報 - {now_str} PT】</b>\n"
+    msg += f"📋 <b>共監控 {len(positions)} 筆持倉，{len(alerts)} 筆需注意：</b>\n"
+    msg += "───────────────────────\n\n"
+
+    for pos, status, action in alerts:
+        msg += f"<b>{pos['asset']} ({pos['dir']}) {pos['tf']}</b>  {status}\n"
+        msg += f"   進場：<code>{format_price(pos['entry'])}</code>  止損：<code>{format_price(pos['sl'])}</code>\n"
+        msg += f"   {action}\n\n"
+
+    msg += "───────────────────────\n⚠️ <i>以上為自動監控建議，請結合自身判斷操作。</i>"
+
+    text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    resp = requests.post(text_url, json={"chat_id": str(TELEGRAM_CHAT_ID), "text": msg, "parse_mode": "HTML"})
+    if resp.json().get("ok"):
+        print(f"✅ 持倉監控警報已發送（{len(alerts)} 筆）")
+    else:
+        print(f"❌ 持倉監控警報發送失敗：{resp.json()}")
+
+# ==================== 🚀 6. 動態精度渲染發送引擎 ====================
 def format_price(p):
     if p == 0: return "0.00"
     if p >= 1: return f"{p:,.2f}" if p >= 100 else f"{p:,.4f}"
@@ -324,29 +520,76 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
     else:
         print(f"❌ 報告發送失敗：{result}")
 
-# ==================== 📡 6. 原生無衝突監聽引擎 ====================
+# ==================== 📡 7. 原生無衝突監聽引擎 ====================
 def scan_worker_thread(msg_title, target_chat_id):
     valid_signals = run_strategy_scan()
     if valid_signals:
         send_html_report_via_requests(valid_signals, mode_title=msg_title, target_chat_id=target_chat_id)
+        # 儲存已播報的訊號進持倉監控清單
+        now_ts = time.time()
+        with active_positions_lock:
+            for sig in valid_signals:
+                # 避免重複加入同幣同方向
+                exists = any(p['asset'] == sig['asset'] and p['dir'] == sig['dir'] for p in active_positions)
+                if not exists:
+                    active_positions.append({
+                        'asset':       sig['asset'],
+                        'dir':         sig['dir'],
+                        'tf':          sig['tf'],
+                        'entry':       sig['entry'],
+                        'sl':          sig['sl'],
+                        'tp1':         sig['tp1'],
+                        'tp2':         sig['tp2'],
+                        'tp3':         sig['tp3'],
+                        'reported_at': now_ts,
+                    })
+        print(f"📌 已加入持倉監控，目前追蹤 {len(active_positions)} 筆")
     else:
         text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         resp = requests.post(text_url, json={"chat_id": str(target_chat_id), "text": "📭 全網通掃完畢，當前盤面極其冷靜，暫無符合勝率條件之信號。"})
-        result = resp.json()
-        if result.get("ok"):
+        if resp.json().get("ok"):
             print(f"✅ 「盤面冷靜」訊息發送成功")
-        else:
-            print(f"❌ 「盤面冷靜」訊息發送失敗：{result}")
+
+def send_positions_summary(chat_id):
+    """發送目前所有活躍持倉的狀態總覽"""
+    with active_positions_lock:
+        positions = list(active_positions)
+
+    if not positions:
+        text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        requests.post(text_url, json={"chat_id": chat_id, "text": "📭 目前沒有追蹤中的持倉。請先執行 /scan 產生訊號。"})
+        return
+
+    la_tz = pytz.timezone('America/Los_Angeles')
+    now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
+    msg = f"📋 <b>【持倉監控總覽 - {now_str} PT】</b>\n"
+    msg += f"共追蹤 <b>{len(positions)}</b> 筆持倉：\n"
+    msg += "───────────────────────\n\n"
+
+    for pos in positions:
+        age_h = (time.time() - pos['reported_at']) / 3600
+        status, action, _ = analyze_position(pos)
+        if status is None:
+            status, action = "❓ 無法取得", "無法取得現價"
+        msg += f"<b>{pos['asset']} ({pos['dir']}) {pos['tf']}</b>  {status}  <i>({age_h:.1f}h前播報)</i>\n"
+        msg += f"   {action}\n\n"
+
+    msg += "───────────────────────\n💡 <i>持倉監控每小時 xx:30 自動推送警報</i>"
+    text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    requests.post(text_url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"})
 
 def handle_telegram_updates():
-    print("🤖 幣圈分析師【勝率精選 5 幣版 + 主力動向確認版】雷達正在開機...")
+    print("🤖 幣圈分析師【勝率精選 5 幣版 + 主力動向確認 + 持倉監控版】雷達正在開機...")
     offset = None
     la_tz = pytz.timezone('America/Los_Angeles')
     last_reported_hour = -1
+    last_monitor_hour  = -1
 
     while True:
         try:
             now_la = datetime.datetime.now(la_tz)
+
+            # A. 定時播報（整點）
             if now_la.hour in SCHEDULE_HOURS and now_la.minute == 0 and now_la.hour != last_reported_hour:
                 print(f"🔔 觸發加州整點定時播報：{now_la.hour}:00")
                 t = threading.Thread(target=scan_worker_thread, args=("設定節點定時速報", TELEGRAM_CHAT_ID))
@@ -354,6 +597,15 @@ def handle_telegram_updates():
                 t.start()
                 last_reported_hour = now_la.hour
 
+            # B. 持倉監控（每小時 xx:30）
+            if now_la.minute == 30 and now_la.hour != last_monitor_hour:
+                print(f"🔍 觸發持倉監控：{now_la.hour}:30")
+                t = threading.Thread(target=run_position_monitor)
+                t.daemon = True
+                t.start()
+                last_monitor_hour = now_la.hour
+
+            # C. 手動指令監聽
             get_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
             params = {"timeout": 2}
             if offset:
@@ -369,10 +621,16 @@ def handle_telegram_updates():
                         chat_id = str(msg["chat"]["id"])
 
                         if text.startswith("/scan"):
-                            print(f"⚡ 收到手動口令！啟動勝率精選獨立執行緒...")
+                            print(f"⚡ 收到 /scan 指令")
                             confirm_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
                             requests.post(confirm_url, json={"chat_id": chat_id, "text": "⚡ 收到指令！正在進行全網掃描 + 主力動向確認，精選勝率最高 5 標的，請稍候約 15 秒..."})
                             t = threading.Thread(target=scan_worker_thread, args=("手動現場突擊播報", chat_id))
+                            t.daemon = True
+                            t.start()
+
+                        elif text.startswith("/positions"):
+                            print(f"📋 收到 /positions 指令")
+                            t = threading.Thread(target=send_positions_summary, args=(chat_id,))
                             t.daemon = True
                             t.start()
 
