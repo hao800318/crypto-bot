@@ -22,7 +22,6 @@ if not TELEGRAM_CHAT_ID:
 
 # ==================== 🗂️ 2. OKX 官方全量資產動態抓取 ====================
 def get_all_okx_swap_assets():
-    """動態獲取 OKX 當前在線的所有 USDT 永續合約，實現真正的全幣種掃描"""
     url = f"{BASE_URL}/api/v5/public/instruments?instType=SWAP"
     try:
         res = requests.get(url, timeout=5).json()
@@ -34,7 +33,78 @@ def get_all_okx_swap_assets():
         print(f"⚠️ 動態獲取資產庫失敗: {e}")
     return ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "TON-USDT-SWAP", "ARB-USDT-SWAP"]
 
-# ==================== ⚙️ 3. 同步 K 線與勝率量化評分核心 ====================
+# ==================== 📡 3. 主力動向：資金費率 + 多空持倉比 ====================
+def get_market_sentiment(asset):
+    """
+    獲取 OKX 主力資金費率 + 多空持倉比（主力動向指標）
+    - funding_rate > 0：多方付費，市場偏多；< 0：空方付費，市場偏空
+    - ls_ratio > 1：多方持倉多於空方；< 1：空方較多
+    """
+    funding_rate = 0.0
+    ls_ratio = 1.0
+
+    try:
+        fr_url = f"{BASE_URL}/api/v5/public/funding-rate?instId={asset}"
+        fr_res = requests.get(fr_url, timeout=2.0).json()
+        if fr_res.get('code') == '0' and fr_res.get('data'):
+            funding_rate = float(fr_res['data'][0]['fundingRate'])
+    except:
+        pass
+
+    try:
+        ls_url = f"{BASE_URL}/api/v5/rubik/stat/contracts/long-short-account-ratio?instId={asset}&period=5m"
+        ls_res = requests.get(ls_url, timeout=2.0).json()
+        if ls_res.get('code') == '0' and ls_res.get('data'):
+            ls_ratio = float(ls_res['data'][0][1])
+    except:
+        pass
+
+    return funding_rate, ls_ratio
+
+def build_sentiment_note(direction, funding_rate, ls_ratio):
+    """根據主力動向生成說明文字與評分加減"""
+    fr_pct = funding_rate * 100
+    bonus = 0
+    if direction == "多":
+        if funding_rate > 0.0001 and ls_ratio >= 1.05:
+            note = f"📈 主力偏多（費率+{fr_pct:.4f}%，多空比{ls_ratio:.2f}）✅ 方向確認"
+            bonus = 12
+        elif funding_rate < -0.0001 and ls_ratio < 0.95:
+            note = f"⚠️ 主力偏空（費率{fr_pct:.4f}%，多空比{ls_ratio:.2f}）🔻 逆向風險"
+            bonus = -15
+        else:
+            note = f"🔄 主力中性（費率{fr_pct:.4f}%，多空比{ls_ratio:.2f}）"
+            bonus = 0
+    else:
+        if funding_rate < -0.0001 and ls_ratio <= 0.95:
+            note = f"📉 主力偏空（費率{fr_pct:.4f}%，多空比{ls_ratio:.2f}）✅ 方向確認"
+            bonus = 12
+        elif funding_rate > 0.0001 and ls_ratio > 1.05:
+            note = f"⚠️ 主力偏多（費率+{fr_pct:.4f}%，多空比{ls_ratio:.2f}）🔻 逆向風險"
+            bonus = -15
+        else:
+            note = f"🔄 主力中性（費率{fr_pct:.4f}%，多空比{ls_ratio:.2f}）"
+            bonus = 0
+    return note, bonus
+
+# ==================== ⚙️ 4. 同步 K 線與勝率量化評分核心 ====================
+def score_to_win_rate(score):
+    """將內部評分（0-112）映射為 50%–98% 勝率顯示"""
+    return min(98, max(50, int(50 + (score / 112) * 48)))
+
+def score_to_leverage(win_rate):
+    """勝率越高槓桿越大"""
+    if win_rate >= 88:
+        return "25x"
+    elif win_rate >= 82:
+        return "20x"
+    elif win_rate >= 75:
+        return "15x"
+    elif win_rate >= 65:
+        return "10x"
+    else:
+        return "5x"
+
 def fetch_candle_sync(asset, tf):
     bar_param = "1H" if tf == "1h" else "4H"
     url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={bar_param}&limit=100"
@@ -66,18 +136,23 @@ def fetch_candle_sync(asset, tf):
                 current_ema89 = c_last['EMA89']
                 direction = "多" if is_cross_up else "空"
 
-                # 🎯 計算黃金勝率權重評分（越接近健康動能區，權重分越高）
-                score = 0
+                # 🎯 RSI 勝率基礎評分
                 if direction == "多":
-                    # RSI 在 50 到 62 之間是最佳追多動能區，勝率最高
-                    score = 100 - abs(current_rsi - 56)
+                    base_score = 100 - abs(current_rsi - 56)
                 else:
-                    # RSI 在 38 到 50 之間是最佳追空動能區，勝率最高
-                    score = 100 - abs(current_rsi - 44)
+                    base_score = 100 - abs(current_rsi - 44)
+
+                # 📡 主力動向確認加分
+                funding_rate, ls_ratio = get_market_sentiment(asset)
+                sentiment_note, sentiment_bonus = build_sentiment_note(direction, funding_rate, ls_ratio)
+                score = base_score + sentiment_bonus
+
+                # 🏷️ 勝率 % 與動態槓桿
+                win_rate = score_to_win_rate(score)
+                leverage = score_to_leverage(win_rate)
 
                 order_type = "短線單" if tf == "1h" else "長線單"
                 tf_tag = "1H短線" if tf == "1h" else "4H長線"
-                leverage = "10x"
 
                 if direction == "多":
                     if current_rsi > 65:
@@ -111,21 +186,29 @@ def fetch_candle_sync(asset, tf):
                         tp3 = entry_price * 0.950
 
                 return {
-                    "asset": asset.split('-')[0], "dir": direction, "leverage": leverage,
-                    "tf": tf_tag, "order_type": order_type, "score": score,
-                    "entry": entry_price, "sl": sl_price, "tp1": tp1, "tp2": tp2, "tp3": tp3,
-                    "entry_type": entry_type
+                    "asset": asset.split('-')[0],
+                    "dir": direction,
+                    "leverage": leverage,
+                    "win_rate": win_rate,
+                    "tf": tf_tag,
+                    "order_type": order_type,
+                    "score": score,
+                    "entry": entry_price,
+                    "sl": sl_price,
+                    "tp1": tp1,
+                    "tp2": tp2,
+                    "tp3": tp3,
+                    "entry_type": entry_type,
+                    "sentiment_note": sentiment_note,
                 }
     except:
         pass
     return None
 
 def run_strategy_scan():
-    """並行掃描全網合約，精選勝率最高的 5 個訊號"""
     all_assets = get_all_okx_swap_assets()
     all_signals = []
 
-    # 展開成 (asset, tf) 任務列表
     tasks = [(asset, tf) for asset in all_assets for tf in ["1h", "4h"]]
     total = len(tasks)
     completed = 0
@@ -155,14 +238,13 @@ def run_strategy_scan():
     elapsed = time.time() - scan_start
     print(f"\n✨ 全網掃描完畢！耗時：{elapsed:.1f} 秒（共 {len(all_assets)} 支幣種 × 2 時框）")
 
-    # 🎯 核心過濾：根據量化勝率評分（score）從大到小排序，只取前 5 名
     all_signals.sort(key=lambda x: x['score'], reverse=True)
     top_5_signals = all_signals[:5]
 
     print(f"📊 掃描結果：共找到 {len(all_signals)} 組信號，精選前 {len(top_5_signals)} 名")
     return top_5_signals
 
-# ==================== 🚀 4. 動態精度渲染發送引擎 ====================
+# ==================== 🚀 5. 動態精度渲染發送引擎 ====================
 def format_price(p):
     if p == 0: return "0.00"
     if p >= 1: return f"{p:,.2f}" if p >= 100 else f"{p:,.4f}"
@@ -178,13 +260,28 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
     now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
 
     html_message = f"🎯 <b>【幣圈分析師 終極精選版 - {mode_title}】</b>\n"
-    html_message += f"🔥 <b>戰術核心</b>：<code>MA8/EMA89交叉 ＋ RSI勝率核心精選 5 🚀</code>\n"
+    html_message += f"🔥 <b>戰術核心</b>：<code>MA8/EMA89交叉 ＋ RSI勝率 ＋ 主力動向確認</code>\n"
     html_message += f"⏰ <b>監控時間</b>：<code>{now_str}</code> (加州太平洋時間 PT)\n"
     html_message += "───────────────────────\n\n"
-    html_message += f"📋 <b>當前全網勝率最高【精選 5 強方案】：</b>\n\n"
+    html_message += f"📋 <b>當前全網勝率最高【精選 5 強方案】（依勝率由高到低排序）：</b>\n\n"
 
     for idx, item in enumerate(valid_signals, 1):
-        html_message += f"🔥 <b>{idx}. {item['asset']} ({item['dir']}) {item['leverage']} 【{item['order_type']} | {item['tf']}】</b>\n"
+        win_rate = item.get('win_rate', 70)
+        # 勝率星級
+        if win_rate >= 88:
+            stars = "⭐⭐⭐⭐⭐"
+        elif win_rate >= 82:
+            stars = "⭐⭐⭐⭐"
+        elif win_rate >= 75:
+            stars = "⭐⭐⭐"
+        elif win_rate >= 65:
+            stars = "⭐⭐"
+        else:
+            stars = "⭐"
+
+        html_message += f"{'🥇' if idx==1 else '🥈' if idx==2 else '🥉' if idx==3 else '🔹'} <b>#{idx} {item['asset']} ({item['dir']}) {item['leverage']} 【{item['order_type']} | {item['tf']}】</b>\n"
+        html_message += f"   • 🏆 <b>預估勝率</b>：<code>{win_rate}%</code>  {stars}\n"
+        html_message += f"   • 📡 <b>主力動向</b>：<code>{item['sentiment_note']}</code>\n"
         html_message += f"   • 📊 <b>進場策略判定</b>：<code>{item['entry_type']}</code>\n"
         html_message += f"   • 📝 <b>建議進場點位</b>：<code>{format_price(item['entry'])}</code>\n"
         html_message += f"   • 🟢 <b>止盈 1 (平倉 50%)</b>：<code>{format_price(item['tp1'])}</code>\n"
@@ -192,7 +289,9 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         html_message += f"   • 🟣 <b>止盈 3 (平倉 20%)</b>：<code>{format_price(item['tp3'])}</code>\n"
         html_message += f"   • 🔴 <b>硬防守止損位置</b>：<code>{format_price(item['sl'])}</code>\n\n"
 
-    html_message += "───────────────────────\n💡 <i>提示：所有數字皆已加上代碼塊，手機上「輕點數字」即可自動複製。</i>"
+    html_message += "───────────────────────\n"
+    html_message += "💡 <i>勝率 = RSI動能評分 ＋ 主力資金費率 ＋ 多空持倉比 綜合計算</i>\n"
+    html_message += "⚠️ <i>槓桿僅供參考，請依個人風險承受能力調整。</i>"
 
     text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     resp = requests.post(text_url, json={"chat_id": str(target_chat_id), "text": html_message, "parse_mode": "HTML"})
@@ -202,7 +301,7 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
     else:
         print(f"❌ 報告發送失敗：{result}")
 
-# ==================== 📡 5. 原生無衝突監聽引擎 ====================
+# ==================== 📡 6. 原生無衝突監聽引擎 ====================
 def scan_worker_thread(msg_title, target_chat_id):
     valid_signals = run_strategy_scan()
     if valid_signals:
@@ -217,14 +316,13 @@ def scan_worker_thread(msg_title, target_chat_id):
             print(f"❌ 「盤面冷靜」訊息發送失敗：{result}")
 
 def handle_telegram_updates():
-    print("🟢 最初代原生監聽引擎已滿血回歸！正在安全監聽指令...")
+    print("🤖 幣圈分析師【勝率精選 5 幣版 + 主力動向確認版】雷達正在開機...")
     offset = None
     la_tz = pytz.timezone('America/Los_Angeles')
     last_reported_hour = -1
 
     while True:
         try:
-            # A. 定時播報判定
             now_la = datetime.datetime.now(la_tz)
             if now_la.hour in SCHEDULE_HOURS and now_la.minute == 0 and now_la.hour != last_reported_hour:
                 print(f"🔔 觸發加州整點定時播報：{now_la.hour}:00")
@@ -233,7 +331,6 @@ def handle_telegram_updates():
                 t.start()
                 last_reported_hour = now_la.hour
 
-            # B. 手動口令拉取
             get_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
             params = {"timeout": 2}
             if offset:
@@ -251,8 +348,7 @@ def handle_telegram_updates():
                         if text.startswith("/scan"):
                             print(f"⚡ 收到手動口令！啟動勝率精選獨立執行緒...")
                             confirm_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                            requests.post(confirm_url, json={"chat_id": chat_id, "text": "⚡ 收到長短線全網交叉指令！正在為您挑選勝率最高的 5 種標的，請稍候約 15 秒..."})
-
+                            requests.post(confirm_url, json={"chat_id": chat_id, "text": "⚡ 收到指令！正在進行全網掃描 + 主力動向確認，精選勝率最高 5 標的，請稍候約 15 秒..."})
                             t = threading.Thread(target=scan_worker_thread, args=("手動現場突擊播報", chat_id))
                             t.daemon = True
                             t.start()
@@ -264,5 +360,5 @@ def handle_telegram_updates():
         time.sleep(1)
 
 if __name__ == '__main__':
-    print("🤖 幣圈分析師【Replit專屬·勝率精選 5 幣版】雷達正在開機...")
+    print("🤖 幣圈分析師【勝率精選 5 幣版 + 主力動向確認版】雷達正在開機...")
     handle_telegram_updates()
