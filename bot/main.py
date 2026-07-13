@@ -971,7 +971,7 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
 
         # ── 標題行 ──
         html_message += (f"{medal} <b>{item['asset']}</b>  {dir_display}  "
-                         f"<b>{item['leverage']}</b>  {item['tf']}  "
+                         f"⚡<b>{item['leverage']}</b>  {item['tf']}  "
                          f"<b>{win_rate}%</b> {stars}\n")
         # ── 趨勢 + 主力 ──
         html_message += f"趨勢 {adx_bar} <b>{adx_level}</b>  |  {sentiment_short}\n"
