@@ -604,13 +604,13 @@ def analyze_position(pos):
     # ── 主力異常信號判斷 ──
     whale_warn = ""
     if vol_spike >= 2.5:
-        whale_warn = f"⚡ 異常量能！成交量是均量 {vol_spike:.1f} 倍"
+        whale_warn = f"⚡ 異常量能！成交量是均量 {vol_spike:.1f} 倍，方向不確定，<b>建議收緊止損，暫勿加倉</b>"
     elif vol_spike < 0.5:
-        whale_warn = f"📉 量能萎縮（僅均量 {vol_spike*100:.0f}%），市場觀望，趨勢動能減弱，建議縮小倉位或收緊止損"
+        whale_warn = f"📉 量能萎縮（僅均量 {vol_spike*100:.0f}%），趨勢動能減弱，<b>建議縮小倉位或收緊止損</b>"
     if oi_change < -5:
-        whale_warn += f"\n📉 OI 下降 {oi_change:.1f}%，主力正在撤退"
+        whale_warn += f"\n📉 OI 下降 {oi_change:.1f}%，主力正在撤退，<b>建議部分平倉或收緊止損</b>"
     elif oi_change > 5:
-        whale_warn += f"\n📈 OI 上升 {oi_change:.1f}%，主力持續加倉"
+        whale_warn += f"\n📈 OI 上升 {oi_change:.1f}%，主力持續加倉，<b>可繼續持倉並同步上移止損鎖利</b>"
 
     # ── 持倉狀態判定（用 K 線高低點而非現價，防止監控間隔中的事件被漏掉）──
     if dir == "多":
