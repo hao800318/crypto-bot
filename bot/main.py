@@ -631,10 +631,22 @@ def analyze_position(pos):
                       f"現價 {format_price(current_price)}｜<b>建議再平倉30%</b>，止損上移至止盈1（{format_price(tp1)}）")
             push = True
         elif effective_high >= tp1:
-            status = "🟢 止盈1達標"
-            action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈1 {format_price(tp1)}，"
-                      f"現價 {format_price(current_price)}｜<b>建議平倉50%</b>，止損上移至成本（{format_price(entry)}）")
-            push = True
+            if pos.get('tp1_hit'):
+                # TP1 已在前次通知，本次靜默監控等待 TP2
+                status = "🟢 TP1已完成"
+                action = f"剩餘50%持倉中，等待TP2 <code>{format_price(tp2)}</code>，現價 {format_price(current_price)}"
+                deteri = check_market_deterioration(inst_id, dir, pos.get('tf','1H'))
+                if deteri:
+                    status = "🚨 局勢惡化"
+                    action += f"\n{deteri}"
+                    push = True
+                else:
+                    push = bool(whale_warn)
+            else:
+                status = "🟢 止盈1達標"
+                action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈1 {format_price(tp1)}，"
+                          f"現價 {format_price(current_price)}｜<b>建議平倉50%</b>，止損上移至成本（{format_price(entry)}）")
+                push = True
         elif dist_to_sl_pct < 0.5:
             status = "⚠️ 接近止損"
             action = f"⚠️ 距止損僅 {dist_to_sl_pct:.2f}%，現價 {format_price(current_price)}｜<b>建議收緊止損或現價平倉</b>"
@@ -669,10 +681,22 @@ def analyze_position(pos):
                       f"現價 {format_price(current_price)}｜<b>建議再平倉30%</b>，止損下移至止盈1（{format_price(tp1)}）")
             push = True
         elif effective_low <= tp1:
-            status = "🟢 止盈1達標"
-            action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈1 {format_price(tp1)}，"
-                      f"現價 {format_price(current_price)}｜<b>建議平倉50%</b>，止損下移至成本（{format_price(entry)}）")
-            push = True
+            if pos.get('tp1_hit'):
+                # TP1 已在前次通知，本次靜默監控等待 TP2
+                status = "🟢 TP1已完成"
+                action = f"剩餘50%持倉中，等待TP2 <code>{format_price(tp2)}</code>，現價 {format_price(current_price)}"
+                deteri = check_market_deterioration(inst_id, dir, pos.get('tf','4H'))
+                if deteri:
+                    status = "🚨 局勢惡化"
+                    action += f"\n{deteri}"
+                    push = True
+                else:
+                    push = bool(whale_warn)
+            else:
+                status = "🟢 止盈1達標"
+                action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈1 {format_price(tp1)}，"
+                          f"現價 {format_price(current_price)}｜<b>建議平倉50%</b>，止損下移至成本（{format_price(entry)}）")
+                push = True
         elif dist_to_sl_pct < 0.5:
             status = "⚠️ 接近止損"
             action = f"⚠️ 距止損僅 {dist_to_sl_pct:.2f}%，現價 {format_price(current_price)}｜<b>建議收緊止損或現價平倉</b>"
