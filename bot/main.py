@@ -979,9 +979,9 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         html_message += (f"進場 <code>{format_price(item['entry'])}</code>   "
                          f"止損 <code>{format_price(item['sl'])}</code>\n")
         # ── TP ──
-        html_message += (f"TP1 <code>{format_price(item['tp1'])}</code>  "
-                         f"TP2 <code>{format_price(item['tp2'])}</code>  "
-                         f"TP3 <code>{format_price(item['tp3'])}</code>\n")
+        html_message += f"TP1 <code>{format_price(item['tp1'])}</code>\n"
+        html_message += f"TP2 <code>{format_price(item['tp2'])}</code>\n"
+        html_message += f"TP3 <code>{format_price(item['tp3'])}</code>\n"
         # ── TP1後止損提示 ──
         html_message += f"▸ TP1達標後，止損移至開倉位 <code>{format_price(item['entry'])}</code>\n"
         html_message += "─────────────────────────\n"
