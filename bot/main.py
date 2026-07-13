@@ -605,6 +605,8 @@ def analyze_position(pos):
     whale_warn = ""
     if vol_spike >= 2.5:
         whale_warn = f"⚡ 異常量能！成交量是均量 {vol_spike:.1f} 倍"
+    elif vol_spike < 0.5:
+        whale_warn = f"📉 量能萎縮（僅均量 {vol_spike*100:.0f}%），市場觀望，趨勢動能減弱，建議縮小倉位或收緊止損"
     if oi_change < -5:
         whale_warn += f"\n📉 OI 下降 {oi_change:.1f}%，主力正在撤退"
     elif oi_change > 5:
