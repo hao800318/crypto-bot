@@ -977,12 +977,14 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         html_message += f"趨勢 {adx_bar} <b>{adx_level}</b>  ｜  {sentiment_short}\n"
         # ── 分隔 ──
         html_message += "┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-        # ── 進場 / 止損 / TP（每行對齊） ──
-        html_message += f"<b>進場</b>  <code>{format_price(item['entry'])}</code>\n"
-        html_message += f"<b>止損</b>  <code>{format_price(item['sl'])}</code>\n"
-        html_message += f"TP1    <code>{format_price(item['tp1'])}</code>\n"
-        html_message += f"TP2    <code>{format_price(item['tp2'])}</code>\n"
-        html_message += f"TP3    <code>{format_price(item['tp3'])}</code>\n"
+        # ── 進場 / 止損 / TP（等寬對齊，CJK=2格 ASCII=1格，統一補至6格） ──
+        html_message += "<pre>"
+        html_message += f"進場  {format_price(item['entry'])}\n"
+        html_message += f"止損  {format_price(item['sl'])}\n"
+        html_message += f"TP1   {format_price(item['tp1'])}\n"
+        html_message += f"TP2   {format_price(item['tp2'])}\n"
+        html_message += f"TP3   {format_price(item['tp3'])}\n"
+        html_message += "</pre>"
         # ── TP1後止損提示 ──
         html_message += f"▸ TP1達標 → 止損移至 <code>{format_price(item['entry'])}</code>\n"
         html_message += "─────────────────────────\n"
