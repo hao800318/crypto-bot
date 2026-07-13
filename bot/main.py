@@ -433,6 +433,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
                 "tp3":            tp3,
                 "entry_type":     entry_type,
                 "sentiment_note": sentiment_note,
+                "ls_ratio":       ls_ratio,
                 "adx":            round(current_adx, 1),
                 "vol_confirmed":  volume_confirmed,
             }
@@ -963,11 +964,14 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         # 方向：用顏色+文字，不堆疊其他圖示
         dir_display = "🟩<b>多</b>" if item['dir'] == "多" else "🟥<b>空</b>"
 
-        # 主力動向精簡（去掉長串說明，只保留關鍵數字）
+        # 主力動向精簡：費率 + 多空比轉百分比
         sentiment = item.get('sentiment_note','')
         fr_match  = next((p for p in sentiment.split('，') if '費率' in p), '')
-        ls_match  = next((p for p in sentiment.split('，') if '多空比' in p), '')
-        sentiment_short = f"{fr_match} {ls_match}".strip('，').strip()
+        ls_ratio  = item.get('ls_ratio', 1.0)
+        long_pct  = round(ls_ratio / (ls_ratio + 1) * 100)
+        short_pct = 100 - long_pct
+        ls_display = f"多{long_pct}%:空{short_pct}%"
+        sentiment_short = f"{fr_match}  {ls_display}".strip()
 
         # ── 標題行 ──
         html_message += (f"{medal} <b>{item['asset']}</b>  {dir_display}  "
