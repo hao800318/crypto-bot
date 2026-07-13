@@ -115,8 +115,7 @@ def score_to_leverage(win_rate, max_leverage):
     else:
         ratio = 0.20
     lev = max(1, round(max_leverage * ratio))
-    label = "🔥滿槓桿" if ratio == 1.00 else f"上限{max_leverage}x的{int(ratio*100)}%"
-    return f"{lev}x（{label}）"
+    return f"{lev}x"
 
 def fetch_candle_sync(asset, tf, max_leverage=20):
     bar_param = "1H" if tf == "1h" else "4H"
