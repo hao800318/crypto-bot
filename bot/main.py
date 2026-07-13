@@ -130,12 +130,15 @@ def get_market_avg_funding_rate():
             pass
     return sum(rates) / len(rates) if rates else 0.0
 
-def get_higher_tf_alignment(asset, direction):
-    """1H訊號：取4H MA8 vs EMA89 判斷是否與訊號方向對齊"""
+def get_higher_tf_alignment(asset, direction, higher_bar="4H"):
+    """檢查更高時框 MA8 vs EMA89 是否與訊號方向對齊
+       higher_bar: '4H'（給1H訊號用）或 '1D'（給4H訊號用）
+    """
     try:
-        url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar=4H&limit=100"
-        res = requests.get(url, timeout=2.0).json()
-        if res.get('code') == '0' and len(res['data']) >= 90:
+        limit = 100 if higher_bar != "1D" else 100
+        url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={higher_bar}&limit={limit}"
+        res = requests.get(url, timeout=3.0).json()
+        if res.get('code') == '0' and len(res['data']) >= 30:
             df = pd.DataFrame(res['data'], columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
             df['close'] = df['close'].astype(float)
             df = df.iloc[::-1].reset_index(drop=True)
@@ -244,17 +247,25 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             # ③ 成交量加分
             vol_bonus = 8 if volume_confirmed else -10
 
-            # ④ 多時框對齊（1H訊號需4H方向一致）
+            # ④ 多時框對齊（1H看4H，4H看1D）
             tf_bonus = 0
             tf_note  = ""
             if tf == "1h":
-                aligned = get_higher_tf_alignment(asset, direction)
+                aligned = get_higher_tf_alignment(asset, direction, higher_bar="4H")
                 if aligned:
                     tf_bonus = 10
                     tf_note  = " ✅4H對齊"
                 else:
                     tf_bonus = -20
                     tf_note  = " ⚠️4H逆向"
+            else:  # 4h
+                aligned = get_higher_tf_alignment(asset, direction, higher_bar="1D")
+                if aligned:
+                    tf_bonus = 10
+                    tf_note  = " ✅1D對齊"
+                else:
+                    tf_bonus = -20
+                    tf_note  = " ⚠️1D逆向"
 
             # ⑤ BTC 方向過濾
             btc_bonus = 0
