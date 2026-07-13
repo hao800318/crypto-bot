@@ -566,10 +566,19 @@ def run_position_monitor():
                 if current_price:
                     gap_pct = abs(current_price - pos['entry']) / pos['entry'] * 100
                     arrow = "↑" if (pos['dir'] == "空") else "↓"
-                    gap = f"，距進場點 {gap_pct:.2f}%{arrow}"
-                alerts.append((pos, "⏰ 掛單已過期",
-                    f"掛單超過 {expiry_h}H 未成交，現價 <code>{price_str}</code>{gap}\n"
-                    f"   ❌ <b>建議取消此掛單</b>，等待下次訊號重新進場"))
+                    gap = f"距進場點還差 {gap_pct:.2f}%{arrow}"
+                dir_tag = "🟢 <b>做多</b>" if pos['dir'] == "多" else "🔴 <b>做空</b>"
+                cancel_msg = (
+                    f"🚫🚫🚫 <b>【 ⛔ 撤　單 ⛔ 】</b> 🚫🚫🚫\n\n"
+                    f"<b>{pos['asset']}</b>  {dir_tag}  <b>{pos['tf']}</b>\n"
+                    f"掛單超過 <b>{expiry_h}H</b> 未成交，系統自動撤單。\n\n"
+                    f"• 掛單進場點：<code>{format_price(pos['entry'])}</code>\n"
+                    f"• 現價：<code>{price_str}</code>  {gap}\n\n"
+                    f"❌ <b>請立即取消此掛單</b>，等待下次訊號重新進場。"
+                )
+                text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                requests.post(text_url, json={"chat_id": str(TELEGRAM_CHAT_ID), "text": cancel_msg, "parse_mode": "HTML"})
+                print(f"📤 撤單通知已發送：{pos['asset']} {pos['dir']}")
                 to_remove.append(pos)
             continue  # 未成交的單不做 SL/TP 監控
 
@@ -636,7 +645,8 @@ def run_position_monitor():
     msg += "───────────────────────\n\n"
 
     for pos, status, action in alerts:
-        msg += f"<b>{pos['asset']} ({pos['dir']}) {pos['tf']}</b>  {status}\n"
+        d = "🟢 <b>做多</b>" if pos['dir'] == "多" else "🔴 <b>做空</b>"
+        msg += f"<b>{pos['asset']}</b>  {d}  <b>{pos['tf']}</b>  {status}\n"
         msg += f"   進場：<code>{format_price(pos['entry'])}</code>  止損：<code>{format_price(pos['sl'])}</code>\n"
         msg += f"   {action}\n\n"
 
@@ -689,7 +699,8 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         vol_tag = "✅量能確認" if vol_ok else "⚠️量能偏低"
         adx_tag = f"ADX {adx_val}"
 
-        html_message += f"{'🥇' if idx==1 else '🥈' if idx==2 else '🥉' if idx==3 else '🔹'} <b>#{idx} {item['asset']} ({item['dir']}) {item['leverage']} 【{item['order_type']} | {item['tf']}】</b>\n"
+        dir_display = "🟢 <b>做多</b>" if item['dir'] == "多" else "🔴 <b>做空</b>"
+        html_message += f"{'🥇' if idx==1 else '🥈' if idx==2 else '🥉' if idx==3 else '🔹'} <b>#{idx} {item['asset']}</b>  {dir_display}  <b>{item['leverage']} 【{item['order_type']} | {item['tf']}】</b>\n"
         html_message += f"   • 🏆 <b>預估勝率</b>：<code>{win_rate}%</code>  {stars}\n"
         html_message += f"   • 📈 <b>趨勢強度</b>：<code>{adx_tag}</code>  <code>{vol_tag}</code>\n"
         html_message += f"   • 📡 <b>主力動向</b>：<code>{item['sentiment_note']}</code>\n"
@@ -764,7 +775,8 @@ def send_holding_summary(chat_id):
         status, action, _ = analyze_position(pos)
         if status is None:
             status, action = "❓ 無法取得", "無法取得現價"
-        msg += f"<b>{pos['asset']} ({pos['dir']}) {pos['tf']}</b>  {status}  <i>({age_h:.1f}h前播報)</i>\n"
+        d = "🟢 <b>做多</b>" if pos['dir'] == "多" else "🔴 <b>做空</b>"
+        msg += f"<b>{pos['asset']}</b>  {d}  <b>{pos['tf']}</b>  {status}  <i>({age_h:.1f}h前播報)</i>\n"
         msg += f"   {action}\n\n"
 
     msg += "───────────────────────\n💡 <i>持倉監控每小時 xx:30 自動推送警報</i>"
