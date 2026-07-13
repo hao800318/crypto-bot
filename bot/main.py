@@ -131,6 +131,73 @@ def get_market_avg_funding_rate():
             pass
     return sum(rates) / len(rates) if rates else 0.0
 
+def check_market_deterioration(inst_id, direction, tf):
+    """已成交持倉的市場局勢惡化偵測。
+    檢查三個指標：BTC趨勢逆向、ADX跌破20（趨勢消失）、資金費率極端逆向。
+    ≥2 個惡化訊號時回傳警告字串，否則回傳 None。
+    """
+    warnings = []
+
+    # ── 1. BTC 方向是否逆向 ──
+    try:
+        btc_trend = get_btc_trend()
+        if direction == "多" and btc_trend == "bear":
+            warnings.append("BTC 轉空頭，對多單形成壓制")
+        elif direction == "空" and btc_trend == "bull":
+            warnings.append("BTC 轉多頭，對空單形成頂托")
+    except:
+        pass
+
+    # ── 2. ADX 跌破 20（持倉期間趨勢消失）──
+    try:
+        bar = "1H" if "1H" in tf else "4H"
+        url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar}&limit=60"
+        res = requests.get(url, timeout=3).json()
+        if res.get('code') == '0' and len(res['data']) >= 30:
+            df = pd.DataFrame(res['data'],
+                              columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
+            df[['high','low','close']] = df[['high','low','close']].astype(float)
+            df = df.iloc[::-1].reset_index(drop=True)
+            df['H-L']  = df['high'] - df['low']
+            df['H-PC'] = (df['high'] - df['close'].shift()).abs()
+            df['L-PC'] = (df['low']  - df['close'].shift()).abs()
+            df['TR']   = df[['H-L','H-PC','L-PC']].max(axis=1)
+            df['ATR14']= df['TR'].rolling(14).mean()
+            plus_dm    = df['high'].diff().clip(lower=0)
+            minus_dm   = (-df['low'].diff()).clip(lower=0)
+            mask       = plus_dm >= minus_dm
+            plus_dm_c  = plus_dm.where(mask, 0)
+            minus_dm_c = minus_dm.where(~mask, 0)
+            atr14      = df['ATR14'] + 1e-10
+            plus_di    = 100 * plus_dm_c.rolling(14).mean()  / atr14
+            minus_di   = 100 * minus_dm_c.rolling(14).mean() / atr14
+            dx         = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
+            adx        = dx.rolling(14).mean().iloc[-1]
+            if not pd.isna(adx) and adx < 20:
+                warnings.append(f"ADX 已跌至 {adx:.1f}（趨勢消失，波動方向不可靠）")
+    except:
+        pass
+
+    # ── 3. 資金費率極端逆向 ──
+    try:
+        fr_url = f"{BASE_URL}/api/v5/public/funding-rate?instId={inst_id}"
+        fr_res = requests.get(fr_url, timeout=2).json()
+        if fr_res.get('code') == '0':
+            fr = float(fr_res['data'][0]['fundingRate'])
+            if direction == "多" and fr < -0.0003:
+                warnings.append(f"資金費率極端偏空（{fr*100:.4f}%），市場強烈看空")
+            elif direction == "空" and fr > 0.0003:
+                warnings.append(f"資金費率極端偏多（+{fr*100:.4f}%），市場強烈看多")
+    except:
+        pass
+
+    if len(warnings) >= 2:
+        warn_lines = "\n".join(f"     ⚠️ {w}" for w in warnings)
+        return (f"🚨 <b>市場局勢惡化警告</b>（{len(warnings)}/3 指標異常）：\n"
+                f"{warn_lines}\n"
+                f"     👉 <b>建議提前出場或收緊止損至成本，勿等止損觸發</b>")
+    return None
+
 def get_higher_tf_alignment(asset, direction, higher_bar="4H"):
     """檢查更高時框 MA8 vs EMA89 是否與訊號方向對齊
        higher_bar: '4H'（給1H訊號用）或 '1D'（給4H訊號用）
@@ -509,10 +576,16 @@ def analyze_position(pos):
             action = f"⚠️ 距止損僅 {dist_to_sl_pct:.2f}%，<b>建議收緊止損或現價平倉</b>"
             push = True
         else:
-            # 無重大事件，只在有巨鯨異常時推送
             status = "🔄 持倉中"
             action = f"持倉正常，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%"
-            push = bool(whale_warn)
+            # 市場局勢惡化偵測（只在正常持倉時才額外檢查）
+            deteri = check_market_deterioration(inst_id, dir, pos.get('tf','1H'))
+            if deteri:
+                status = "🚨 局勢惡化"
+                action = f"持倉正常，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%\n{deteri}"
+                push = True
+            else:
+                push = bool(whale_warn)
     else:  # 空
         dist_to_sl_pct = (sl - current_price) / entry * 100
         if current_price >= sl:
@@ -538,7 +611,13 @@ def analyze_position(pos):
         else:
             status = "🔄 持倉中"
             action = f"持倉正常，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%"
-            push = bool(whale_warn)
+            deteri = check_market_deterioration(inst_id, dir, pos.get('tf','4H'))
+            if deteri:
+                status = "🚨 局勢惡化"
+                action = f"持倉正常，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%\n{deteri}"
+                push = True
+            else:
+                push = bool(whale_warn)
 
     full_action = action
     if whale_warn:
