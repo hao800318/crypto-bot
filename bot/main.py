@@ -695,6 +695,17 @@ def analyze_position(pos):
     # 加入 OI/多空比 狀態補充
     full_action += f"\n📊 主力資料：OI變化{oi_change:+.1f}% | 多空比{ls_ratio:.2f} | 費率{fr*100:.4f}%"
 
+    # ── 累計記錄 TP 達標旗標（只增不減，跨監控週期保留）──
+    if pos.get('filled'):
+        if dir == "多":
+            if effective_high >= tp1: pos['tp1_hit'] = True
+            if effective_high >= tp2: pos['tp2_hit'] = True
+            if effective_high >= tp3: pos['tp3_hit'] = True
+        else:
+            if effective_low <= tp1: pos['tp1_hit'] = True
+            if effective_low <= tp2: pos['tp2_hit'] = True
+            if effective_low <= tp3: pos['tp3_hit'] = True
+
     return status, full_action, push
 
 def build_coin_conclusion(pos_list, current_price):
@@ -873,13 +884,12 @@ def run_position_monitor():
         if status in ("🔴 止損觸發", "🟣 全部止盈"):
             to_remove.append(pos)
 
-    # 清理過期 / 已結束的持倉
+    # 清理過期 / 已結束的持倉，並儲存最新 TP 旗標
     with active_positions_lock:
         for p in to_remove:
             if p in active_positions:
                 active_positions.remove(p)
-        if to_remove:
-            save_positions(active_positions)
+        save_positions(active_positions)   # 無論有無移除，都存一次（保留 tp_hit 旗標）
 
     if not alerts:
         print(f"✅ 持倉監控完成，{len(positions)} 筆持倉狀態正常")
@@ -1081,12 +1091,15 @@ def send_holding_summary(chat_id):
             d   = "🟩<b>多</b>" if pos['dir'] == "多" else "🟥<b>空</b>"
             sub = f"#{i} " if len(group) > 1 else ""
             msg += f"{sub}{d}  {pos['tf']}  {status}  <i>({age_h:.1f}h前)</i>\n"
+            t1 = "✅" if pos.get('tp1_hit') else ""
+            t2 = "✅" if pos.get('tp2_hit') else ""
+            t3 = "✅" if pos.get('tp3_hit') else ""
             msg += "<pre>"
             msg += f"進場  {format_price(pos['entry'])}\n"
             msg += f"止損  {format_price(pos['sl'])}\n"
-            msg += f"TP1   {format_price(pos['tp1'])}\n"
-            msg += f"TP2   {format_price(pos['tp2'])}\n"
-            msg += f"TP3   {format_price(pos['tp3'])}\n"
+            msg += f"TP1   {format_price(pos['tp1'])} {t1}\n"
+            msg += f"TP2   {format_price(pos['tp2'])} {t2}\n"
+            msg += f"TP3   {format_price(pos['tp3'])} {t3}\n"
             msg += "</pre>"
             msg += f"▸ {action}\n"
 
