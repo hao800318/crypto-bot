@@ -1195,24 +1195,47 @@ def send_coin_analysis(asset_input, chat_id):
     msg += f"<b>主力情緒</b>  {sentiment_tag}  費率{fr_pct:+.4f}%\n"
     msg += f"<b>多空比</b>    多{long_pct}%：空{short_pct}%\n"
 
-    # ── 有效時限 ──
-    # 建議的進場點位（MA8/EMA89）每根K棒都在更新；
-    # 以最短時框（1H）為基準，下根1H收盤即應重新判斷
+    # ── 有效時限（依四框一致性加權判斷） ──
     la_tz = pytz.timezone('America/Los_Angeles')
     now_la = datetime.datetime.now(la_tz)
-    # 計算下一個整點（下根1H收盤）
-    next_hour_la = now_la.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1)
-    # 4H收盤：距下一個 4 的倍數整點
-    current_4h_block = (now_la.hour // 4) * 4
-    next_4h_la = now_la.replace(hour=current_4h_block, minute=0, second=0, microsecond=0) + datetime.timedelta(hours=4)
 
-    # 根據評分決定主要參考時框
-    if abs(score) >= 7:
-        expire_la   = next_4h_la
-        expire_note = f"下根4H收盤 {next_4h_la.strftime('%H:%M')} PT"
-    else:
-        expire_la   = next_hour_la
-        expire_note = f"下根1H收盤 {next_hour_la.strftime('%H:%M')} PT"
+    # 預算各時框收盤時間
+    next_1h  = now_la.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1)
+    cur_4h   = (now_la.hour // 4) * 4
+    next_4h  = now_la.replace(hour=cur_4h, minute=0, second=0, microsecond=0) + datetime.timedelta(hours=4)
+    next_1d  = (now_la + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # 計算有多少大週期與結論同向
+    bull_conclusion = score > 0
+    def tf_aligned(s):
+        return s is not None and s['adx'] >= 18 and (s['ma_above'] == bull_conclusion)
+
+    large_tf_count = sum([
+        tf_aligned(s1w),   # 1W：最穩定
+        tf_aligned(s1d),   # 1D
+        tf_aligned(s4),    # 4H
+    ])
+
+    # 有效期規則：
+    #   3框（4H+1D+1W）同向 → 有效至下根1D收盤（趨勢最穩定）
+    #   2框（任意兩個大框）同向 → 有效至下根4H收盤
+    #   1框（僅4H或僅1D）同向 → 有效至下根4H收盤
+    #   0框（僅1H或全盤整）→ 有效至下根1H收盤
+    if score == 0 or (s1 and s1['adx'] < 18 and large_tf_count == 0):
+        expire_time = next_1h
+        expire_note = f"下根1H收盤 {next_1h.strftime('%H:%M')} PT（多空均衡，短線為主）"
+    elif large_tf_count == 0:
+        expire_time = next_1h
+        expire_note = f"下根1H收盤 {next_1h.strftime('%H:%M')} PT（僅1H信號，短線為主）"
+    elif large_tf_count == 1:
+        expire_time = next_4h
+        expire_note = f"下根4H收盤 {next_4h.strftime('%H:%M')} PT（單一大框確認）"
+    elif large_tf_count == 2:
+        expire_time = next_4h
+        expire_note = f"下根4H收盤 {next_4h.strftime('%H:%M')} PT（兩框同向確認）"
+    else:  # large_tf_count == 3
+        expire_time = next_1d
+        expire_note = f"下根1D收盤 {next_1d.strftime('%m/%d %H:%M')} PT（三框高度一致）"
 
     msg += "\n"
     msg += f"<i>🕐 分析時間：{now_la.strftime('%m/%d %H:%M')} PT</i>\n"
