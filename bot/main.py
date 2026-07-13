@@ -1034,7 +1034,7 @@ def analyze_coin_snapshot(inst_id, bar_param="1H"):
         return None
 
 def send_coin_analysis(asset_input, chat_id):
-    """處理 /eth /btc /sol 等指令，發送即時分析報告"""
+    """處理 /eth /btc /sol 等指令，發送即時分析報告（1H/4H/1D/1W 四框綜合）"""
     symbol = asset_input.upper().strip('/')
     inst_id = f"{symbol}-USDT-SWAP"
 
@@ -1051,8 +1051,10 @@ def send_coin_analysis(asset_input, chat_id):
     except:
         pass
 
-    s1 = analyze_coin_snapshot(inst_id, "1H")
-    s4 = analyze_coin_snapshot(inst_id, "4H")
+    s1  = analyze_coin_snapshot(inst_id, "1H")
+    s4  = analyze_coin_snapshot(inst_id, "4H")
+    s1d = analyze_coin_snapshot(inst_id, "1D")
+    s1w = analyze_coin_snapshot(inst_id, "1W")
     funding_rate, ls_ratio = get_market_sentiment(inst_id)
 
     if not s1 or not s4:
@@ -1062,102 +1064,136 @@ def send_coin_analysis(asset_input, chat_id):
         )
         return
 
-    price = s1['price']
+    price     = s1['price']
     long_pct  = round(ls_ratio / (ls_ratio + 1) * 100)
     short_pct = 100 - long_pct
 
-    # ── 趨勢判定 ──
-    def trend_label(s):
+    # ── 單框趨勢文字 ──
+    def trend_label(s, tf_name):
+        if s is None:
+            return f"<b>{tf_name}</b>  ⬜ 數據不足"
         if s['adx'] < 20:
-            return "⬜ 盤整（無明確方向）"
+            return f"<b>{tf_name}</b>  ⬜ 盤整  RSI {s['rsi']:.0f}"
         elif s['ma_above']:
-            strength = "強" if s['adx'] >= 40 else ("中" if s['adx'] >= 25 else "弱")
-            return f"🟩 多頭（{strength}，ADX {s['adx']:.0f}）"
+            bar = "■■■■" if s['adx'] >= 50 else ("■■■□" if s['adx'] >= 30 else ("■■□□" if s['adx'] >= 20 else "■□□□"))
+            return f"<b>{tf_name}</b>  🟩多 {bar}  RSI {s['rsi']:.0f}"
         else:
-            strength = "強" if s['adx'] >= 40 else ("中" if s['adx'] >= 25 else "弱")
-            return f"🟥 空頭（{strength}，ADX {s['adx']:.0f}）"
+            bar = "■■■■" if s['adx'] >= 50 else ("■■■□" if s['adx'] >= 30 else ("■■□□" if s['adx'] >= 20 else "■□□□"))
+            return f"<b>{tf_name}</b>  🟥空 {bar}  RSI {s['rsi']:.0f}"
 
-    # ── 建議邏輯 ──
-    def build_advice(s1, s4):
+    # ── 四框綜合評分（加權投票） ──
+    # 權重：1W=4, 1D=3, 4H=2, 1H=1（大週期決定方向）
+    def frame_vote(s, weight):
+        if s is None or s['adx'] < 18:
+            return 0
+        return weight if s['ma_above'] else -weight
+
+    score = (frame_vote(s1w, 4) + frame_vote(s1d, 3) +
+             frame_vote(s4,  2) + frame_vote(s1,  1))
+    # score 範圍：-10 ~ +10
+
+    # ── 綜合結論 ──
+    def build_conclusion(score, s1, s4, s1d, s1w):
         lines = []
 
-        # 判斷兩個時框是否一致
-        both_bull = s1['ma_above'] and s4['ma_above']
-        both_bear = (not s1['ma_above']) and (not s4['ma_above'])
-        mixed     = not both_bull and not both_bear
-        ranging   = s1['adx'] < 20 and s4['adx'] < 20
-
-        if ranging:
-            lines.append("⚠️ <b>建議觀望</b> — 1H+4H均處盤整，方向不明")
-            lines.append(f"  突破壓力 <b>{format_price(s1['recent_high'])}</b> 再考慮做多")
-            lines.append(f"  跌破支撐 <b>{format_price(s1['recent_low'])}</b>  再考慮做空")
-            return lines
-
-        if both_bull:
-            if s1['cross_up']:
-                lines.append("🚀 <b>現在可做多</b> — 1H剛發生黃金交叉，4H多頭確認")
-            elif s1['rsi'] > 68:
-                lines.append(f"⚠️ <b>多頭但RSI過熱({s1['rsi']:.0f})，建議等回踩</b>")
-                lines.append(f"  等價格回踩 MA8 附近 <b>{format_price(s1['ma8'])}</b> 再進多")
-            else:
-                lines.append("✅ <b>多頭排列，適合做多</b> — 1H+4H方向一致")
-                lines.append(f"  限價掛 <b>{format_price(s1['ma8'])}</b>（MA8）或市價追多")
+        if score >= 7:
+            lines.append("🚀 <b>強烈多頭共識（四框一致向上）</b>")
+            lines.append(f"  適合做多，1H限價掛 <b>{format_price(s1['ma8'])}</b>（MA8）")
             sl = s1['ma8'] - s1['atr'] * 1.5
-            lines.append(f"  止損參考：<b>{format_price(sl)}</b>（MA8下方 1.5×ATR）")
-            lines.append(f"  做空觀望：等MA8跌破EMA89 <b>{format_price(s1['ema89'])}</b>")
+            lines.append(f"  止損：<b>{format_price(sl)}</b>  TP參考：<b>{format_price(s1['ma8'] * 1.03)}</b> / <b>{format_price(s1['ma8'] * 1.06)}</b>")
+            lines.append(f"  轉空觀察：等1D MA8跌破EMA89 <b>{format_price(s1d['ema89'])}</b>")
 
-        elif both_bear:
-            if s1['cross_down']:
-                lines.append("📉 <b>現在可做空</b> — 1H剛發生死亡交叉，4H空頭確認")
-            elif s1['rsi'] < 32:
-                lines.append(f"⚠️ <b>空頭但RSI超賣({s1['rsi']:.0f})，建議等反彈</b>")
-                lines.append(f"  等價格反彈至 MA8 附近 <b>{format_price(s1['ma8'])}</b> 再進空")
+        elif score >= 4:
+            # 大週期多，短週期可能分歧
+            lines.append("✅ <b>中長線偏多，短線須謹慎</b>")
+            if s1 and not s1['ma_above']:
+                lines.append(f"  1H暫時偏空，等1H轉多（突破 <b>{format_price(s1['ema89'])}</b>）再進場")
+            elif s1 and s1['rsi'] > 68:
+                lines.append(f"  1H RSI過熱({s1['rsi']:.0f})，等回踩 <b>{format_price(s1['ma8'])}</b> 再進多")
             else:
-                lines.append("✅ <b>空頭排列，適合做空</b> — 1H+4H方向一致")
-                lines.append(f"  限價掛 <b>{format_price(s1['ma8'])}</b>（MA8）或市價追空")
+                lines.append(f"  可輕倉做多，1H限價 <b>{format_price(s1['ma8'])}</b>")
+            if s1d:
+                lines.append(f"  做空需等日線轉空（EMA89：<b>{format_price(s1d['ema89'])}</b>）")
+
+        elif score >= 1:
+            lines.append("⚠️ <b>大週期分歧，建議觀望為主</b>")
+            if s1w and s1w['ma_above']:
+                lines.append(f"  週線偏多但日線未確認，等1D MA8站上EMA89 <b>{format_price(s1d['ema89'] if s1d else 0)}</b>")
+            else:
+                lines.append(f"  多空力量接近，方向不明，避免重倉")
+            lines.append(f"  做多觀察點：突破近期高點 <b>{format_price(s1['recent_high'])}</b>")
+            lines.append(f"  做空觀察點：跌破近期低點 <b>{format_price(s1['recent_low'])}</b>")
+
+        elif score == 0:
+            lines.append("⬜ <b>多空均衡，建議觀望</b>")
+            lines.append(f"  突破 <b>{format_price(s1['recent_high'])}</b> 偏多，跌破 <b>{format_price(s1['recent_low'])}</b> 偏空")
+            if s1d:
+                lines.append(f"  日線 EMA89：<b>{format_price(s1d['ema89'])}</b> 為中線關鍵支撐/壓力")
+
+        elif score >= -3:
+            lines.append("⚠️ <b>大週期分歧，建議觀望為主</b>")
+            if s1w and not s1w['ma_above']:
+                lines.append(f"  週線偏空但日線未確認，等1D跌破EMA89 <b>{format_price(s1d['ema89'] if s1d else 0)}</b>")
+            lines.append(f"  做空觀察點：跌破近期低點 <b>{format_price(s1['recent_low'])}</b>")
+            lines.append(f"  做多觀察點：反彈突破 <b>{format_price(s1['recent_high'])}</b>")
+
+        elif score >= -6:
+            lines.append("✅ <b>中長線偏空，短線須謹慎</b>")
+            if s1 and s1['ma_above']:
+                lines.append(f"  1H暫時偏多，等1H轉空（跌破 <b>{format_price(s1['ema89'])}</b>）再進空")
+            elif s1 and s1['rsi'] < 32:
+                lines.append(f"  1H RSI超賣({s1['rsi']:.0f})，等反彈至 <b>{format_price(s1['ma8'])}</b> 再進空")
+            else:
+                lines.append(f"  可輕倉做空，1H限價 <b>{format_price(s1['ma8'])}</b>")
+            if s1d:
+                lines.append(f"  做多需等日線轉多（EMA89：<b>{format_price(s1d['ema89'])}</b>）")
+
+        else:  # score <= -7
+            lines.append("📉 <b>強烈空頭共識（四框一致向下）</b>")
+            lines.append(f"  適合做空，1H限價掛 <b>{format_price(s1['ma8'])}</b>（MA8）")
             sl = s1['ma8'] + s1['atr'] * 1.5
-            lines.append(f"  止損參考：<b>{format_price(sl)}</b>（MA8上方 1.5×ATR）")
-            lines.append(f"  做多觀望：等MA8突破EMA89 <b>{format_price(s1['ema89'])}</b>")
-
-        else:  # mixed
-            lines.append("⚠️ <b>1H與4H方向分歧，建議觀望</b>")
-            if s1['ma_above']:
-                lines.append(f"  1H偏多但4H偏空 — 等4H轉多再做多")
-                lines.append(f"  4H轉多觀察點：<b>{format_price(s4['ema89'])}</b>（4H EMA89）")
-                lines.append(f"  做空等1H跌破EMA89：<b>{format_price(s1['ema89'])}</b>")
-            else:
-                lines.append(f"  1H偏空但4H偏多 — 不宜逆勢做空")
-                lines.append(f"  等1H轉多（突破 <b>{format_price(s1['ema89'])}</b>）再做多")
+            lines.append(f"  止損：<b>{format_price(sl)}</b>  TP參考：<b>{format_price(s1['ma8'] * 0.97)}</b> / <b>{format_price(s1['ma8'] * 0.94)}</b>")
+            lines.append(f"  轉多觀察：等1D MA8突破EMA89 <b>{format_price(s1d['ema89'])}</b>")
 
         return lines
 
-    advice_lines = build_advice(s1, s4)
+    conclusion_lines = build_conclusion(score, s1, s4, s1d, s1w)
 
     # ── 資金費率情緒 ──
-    if '主力偏多' in (build_sentiment_note("多", funding_rate, ls_ratio)[0]):
+    sentiment_note_text = build_sentiment_note("多", funding_rate, ls_ratio)[0]
+    if '主力偏多' in sentiment_note_text:
         sentiment_tag = "偏多"
-    elif '主力偏空' in (build_sentiment_note("空", funding_rate, ls_ratio)[0]):
+    elif '主力偏空' in sentiment_note_text:
         sentiment_tag = "偏空"
     else:
         sentiment_tag = "中性"
     fr_pct = funding_rate * 100
 
+    # ── 評分視覺化（-10 到 +10 → 進度條） ──
+    score_bar_val = max(0, min(10, score + 5))  # 0~10
+    score_bar = "█" * score_bar_val + "░" * (10 - score_bar_val)
+    score_tag  = ("強多" if score >= 7 else
+                  "偏多" if score >= 4 else
+                  "微多" if score >= 1 else
+                  "均衡" if score == 0 else
+                  "微空" if score >= -3 else
+                  "偏空" if score >= -6 else "強空")
+
     # ── 組裝訊息 ──
-    msg = f"🔍 <b>{symbol} 即時分析</b>\n"
-    msg += f"<pre>現價  {format_price(price)}</pre>\n"
-    msg += "\n"
-    msg += f"<b>1H趨勢</b>  {trend_label(s1)}\n"
-    msg += f"<b>4H趨勢</b>  {trend_label(s4)}\n"
-    msg += f"<b>1H RSI</b>  {s1['rsi']:.1f}   <b>4H RSI</b>  {s4['rsi']:.1f}\n"
-    msg += "\n"
+    msg  = f"🔍 <b>{symbol} 多週期分析</b>\n"
+    msg += f"<pre>現價  {format_price(price)}</pre>\n\n"
+    msg += "<b>── 各週期趨勢 ──</b>\n"
+    msg += trend_label(s1,  "1H") + "\n"
+    msg += trend_label(s4,  "4H") + "\n"
+    msg += trend_label(s1d, "1D") + "\n"
+    msg += trend_label(s1w, "1W") + "\n\n"
+    msg += f"<b>綜合評分</b>  [{score_bar}]  <b>{score_tag}</b> ({score:+d}/10)\n\n"
     msg += "<b>─── 操作建議 ───</b>\n"
-    for line in advice_lines:
+    for line in conclusion_lines:
         msg += f"{line}\n"
     msg += "\n"
     msg += f"<b>主力情緒</b>  {sentiment_tag}  費率{fr_pct:+.4f}%\n"
     msg += f"<b>多空比</b>    多{long_pct}%：空{short_pct}%\n"
-    msg += f"<b>近期高點</b>  {format_price(s1['recent_high'])}\n"
-    msg += f"<b>近期低點</b>  {format_price(s1['recent_low'])}\n"
 
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
