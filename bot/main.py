@@ -6,6 +6,7 @@ import os
 import time
 import math
 import threading
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==================== 🔑 1. Telegram 設定 ====================
@@ -548,6 +549,50 @@ def analyze_position(pos):
 
     return status, full_action, push
 
+def build_coin_conclusion(pos_list, current_price):
+    """針對同一幣種多筆持倉，生成一句綜合結論（單筆時回傳 None）"""
+    if len(pos_list) <= 1:
+        return None
+
+    dirs = [p['dir'] for p in pos_list]
+    has_long  = "多" in dirs
+    has_short = "空" in dirs
+
+    if has_long and has_short:
+        return ("⚠️ <b>多空對沖警告：</b>此幣種同時存在多空倉位，"
+                "請確認是否為刻意對沖策略，建議擇一方向管理風險")
+
+    direction_word = "做多" if has_long else "做空"
+
+    if not current_price:
+        return f"📊 共 {len(pos_list)} 筆{direction_word}，無法取得現價計算綜合損益"
+
+    pnls = []
+    for p in pos_list:
+        if p['dir'] == "多":
+            pnl = (current_price - p['entry']) / p['entry'] * 100
+        else:
+            pnl = (p['entry'] - current_price) / p['entry'] * 100
+        pnls.append(pnl)
+
+    avg_pnl  = sum(pnls) / len(pnls)
+    winning  = sum(1 for x in pnls if x > 0)
+
+    if avg_pnl >= 5:
+        rec = "強烈建議部分止盈鎖利 🎯"
+    elif avg_pnl >= 1:
+        rec = "建議止損上移至成本保護利潤 ✅"
+    elif avg_pnl >= -1:
+        rec = "貼近成本，持續關注止損位 👀"
+    elif avg_pnl >= -3:
+        rec = "小幅虧損，注意止損防守 ⚠️"
+    else:
+        rec = "建議收緊止損或減倉控風 🔴"
+
+    return (f"📌 <b>綜合結論：</b>{len(pos_list)} 筆{direction_word}，"
+            f"{winning}/{len(pos_list)} 筆獲利 | "
+            f"均損益 <code>{avg_pnl:+.1f}%</code> → {rec}")
+
 def run_position_monitor():
     """每小時 xx:30 執行，監控所有活躍持倉"""
     with active_positions_lock:
@@ -650,16 +695,39 @@ def run_position_monitor():
         print(f"✅ 持倉監控完成，{len(positions)} 筆持倉狀態正常")
         return
 
-    # 發送警報
+    # 發送警報（按幣種分組）
+    # 收集全部持倉的幣種分組（用於綜合結論）
+    all_by_asset = defaultdict(list)
+    for p in positions:
+        all_by_asset[p['asset']].append(p)
+
+    # 有警報的幣種分組
+    alerts_by_asset = defaultdict(list)
+    for pos, status, action in alerts:
+        alerts_by_asset[pos['asset']].append((pos, status, action))
+
     msg = f"🔔 <b>【持倉監控警報 - {now_str} PT】</b>\n"
-    msg += f"📋 <b>共監控 {len(positions)} 筆持倉，{len(alerts)} 筆需注意：</b>\n"
+    msg += f"📋 <b>監控 {len(positions)} 筆持倉，{len(alerts_by_asset)} 幣種需注意：</b>\n"
     msg += "───────────────────────\n\n"
 
-    for pos, status, action in alerts:
-        d = "🟢 <b>做多</b>" if pos['dir'] == "多" else "🔴 <b>做空</b>"
-        msg += f"<b>{pos['asset']}</b>  {d}  <b>{pos['tf']}</b>  {status}\n"
-        msg += f"   進場：<code>{format_price(pos['entry'])}</code>  止損：<code>{format_price(pos['sl'])}</code>\n"
-        msg += f"   {action}\n\n"
+    for asset, asset_alerts in alerts_by_asset.items():
+        inst_id = asset + '-USDT-SWAP'
+        cp = get_current_price(inst_id)
+        price_str = format_price(cp) if cp else "無法取得"
+        msg += f"<b>📍 {asset}</b>  現價：<code>{price_str}</code>\n"
+
+        for i, (pos, status, action) in enumerate(asset_alerts, 1):
+            d   = "🟢 <b>做多</b>" if pos['dir'] == "多" else "🔴 <b>做空</b>"
+            sub = f"【第{i}筆】 " if len(asset_alerts) > 1 else ""
+            msg += f"  {sub}{d}  <b>{pos['tf']}</b>  {status}\n"
+            msg += f"   進場：<code>{format_price(pos['entry'])}</code>  止損：<code>{format_price(pos['sl'])}</code>\n"
+            msg += f"   {action}\n"
+
+        # 綜合結論（基於此幣種全部持倉，不限於有警報的）
+        conclusion = build_coin_conclusion(all_by_asset[asset], cp)
+        if conclusion:
+            msg += f"   {conclusion}\n"
+        msg += "\n"
 
     msg += "───────────────────────\n⚠️ <i>以上為自動監控建議，請結合自身判斷操作。</i>"
 
@@ -781,16 +849,33 @@ def send_holding_summary(chat_id):
     msg += f"共追蹤 <b>{len(positions)}</b> 筆持倉：\n"
     msg += "───────────────────────\n\n"
 
+    # 按幣種分組顯示
+    by_asset = defaultdict(list)
     for pos in positions:
-        age_h = (time.time() - pos['reported_at']) / 3600
-        status, action, _ = analyze_position(pos)
-        if status is None:
-            status, action = "❓ 無法取得", "無法取得現價"
-        d = "🟢 <b>做多</b>" if pos['dir'] == "多" else "🔴 <b>做空</b>"
-        msg += f"<b>{pos['asset']}</b>  {d}  <b>{pos['tf']}</b>  {status}  <i>({age_h:.1f}h前播報)</i>\n"
-        msg += f"   {action}\n\n"
+        by_asset[pos['asset']].append(pos)
 
-    msg += "───────────────────────\n💡 <i>持倉監控每小時 xx:30 自動推送警報</i>"
+    for asset, group in by_asset.items():
+        inst_id = asset + '-USDT-SWAP'
+        cp = get_current_price(inst_id)
+        price_str = format_price(cp) if cp else "無法取得"
+        msg += f"<b>📍 {asset}</b>  現價：<code>{price_str}</code>\n"
+
+        for i, pos in enumerate(group, 1):
+            age_h  = (time.time() - pos['reported_at']) / 3600
+            status, action, _ = analyze_position(pos)
+            if status is None:
+                status, action = "❓ 無法取得", "無法取得現價"
+            d   = "🟢 <b>做多</b>" if pos['dir'] == "多" else "🔴 <b>做空</b>"
+            sub = f"【第{i}筆】 " if len(group) > 1 else ""
+            msg += f"  {sub}{d}  <b>{pos['tf']}</b>  {status}  <i>({age_h:.1f}h前)</i>\n"
+            msg += f"   {action}\n"
+
+        conclusion = build_coin_conclusion(group, cp)
+        if conclusion:
+            msg += f"   {conclusion}\n"
+        msg += "\n"
+
+    msg += "───────────────────────\n💡 <i>持倉監控每小時自動推送警報</i>"
     text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     requests.post(text_url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"})
 
