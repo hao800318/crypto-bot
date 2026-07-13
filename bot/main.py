@@ -851,8 +851,17 @@ def scan_worker_thread(msg_title, target_chat_id):
         now_ts = time.time()
         with active_positions_lock:
             for sig in valid_signals:
-                # 避免重複加入同幣同方向
-                exists = any(p['asset'] == sig['asset'] and p['dir'] == sig['dir'] for p in active_positions)
+                # 完全相同（幣種+方向+進場+止損+止盈點位）→ 視為同一筆，跳過
+                def same_price(a, b):
+                    return abs(a - b) / max(abs(b), 1e-9) < 0.0001  # 容差 0.01%
+                exists = any(
+                    p['asset'] == sig['asset'] and
+                    p['dir']   == sig['dir']   and
+                    same_price(p['entry'], sig['entry']) and
+                    same_price(p['sl'],    sig['sl'])    and
+                    same_price(p['tp1'],   sig['tp1'])
+                    for p in active_positions
+                )
                 if not exists:
                     active_positions.append({
                         'asset':       sig['asset'],
