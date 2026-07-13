@@ -21,6 +21,7 @@ if not TELEGRAM_CHAT_ID:
 
 # ==================== 🗂️ 2. OKX 官方全量資產動態抓取 ====================
 def get_all_okx_swap_assets():
+    """動態獲取 OKX 當前在線的所有 USDT 永續合約，實現真正的全幣種掃描"""
     url = f"{BASE_URL}/api/v5/public/instruments?instType=SWAP"
     try:
         res = requests.get(url, timeout=5).json()
@@ -32,7 +33,7 @@ def get_all_okx_swap_assets():
         print(f"⚠️ 動態獲取資產庫失敗: {e}")
     return ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "TON-USDT-SWAP", "ARB-USDT-SWAP"]
 
-# ==================== ⚙️ 3. 同步 K 線與長短線雙時區大腦 ====================
+# ==================== ⚙️ 3. 同步 K 線與勝率量化評分核心 ====================
 def fetch_candle_sync(asset, tf):
     bar_param = "1H" if tf == "1h" else "4H"
     url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={bar_param}&limit=100"
@@ -63,6 +64,15 @@ def fetch_candle_sync(asset, tf):
                 current_rsi = c_last['RSI']
                 current_ema89 = c_last['EMA89']
                 direction = "多" if is_cross_up else "空"
+
+                # 🎯 計算黃金勝率權重評分（越接近健康動能區，權重分越高）
+                score = 0
+                if direction == "多":
+                    # RSI 在 50 到 62 之間是最佳追多動能區，勝率最高
+                    score = 100 - abs(current_rsi - 56)
+                else:
+                    # RSI 在 38 到 50 之間是最佳追空動能區，勝率最高
+                    score = 100 - abs(current_rsi - 44)
 
                 order_type = "短線單" if tf == "1h" else "長線單"
                 tf_tag = "1H短線" if tf == "1h" else "4H長線"
@@ -101,7 +111,7 @@ def fetch_candle_sync(asset, tf):
 
                 return {
                     "asset": asset.split('-')[0], "dir": direction, "leverage": leverage,
-                    "tf": tf_tag, "order_type": order_type,
+                    "tf": tf_tag, "order_type": order_type, "score": score,
                     "entry": entry_price, "sl": sl_price, "tp1": tp1, "tp2": tp2, "tp3": tp3,
                     "entry_type": entry_type
                 }
@@ -110,8 +120,9 @@ def fetch_candle_sync(asset, tf):
     return None
 
 def run_strategy_scan():
+    """遍歷全網合約標的，並精選出勝率最高的 5 個訊號"""
     all_assets = get_all_okx_swap_assets()
-    valid_signals = []
+    all_signals = []
 
     total = len(all_assets)
     for idx, asset in enumerate(all_assets, 1):
@@ -119,9 +130,16 @@ def run_strategy_scan():
         for tf in ["1h", "4h"]:
             res = fetch_candle_sync(asset, tf)
             if res:
-                valid_signals.append(res)
-    print("\n✨ 全網掃描完畢！")
-    return valid_signals
+                all_signals.append(res)
+
+    print("\n✨ 全網掃描完畢！正在依勝率權選最強 5 大資產...")
+
+    # 🎯 核心過濾：根據量化勝率評分（score）從大到小排序，只取前 5 名
+    all_signals.sort(key=lambda x: x['score'], reverse=True)
+    top_5_signals = all_signals[:5]
+
+    print(f"📊 掃描結果：共找到 {len(all_signals)} 組信號，精選前 {len(top_5_signals)} 名")
+    return top_5_signals
 
 # ==================== 🚀 4. 動態精度渲染發送引擎 ====================
 def format_price(p):
@@ -138,11 +156,11 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
     la_tz = pytz.timezone('America/Los_Angeles')
     now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
 
-    html_message = f"🎯 <b>【幣圈分析師 全量長短線版 - {mode_title}】</b>\n"
-    html_message += f"🔥 <b>戰術核心</b>：<code>MA8/EMA89技術交叉雷達</code>\n"
+    html_message = f"🎯 <b>【幣圈分析師 終極精選版 - {mode_title}】</b>\n"
+    html_message += f"🔥 <b>戰術核心</b>：<code>MA8/EMA89交叉 ＋ RSI勝率核心精選 5 🚀</code>\n"
     html_message += f"⏰ <b>監控時間</b>：<code>{now_str}</code> (加州太平洋時間 PT)\n"
     html_message += "───────────────────────\n\n"
-    html_message += f"📋 <b>本次全網通掃共捕獲 {len(valid_signals)} 組交易方案：</b>\n\n"
+    html_message += f"📋 <b>當前全網勝率最高【精選 5 強方案】：</b>\n\n"
 
     for idx, item in enumerate(valid_signals, 1):
         html_message += f"🔥 <b>{idx}. {item['asset']} ({item['dir']}) {item['leverage']} 【{item['order_type']} | {item['tf']}】</b>\n"
@@ -155,45 +173,22 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
 
     html_message += "───────────────────────\n💡 <i>提示：所有數字皆已加上代碼塊，手機上「輕點數字」即可自動複製。</i>"
 
-    # Telegram has a 4096-char limit per message — split if needed
-    max_len = 4000
-    if len(html_message) <= max_len:
-        messages = [html_message]
-    else:
-        messages = []
-        header_end = html_message.find("\n\n") + 2
-        header = html_message[:header_end]
-        body = html_message[header_end:]
-        chunks = []
-        current = header
-        for line in body.split("\n"):
-            if len(current) + len(line) + 1 > max_len:
-                chunks.append(current)
-                current = line + "\n"
-            else:
-                current += line + "\n"
-        if current.strip():
-            chunks.append(current)
-        messages = chunks
-
     text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    for i, msg in enumerate(messages):
-        resp = requests.post(text_url, json={"chat_id": str(target_chat_id), "text": msg, "parse_mode": "HTML"})
-        result = resp.json()
-        if result.get("ok"):
-            print(f"✅ 訊息 {i+1}/{len(messages)} 發送成功 → chat_id={target_chat_id}")
-        else:
-            print(f"❌ 訊息 {i+1}/{len(messages)} 發送失敗：{result}")
+    resp = requests.post(text_url, json={"chat_id": str(target_chat_id), "text": html_message, "parse_mode": "HTML"})
+    result = resp.json()
+    if result.get("ok"):
+        print(f"✅ 精選 5 強報告發送成功 → chat_id={target_chat_id}")
+    else:
+        print(f"❌ 報告發送失敗：{result}")
 
 # ==================== 📡 5. 原生無衝突監聽引擎 ====================
 def scan_worker_thread(msg_title, target_chat_id):
     valid_signals = run_strategy_scan()
-    print(f"📊 掃描結果：共找到 {len(valid_signals)} 組信號，準備發送至 chat_id={target_chat_id}")
     if valid_signals:
         send_html_report_via_requests(valid_signals, mode_title=msg_title, target_chat_id=target_chat_id)
     else:
         text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        resp = requests.post(text_url, json={"chat_id": str(target_chat_id), "text": "📭 全網通掃完畢，當前盤面極其冷靜，暫無新交叉信號。"})
+        resp = requests.post(text_url, json={"chat_id": str(target_chat_id), "text": "📭 全網通掃完畢，當前盤面極其冷靜，暫無符合勝率條件之信號。"})
         result = resp.json()
         if result.get("ok"):
             print(f"✅ 「盤面冷靜」訊息發送成功")
@@ -201,13 +196,14 @@ def scan_worker_thread(msg_title, target_chat_id):
             print(f"❌ 「盤面冷靜」訊息發送失敗：{result}")
 
 def handle_telegram_updates():
-    print("🤖 幣圈分析師【Replit專屬·全網長短線無衝突版】雷達正在開機...")
+    print("🟢 最初代原生監聽引擎已滿血回歸！正在安全監聽指令...")
     offset = None
     la_tz = pytz.timezone('America/Los_Angeles')
     last_reported_hour = -1
 
     while True:
         try:
+            # A. 定時播報判定
             now_la = datetime.datetime.now(la_tz)
             if now_la.hour in SCHEDULE_HOURS and now_la.minute == 0 and now_la.hour != last_reported_hour:
                 print(f"🔔 觸發加州整點定時播報：{now_la.hour}:00")
@@ -216,6 +212,7 @@ def handle_telegram_updates():
                 t.start()
                 last_reported_hour = now_la.hour
 
+            # B. 手動口令拉取
             get_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
             params = {"timeout": 2}
             if offset:
@@ -231,12 +228,10 @@ def handle_telegram_updates():
                         chat_id = str(msg["chat"]["id"])
 
                         if text.startswith("/scan"):
-                            print(f"⚡ 收到手動觸發口令！啟動全幣種獨立執行緒...")
+                            print(f"⚡ 收到手動口令！啟動勝率精選獨立執行緒...")
                             confirm_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                            requests.post(confirm_url, json={
-                                "chat_id": chat_id,
-                                "text": "⚡ 收到全網長短線交叉指令！已開闢獨立線程通掃 OKX 所有合約標的中，請稍候約 15 秒..."
-                            })
+                            requests.post(confirm_url, json={"chat_id": chat_id, "text": "⚡ 收到長短線全網交叉指令！正在為您挑選勝率最高的 5 種標的，請稍候約 15 秒..."})
+
                             t = threading.Thread(target=scan_worker_thread, args=("手動現場突擊播報", chat_id))
                             t.daemon = True
                             t.start()
@@ -248,4 +243,5 @@ def handle_telegram_updates():
         time.sleep(1)
 
 if __name__ == '__main__':
+    print("🤖 幣圈分析師【Replit專屬·勝率精選 5 幣版】雷達正在開機...")
     handle_telegram_updates()
