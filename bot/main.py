@@ -896,30 +896,32 @@ def run_position_monitor():
     for pos, status, action in alerts:
         alerts_by_asset[pos['asset']].append((pos, status, action))
 
-    msg = f"🔔 <b>【持倉監控警報 - {now_str} PT】</b>\n"
-    msg += f"📋 <b>監控 {len(positions)} 筆持倉，{len(alerts_by_asset)} 幣種需注意：</b>\n"
-    msg += "───────────────────────\n\n"
+    msg = f"<b>【持倉監控警報】</b>  <code>{now_str} PT</code>\n"
+    msg += f"監控 <b>{len(positions)}</b> 筆  ·  <b>{len(alerts_by_asset)}</b> 幣種需注意\n"
+    msg += "─────────────────────────\n"
 
     for asset, asset_alerts in alerts_by_asset.items():
         inst_id = asset + '-USDT-SWAP'
         cp = get_current_price(inst_id)
-        price_str = format_price(cp) if cp else "無法取得"
-        msg += f"<b>📍 {asset}</b>  現價：<code>{price_str}</code>\n"
+        price_str = format_price(cp) if cp else "—"
+        msg += f"<b>{asset}</b>  現價 <code>{price_str}</code>\n"
 
         for i, (pos, status, action) in enumerate(asset_alerts, 1):
-            d   = "🟢 <b>做多</b>" if pos['dir'] == "多" else "🔴 <b>做空</b>"
-            sub = f"【第{i}筆】 " if len(asset_alerts) > 1 else ""
-            msg += f"  {sub}{d}  <b>{pos['tf']}</b>  {status}\n"
-            msg += f"   進場：<code>{format_price(pos['entry'])}</code>  止損：<code>{format_price(pos['sl'])}</code>\n"
-            msg += f"   {action}\n"
+            d   = "🟩<b>多</b>" if pos['dir'] == "多" else "🟥<b>空</b>"
+            sub = f"#{i} " if len(asset_alerts) > 1 else ""
+            msg += f"{sub}{d}  {pos['tf']}  {status}\n"
+            msg += "<pre>"
+            msg += f"進場  {format_price(pos['entry'])}\n"
+            msg += f"止損  {format_price(pos['sl'])}\n"
+            msg += "</pre>"
+            msg += f"▸ {action}\n"
 
-        # 綜合結論（基於此幣種全部持倉，不限於有警報的）
         conclusion = build_coin_conclusion(all_by_asset[asset], cp)
         if conclusion:
-            msg += f"   {conclusion}\n"
-        msg += "\n"
+            msg += f"{conclusion}\n"
+        msg += "─────────────────────────\n"
 
-    msg += "───────────────────────\n⚠️ <i>以上為自動監控建議，請結合自身判斷操作。</i>"
+    msg += "<i>以上為自動監控建議，請結合自身判斷操作。</i>"
 
     text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     resp = requests.post(text_url, json={"chat_id": str(TELEGRAM_CHAT_ID), "text": msg, "parse_mode": "HTML"})
@@ -1057,11 +1059,10 @@ def send_holding_summary(chat_id):
 
     la_tz = pytz.timezone('America/Los_Angeles')
     now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
-    msg = f"📋 <b>【持倉監控總覽 - {now_str} PT】</b>\n"
-    msg += f"共追蹤 <b>{len(positions)}</b> 筆持倉：\n"
-    msg += "───────────────────────\n\n"
+    msg = f"<b>【持倉監控總覽】</b>  <code>{now_str} PT</code>\n"
+    msg += f"共追蹤 <b>{len(positions)}</b> 筆持倉\n"
+    msg += "─────────────────────────\n"
 
-    # 按幣種分組顯示
     by_asset = defaultdict(list)
     for pos in positions:
         by_asset[pos['asset']].append(pos)
@@ -1069,25 +1070,32 @@ def send_holding_summary(chat_id):
     for asset, group in by_asset.items():
         inst_id = asset + '-USDT-SWAP'
         cp = get_current_price(inst_id)
-        price_str = format_price(cp) if cp else "無法取得"
-        msg += f"<b>📍 {asset}</b>  現價：<code>{price_str}</code>\n"
+        price_str = format_price(cp) if cp else "—"
+        msg += f"<b>{asset}</b>  現價 <code>{price_str}</code>\n"
 
         for i, pos in enumerate(group, 1):
             age_h  = (time.time() - pos['reported_at']) / 3600
             status, action, _ = analyze_position(pos)
             if status is None:
-                status, action = "❓ 無法取得", "無法取得現價"
-            d   = "🟢 <b>做多</b>" if pos['dir'] == "多" else "🔴 <b>做空</b>"
-            sub = f"【第{i}筆】 " if len(group) > 1 else ""
-            msg += f"  {sub}{d}  <b>{pos['tf']}</b>  {status}  <i>({age_h:.1f}h前)</i>\n"
-            msg += f"   {action}\n"
+                status, action = "❓ 無法取得現價", "—"
+            d   = "🟩<b>多</b>" if pos['dir'] == "多" else "🟥<b>空</b>"
+            sub = f"#{i} " if len(group) > 1 else ""
+            msg += f"{sub}{d}  {pos['tf']}  {status}  <i>({age_h:.1f}h前)</i>\n"
+            msg += "<pre>"
+            msg += f"進場  {format_price(pos['entry'])}\n"
+            msg += f"止損  {format_price(pos['sl'])}\n"
+            msg += f"TP1   {format_price(pos['tp1'])}\n"
+            msg += f"TP2   {format_price(pos['tp2'])}\n"
+            msg += f"TP3   {format_price(pos['tp3'])}\n"
+            msg += "</pre>"
+            msg += f"▸ {action}\n"
 
         conclusion = build_coin_conclusion(group, cp)
         if conclusion:
-            msg += f"   {conclusion}\n"
-        msg += "\n"
+            msg += f"{conclusion}\n"
+        msg += "─────────────────────────\n"
 
-    msg += "───────────────────────\n💡 <i>持倉監控每小時自動推送警報</i>"
+    msg += "<i>持倉監控每小時自動推送警報</i>"
     text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     requests.post(text_url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"})
 
