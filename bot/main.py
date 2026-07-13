@@ -799,11 +799,12 @@ def handle_telegram_updates():
     offset = None
     la_tz = pytz.timezone('America/Los_Angeles')
     last_reported_hour = -1
-    last_monitor_hour  = -1
+    last_monitor_time  = 0  # epoch seconds，用絕對時間確保真正 1 小時間隔
 
     while True:
         try:
-            now_la = datetime.datetime.now(la_tz)
+            now_la   = datetime.datetime.now(la_tz)
+            now_ts   = time.time()
 
             # A. 定時播報（整點）
             if now_la.hour in SCHEDULE_HOURS and now_la.minute == 0 and now_la.hour != last_reported_hour:
@@ -813,13 +814,13 @@ def handle_telegram_updates():
                 t.start()
                 last_reported_hour = now_la.hour
 
-            # B. 持倉監控（每小時 xx:30）
-            if now_la.minute == 30 and now_la.hour != last_monitor_hour:
-                print(f"🔍 觸發持倉監控：{now_la.hour}:30")
+            # B. 持倉監控（每 60 分鐘執行一次，用絕對時間防止重啟重複觸發）
+            if now_ts - last_monitor_time >= 3600:
+                print(f"🔍 觸發持倉監控：{now_la.strftime('%H:%M')}")
                 t = threading.Thread(target=run_position_monitor)
                 t.daemon = True
                 t.start()
-                last_monitor_hour = now_la.hour
+                last_monitor_time = now_ts
 
             # C. 手動指令監聽
             get_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
