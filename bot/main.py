@@ -22,16 +22,26 @@ if not TELEGRAM_CHAT_ID:
 
 # ==================== 🗂️ 2. OKX 官方全量資產動態抓取 ====================
 def get_all_okx_swap_assets():
+    """回傳 (assets列表, {instId: max_leverage} 字典)"""
     url = f"{BASE_URL}/api/v5/public/instruments?instType=SWAP"
     try:
         res = requests.get(url, timeout=5).json()
         if res.get('code') == '0':
-            assets = [item['instId'] for item in res['data'] if item['instId'].endswith('-USDT-SWAP')]
+            assets = []
+            leverage_map = {}
+            for item in res['data']:
+                if item['instId'].endswith('-USDT-SWAP'):
+                    assets.append(item['instId'])
+                    try:
+                        leverage_map[item['instId']] = int(item.get('lever', 20))
+                    except:
+                        leverage_map[item['instId']] = 20
             print(f"📡 成功獲取全網合約資產庫，共計: {len(assets)} 支幣種")
-            return assets
+            return assets, leverage_map
     except Exception as e:
         print(f"⚠️ 動態獲取資產庫失敗: {e}")
-    return ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "TON-USDT-SWAP", "ARB-USDT-SWAP"]
+    fallback = ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "TON-USDT-SWAP", "ARB-USDT-SWAP"]
+    return fallback, {a: 100 for a in fallback}
 
 # ==================== 📡 3. 主力動向：資金費率 + 多空持倉比 ====================
 def get_market_sentiment(asset):
@@ -92,20 +102,22 @@ def score_to_win_rate(score):
     """將內部評分（0-112）映射為 50%–98% 勝率顯示"""
     return min(98, max(50, int(50 + (score / 112) * 48)))
 
-def score_to_leverage(win_rate):
-    """勝率越高槓桿越大"""
+def score_to_leverage(win_rate, max_leverage):
+    """依勝率取最大槓桿的比例，結果不超過交易所上限"""
     if win_rate >= 88:
-        return "25x"
+        ratio = 0.80
     elif win_rate >= 82:
-        return "20x"
+        ratio = 0.65
     elif win_rate >= 75:
-        return "15x"
+        ratio = 0.50
     elif win_rate >= 65:
-        return "10x"
+        ratio = 0.35
     else:
-        return "5x"
+        ratio = 0.20
+    lev = max(1, round(max_leverage * ratio))
+    return f"{lev}x（上限{max_leverage}x的{int(ratio*100)}%）"
 
-def fetch_candle_sync(asset, tf):
+def fetch_candle_sync(asset, tf, max_leverage=20):
     bar_param = "1H" if tf == "1h" else "4H"
     url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={bar_param}&limit=100"
     try:
@@ -149,7 +161,7 @@ def fetch_candle_sync(asset, tf):
 
                 # 🏷️ 勝率 % 與動態槓桿
                 win_rate = score_to_win_rate(score)
-                leverage = score_to_leverage(win_rate)
+                leverage = score_to_leverage(win_rate, max_leverage)
 
                 order_type = "短線單" if tf == "1h" else "長線單"
                 tf_tag = "1H短線" if tf == "1h" else "4H長線"
@@ -216,7 +228,7 @@ def fetch_candle_sync(asset, tf):
     return None
 
 def run_strategy_scan():
-    all_assets = get_all_okx_swap_assets()
+    all_assets, leverage_map = get_all_okx_swap_assets()
     all_signals = []
 
     tasks = [(asset, tf) for asset in all_assets for tf in ["1h", "4h"]]
@@ -228,7 +240,8 @@ def run_strategy_scan():
     print(f"⏱️ 掃描開始時間：{datetime.datetime.now().strftime('%H:%M:%S')}（並行模式，共 {total} 項任務）")
 
     def scan_task(asset, tf):
-        return fetch_candle_sync(asset, tf)
+        max_lev = leverage_map.get(asset, 20)
+        return fetch_candle_sync(asset, tf, max_leverage=max_lev)
 
     with ThreadPoolExecutor(max_workers=25) as executor:
         futures = {executor.submit(scan_task, asset, tf): (asset, tf) for asset, tf in tasks}
