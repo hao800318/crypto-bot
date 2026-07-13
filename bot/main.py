@@ -6,6 +6,7 @@ import os
 import time
 import math
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==================== 🔑 1. Telegram 設定 ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -120,23 +121,39 @@ def fetch_candle_sync(asset, tf):
     return None
 
 def run_strategy_scan():
-    """遍歷全網合約標的，並精選出勝率最高的 5 個訊號"""
+    """並行掃描全網合約，精選勝率最高的 5 個訊號"""
     all_assets = get_all_okx_swap_assets()
     all_signals = []
 
-    total = len(all_assets)
-    scan_start = time.time()
-    print(f"⏱️ 掃描開始時間：{datetime.datetime.now().strftime('%H:%M:%S')}")
+    # 展開成 (asset, tf) 任務列表
+    tasks = [(asset, tf) for asset in all_assets for tf in ["1h", "4h"]]
+    total = len(tasks)
+    completed = 0
+    lock = threading.Lock()
 
-    for idx, asset in enumerate(all_assets, 1):
-        print(f"\r🔍 正在掃描全網標的 [{idx}/{total}]: {asset}...", end="", flush=True)
-        for tf in ["1h", "4h"]:
-            res = fetch_candle_sync(asset, tf)
-            if res:
-                all_signals.append(res)
+    scan_start = time.time()
+    print(f"⏱️ 掃描開始時間：{datetime.datetime.now().strftime('%H:%M:%S')}（並行模式，共 {total} 項任務）")
+
+    def scan_task(asset, tf):
+        return fetch_candle_sync(asset, tf)
+
+    with ThreadPoolExecutor(max_workers=25) as executor:
+        futures = {executor.submit(scan_task, asset, tf): (asset, tf) for asset, tf in tasks}
+        for future in as_completed(futures):
+            with lock:
+                completed += 1
+                if completed % 50 == 0 or completed == total:
+                    print(f"\r🔍 並行掃描進度：[{completed}/{total}]...", end="", flush=True)
+            try:
+                res = future.result()
+                if res:
+                    with lock:
+                        all_signals.append(res)
+            except Exception:
+                pass
 
     elapsed = time.time() - scan_start
-    print(f"\n✨ 全網掃描完畢！耗時：{elapsed:.1f} 秒（共 {total} 支幣種 × 2 時框）")
+    print(f"\n✨ 全網掃描完畢！耗時：{elapsed:.1f} 秒（共 {len(all_assets)} 支幣種 × 2 時框）")
 
     # 🎯 核心過濾：根據量化勝率評分（score）從大到小排序，只取前 5 名
     all_signals.sort(key=lambda x: x['score'], reverse=True)
