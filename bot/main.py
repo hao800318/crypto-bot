@@ -104,18 +104,19 @@ def score_to_win_rate(score):
 
 def score_to_leverage(win_rate, max_leverage):
     """依勝率取最大槓桿的比例，結果不超過交易所上限"""
-    if win_rate >= 88:
+    if win_rate >= 90:
+        ratio = 1.00
+    elif win_rate >= 85:
         ratio = 0.80
-    elif win_rate >= 82:
-        ratio = 0.65
-    elif win_rate >= 75:
-        ratio = 0.50
-    elif win_rate >= 65:
-        ratio = 0.35
+    elif win_rate >= 78:
+        ratio = 0.60
+    elif win_rate >= 68:
+        ratio = 0.40
     else:
         ratio = 0.20
     lev = max(1, round(max_leverage * ratio))
-    return f"{lev}x（上限{max_leverage}x的{int(ratio*100)}%）"
+    label = "🔥滿槓桿" if ratio == 1.00 else f"上限{max_leverage}x的{int(ratio*100)}%"
+    return f"{lev}x（{label}）"
 
 def fetch_candle_sync(asset, tf, max_leverage=20):
     bar_param = "1H" if tf == "1h" else "4H"
