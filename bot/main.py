@@ -954,6 +954,10 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         else:                stars = "⭐"
 
         adx_val = item.get('adx', 0)
+        if adx_val >= 50:   adx_level = "強"
+        elif adx_val >= 30: adx_level = "中"
+        elif adx_val >= 20: adx_level = "低"
+        else:               adx_level = "弱"
         vol_ok  = item.get('vol_confirmed', False)
         vol_tag = "量能✅" if vol_ok else "量能⚠️"
         medal   = ["🥇","🥈","🥉","#4","#5"][idx-1]
@@ -972,7 +976,7 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
                          f"<b>{item['leverage']}</b>  {item['tf']}  "
                          f"<b>{win_rate}%</b> {stars}\n")
         # ── 趨勢 + 主力 ──
-        html_message += f"ADX {adx_val}  {vol_tag}  |  {sentiment_short}\n"
+        html_message += f"趨勢強度 {adx_level}  {vol_tag}  |  {sentiment_short}\n"
         # ── 進場 / 止損 ──
         html_message += (f"進場 <code>{format_price(item['entry'])}</code>   "
                          f"止損 <code>{format_price(item['sl'])}</code>\n")
