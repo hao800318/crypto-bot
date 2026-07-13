@@ -7,6 +7,7 @@ import time
 import math
 import threading
 from collections import defaultdict
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==================== 🔑 1. Telegram 設定 ====================
@@ -487,7 +488,29 @@ def run_strategy_scan():
     return top_5_signals
 
 # ==================== 📊 5. 持倉監控系統 ====================
-active_positions = []          # 儲存已播報的訊號
+POSITIONS_FILE = "active_positions.json"
+
+def load_positions():
+    """從 JSON 檔案讀取持倉記錄（Bot 啟動時呼叫）"""
+    try:
+        if os.path.exists(POSITIONS_FILE):
+            with open(POSITIONS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            print(f"📂 已從檔案讀取 {len(data)} 筆持倉記錄")
+            return data
+    except Exception as e:
+        print(f"⚠️ 讀取持倉檔案失敗：{e}")
+    return []
+
+def save_positions(positions):
+    """將持倉記錄寫入 JSON 檔案（每次新增/移除時呼叫）"""
+    try:
+        with open(POSITIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(positions, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ 儲存持倉檔案失敗：{e}")
+
+active_positions = load_positions()   # 啟動時從檔案恢復
 active_positions_lock = threading.Lock()
 
 def get_current_price(inst_id):
@@ -854,6 +877,8 @@ def run_position_monitor():
         for p in to_remove:
             if p in active_positions:
                 active_positions.remove(p)
+        if to_remove:
+            save_positions(active_positions)
 
     if not alerts:
         print(f"✅ 持倉監控完成，{len(positions)} 筆持倉狀態正常")
@@ -1000,6 +1025,7 @@ def scan_worker_thread(msg_title, target_chat_id):
                         'last_checked_ts':  now_ts,   # 用於 K 線高低點回顧
                         'filled':           False,    # 限價單尚未成交
                     })
+        save_positions(active_positions)   # 新增後立即寫入磁碟
         print(f"📌 已加入持倉監控，目前追蹤 {len(active_positions)} 筆")
     else:
         text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
