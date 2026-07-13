@@ -974,16 +974,17 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
                          f"⚡<b>{item['leverage']}</b>  {item['tf']}  "
                          f"<b>{win_rate}%</b> {stars}\n")
         # ── 趨勢 + 主力 ──
-        html_message += f"趨勢 {adx_bar} <b>{adx_level}</b>  |  {sentiment_short}\n"
-        # ── 進場 / 止損 ──
-        html_message += (f"<b>進場</b> <code>{format_price(item['entry'])}</code>   "
-                         f"<b>止損</b> <code>{format_price(item['sl'])}</code>\n")
-        # ── TP ──
-        html_message += f"TP1 <code>{format_price(item['tp1'])}</code>\n"
-        html_message += f"TP2 <code>{format_price(item['tp2'])}</code>\n"
-        html_message += f"TP3 <code>{format_price(item['tp3'])}</code>\n"
+        html_message += f"趨勢 {adx_bar} <b>{adx_level}</b>  ｜  {sentiment_short}\n"
+        # ── 分隔 ──
+        html_message += "┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+        # ── 進場 / 止損 / TP（每行對齊） ──
+        html_message += f"<b>進場</b>  <code>{format_price(item['entry'])}</code>\n"
+        html_message += f"<b>止損</b>  <code>{format_price(item['sl'])}</code>\n"
+        html_message += f"TP1    <code>{format_price(item['tp1'])}</code>\n"
+        html_message += f"TP2    <code>{format_price(item['tp2'])}</code>\n"
+        html_message += f"TP3    <code>{format_price(item['tp3'])}</code>\n"
         # ── TP1後止損提示 ──
-        html_message += f"▸ TP1達標後，止損移至開倉位 <code>{format_price(item['entry'])}</code>\n"
+        html_message += f"▸ TP1達標 → 止損移至 <code>{format_price(item['entry'])}</code>\n"
         html_message += "─────────────────────────\n"
 
     html_message += "<i>勝率 = RSI＋成交量＋多時框＋主力動向＋BTC方向  |  槓桿僅供參考</i>"
