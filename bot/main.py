@@ -324,6 +324,25 @@ def analyze_position(pos):
     tp2   = pos['tp2']
     tp3   = pos['tp3']
 
+    # ── 先確認限價單是否已被成交 ──
+    # 多單：需等價格回踩到 entry（低於進場點）才算成交
+    # 空單：需等價格反彈到 entry（高於進場點）才算成交
+    if not pos.get('filled', False):
+        if dir == "多" and current_price <= entry:
+            pos['filled'] = True
+            print(f"✅ {pos['asset']} 多單已觸碰進場點 {format_price(entry)}，開始監控 TP/SL")
+        elif dir == "空" and current_price >= entry:
+            pos['filled'] = True
+            print(f"✅ {pos['asset']} 空單已觸碰進場點 {format_price(entry)}，開始監控 TP/SL")
+        else:
+            # 限價單尚未成交，僅顯示等待狀態，不觸發任何警報
+            gap_pct = abs(current_price - entry) / entry * 100
+            if dir == "多":
+                note = f"⏳ 掛單等待中，現價 {format_price(current_price)}，距進場點還差 {gap_pct:.2f}%↓"
+            else:
+                note = f"⏳ 掛單等待中，現價 {format_price(current_price)}，距進場點還差 {gap_pct:.2f}%↑"
+            return "⏳ 等待進場", note, False
+
     oi_change  = get_open_interest_change(inst_id)
     vol_spike  = get_volume_spike(inst_id)
     fr, ls_ratio = get_market_sentiment(inst_id)
@@ -574,6 +593,7 @@ def scan_worker_thread(msg_title, target_chat_id):
                         'tp2':         sig['tp2'],
                         'tp3':         sig['tp3'],
                         'reported_at': now_ts,
+                        'filled':      False,   # 限價單尚未成交
                     })
         print(f"📌 已加入持倉監控，目前追蹤 {len(active_positions)} 筆")
     else:
