@@ -550,7 +550,7 @@ def analyze_position(pos):
     return status, full_action, push
 
 def build_coin_conclusion(pos_list, current_price):
-    """針對同一幣種多筆持倉，生成一句綜合結論（單筆時回傳 None）"""
+    """針對同一幣種多筆持倉，給出一致的操作建議（單筆時回傳 None）"""
     if len(pos_list) <= 1:
         return None
 
@@ -565,33 +565,73 @@ def build_coin_conclusion(pos_list, current_price):
     direction_word = "做多" if has_long else "做空"
 
     if not current_price:
-        return f"📊 共 {len(pos_list)} 筆{direction_word}，無法取得現價計算綜合損益"
+        return f"📊 共 {len(pos_list)} 筆{direction_word}，無法取得現價"
 
-    pnls = []
+    # 計算每筆損益，並找出最有利 / 最不利的倉位
+    pos_with_pnl = []
     for p in pos_list:
         if p['dir'] == "多":
             pnl = (current_price - p['entry']) / p['entry'] * 100
         else:
             pnl = (p['entry'] - current_price) / p['entry'] * 100
-        pnls.append(pnl)
+        pos_with_pnl.append((p, pnl))
 
-    avg_pnl  = sum(pnls) / len(pnls)
-    winning  = sum(1 for x in pnls if x > 0)
+    pos_with_pnl.sort(key=lambda x: x[1], reverse=True)   # 最有利排前
+    lead_pos, lead_pnl   = pos_with_pnl[0]   # 最有利（P&L 最高）
+    lag_pos,  lag_pnl    = pos_with_pnl[-1]  # 最不利（P&L 最低）
 
-    if avg_pnl >= 5:
-        rec = "強烈建議部分止盈鎖利 🎯"
-    elif avg_pnl >= 1:
-        rec = "建議止損上移至成本保護利潤 ✅"
-    elif avg_pnl >= -1:
-        rec = "貼近成本，持續關注止損位 👀"
-    elif avg_pnl >= -3:
-        rec = "小幅虧損，注意止損防守 ⚠️"
+    lead_entry = format_price(lead_pos['entry'])
+    lag_entry  = format_price(lag_pos['entry'])
+
+    # 最有利倉位是否已達止盈
+    lead_tp1_hit = (
+        (lead_pos['dir'] == "多" and current_price >= lead_pos['tp1']) or
+        (lead_pos['dir'] == "空" and current_price <= lead_pos['tp1'])
+    )
+    lead_tp2_hit = (
+        (lead_pos['dir'] == "多" and current_price >= lead_pos['tp2']) or
+        (lead_pos['dir'] == "空" and current_price <= lead_pos['tp2'])
+    )
+
+    prefix = f"📌 <b>綜合建議（{len(pos_list)} 筆{direction_word}）：</b>"
+
+    # ── 情境判斷 ──────────────────────────────────────────
+    if lead_tp2_hit:
+        # 最有利倉已達TP2 → 最不利倉立刻移至成本
+        return (f"{prefix}進場 <code>{lead_entry}</code> 已達止盈2 🎯，"
+                f"<b>立即將進場 <code>{lag_entry}</code> 止損上移至成本 <code>{lag_entry}</code>，全力保護第二筆倉位利潤</b>")
+
+    elif lead_tp1_hit:
+        # 最有利倉達TP1 → 不利倉移至成本
+        return (f"{prefix}進場 <code>{lead_entry}</code> 已達止盈1 ({lead_pnl:+.1f}%) ✅，"
+                f"<b>建議立即將進場 <code>{lag_entry}</code> 止損上移至成本 <code>{lag_entry}</code> 保護倉位</b>")
+
+    elif lead_pnl >= 2 and lag_pnl >= 0:
+        # 兩筆都獲利，有利倉獲利更多 → 建議同步收緊止損
+        return (f"{prefix}兩筆均獲利 ({lead_pnl:+.1f}% / {lag_pnl:+.1f}%)，"
+                f"<b>建議統一將止損上移至各自成本（{lead_entry} / {lag_entry}），鎖定利潤</b>")
+
+    elif lead_pnl >= 1 and lag_pnl < 0:
+        # 一賺一虧 → 以獲利倉對沖，不利倉移至成本
+        return (f"{prefix}進場 <code>{lead_entry}</code> 獲利 {lead_pnl:+.1f}%，"
+                f"進場 <code>{lag_entry}</code> 虧損 {lag_pnl:+.1f}% → "
+                f"<b>建議將虧損倉 <code>{lag_entry}</code> 止損收緊至成本，避免進一步擴大損失</b>")
+
+    elif lead_pnl >= -1 and lag_pnl >= -1:
+        # 兩筆都貼近成本 → 以較不利為基準統一防守
+        return (f"{prefix}兩筆均貼近成本 ({lead_pnl:+.1f}% / {lag_pnl:+.1f}%)，"
+                f"<b>建議以較不利進場點 <code>{lag_entry}</code> 為基準，統一收緊止損防守</b>")
+
+    elif lead_pnl < 0 and lag_pnl < -3:
+        # 兩筆均虧損 → 統一減倉
+        return (f"{prefix}兩筆{direction_word}均虧損 ({lead_pnl:+.1f}% / {lag_pnl:+.1f}%) → "
+                f"<b>⛔ 建議以進場 <code>{lag_entry}</code> 較不利倉為主，"
+                f"統一收緊止損或各減倉 50% 控制風險</b>")
+
     else:
-        rec = "建議收緊止損或減倉控風 🔴"
-
-    return (f"📌 <b>綜合結論：</b>{len(pos_list)} 筆{direction_word}，"
-            f"{winning}/{len(pos_list)} 筆獲利 | "
-            f"均損益 <code>{avg_pnl:+.1f}%</code> → {rec}")
+        return (f"{prefix}進場 <code>{lead_entry}</code> ({lead_pnl:+.1f}%) / "
+                f"進場 <code>{lag_entry}</code> ({lag_pnl:+.1f}%) → "
+                f"<b>持續觀察，以較不利的 <code>{lag_entry}</code> 倉位止損為優先管理目標</b>")
 
 def run_position_monitor():
     """每小時 xx:30 執行，監控所有活躍持倉"""
