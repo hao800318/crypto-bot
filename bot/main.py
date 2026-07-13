@@ -969,6 +969,201 @@ def run_position_monitor():
         print(f"❌ 持倉監控警報發送失敗：{resp.json()}")
 
 # ==================== 🚀 6. 動態精度渲染發送引擎 ====================
+# ==================== 🔍 指定幣種即時分析 ====================
+def analyze_coin_snapshot(inst_id, bar_param="1H"):
+    """分析指定幣種當前狀態（不需要發生交叉），回傳完整快照"""
+    url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar_param}&limit=100"
+    try:
+        res = requests.get(url, timeout=3.0).json()
+        if not (res.get('code') == '0' and len(res['data']) >= 50):
+            return None
+        df = pd.DataFrame(res['data'], columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
+        for col in ['open','high','low','close','vol']:
+            df[col] = df[col].astype(float)
+        df = df.iloc[::-1].reset_index(drop=True)
+
+        df['MA8']   = df['close'].rolling(8).mean()
+        df['EMA89'] = df['close'].ewm(span=89, adjust=False).mean()
+
+        delta = df['close'].diff()
+        gain  = delta.where(delta > 0, 0).rolling(14).mean()
+        loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        df['RSI'] = 100 - (100 / (1 + gain / (loss + 1e-10)))
+
+        df['H-L']   = df['high'] - df['low']
+        df['H-PC']  = (df['high'] - df['close'].shift(1)).abs()
+        df['L-PC']  = (df['low']  - df['close'].shift(1)).abs()
+        df['TR']    = df[['H-L','H-PC','L-PC']].max(axis=1)
+        df['ATR14'] = df['TR'].rolling(14).mean()
+
+        plus_dm  = df['high'].diff().clip(lower=0)
+        minus_dm = (-df['low'].diff()).clip(lower=0)
+        mask = plus_dm >= minus_dm
+        plus_dm_c  = plus_dm.where(mask, 0)
+        minus_dm_c = minus_dm.where(~mask, 0)
+        atr14 = df['ATR14'] + 1e-10
+        plus_di  = 100 * plus_dm_c.rolling(14).mean() / atr14
+        minus_di = 100 * minus_dm_c.rolling(14).mean() / atr14
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
+        df['ADX'] = dx.rolling(14).mean()
+
+        c = df.iloc[-1]
+        p = df.iloc[-2]
+
+        # 近期高低點（支撐/壓力參考）
+        recent_high = df['high'].iloc[-20:].max()
+        recent_low  = df['low'].iloc[-20:].min()
+
+        is_cross_up   = (p['MA8'] <= p['EMA89']) and (c['MA8'] > c['EMA89'])
+        is_cross_down = (p['MA8'] >= p['EMA89']) and (c['MA8'] < c['EMA89'])
+
+        return {
+            'price':    c['close'],
+            'ma8':      c['MA8'],
+            'ema89':    c['EMA89'],
+            'rsi':      c['RSI'],
+            'adx':      c['ADX'],
+            'atr':      c['ATR14'],
+            'ma_above': c['MA8'] > c['EMA89'],    # True=多頭排列
+            'cross_up':   is_cross_up,
+            'cross_down': is_cross_down,
+            'recent_high': recent_high,
+            'recent_low':  recent_low,
+        }
+    except:
+        return None
+
+def send_coin_analysis(asset_input, chat_id):
+    """處理 /eth /btc /sol 等指令，發送即時分析報告"""
+    symbol = asset_input.upper().strip('/')
+    inst_id = f"{symbol}-USDT-SWAP"
+
+    # 先確認幣種存在
+    check_url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar=1H&limit=3"
+    try:
+        chk = requests.get(check_url, timeout=3.0).json()
+        if chk.get('code') != '0' or not chk.get('data'):
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "text": f"❌ 找不到 {inst_id}，請確認幣種名稱（例如：/eth /btc /sol）"}
+            )
+            return
+    except:
+        pass
+
+    s1 = analyze_coin_snapshot(inst_id, "1H")
+    s4 = analyze_coin_snapshot(inst_id, "4H")
+    funding_rate, ls_ratio = get_market_sentiment(inst_id)
+
+    if not s1 or not s4:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": f"⚠️ {symbol} 數據獲取失敗，請稍後再試"}
+        )
+        return
+
+    price = s1['price']
+    long_pct  = round(ls_ratio / (ls_ratio + 1) * 100)
+    short_pct = 100 - long_pct
+
+    # ── 趨勢判定 ──
+    def trend_label(s):
+        if s['adx'] < 20:
+            return "⬜ 盤整（無明確方向）"
+        elif s['ma_above']:
+            strength = "強" if s['adx'] >= 40 else ("中" if s['adx'] >= 25 else "弱")
+            return f"🟩 多頭（{strength}，ADX {s['adx']:.0f}）"
+        else:
+            strength = "強" if s['adx'] >= 40 else ("中" if s['adx'] >= 25 else "弱")
+            return f"🟥 空頭（{strength}，ADX {s['adx']:.0f}）"
+
+    # ── 建議邏輯 ──
+    def build_advice(s1, s4):
+        lines = []
+
+        # 判斷兩個時框是否一致
+        both_bull = s1['ma_above'] and s4['ma_above']
+        both_bear = (not s1['ma_above']) and (not s4['ma_above'])
+        mixed     = not both_bull and not both_bear
+        ranging   = s1['adx'] < 20 and s4['adx'] < 20
+
+        if ranging:
+            lines.append("⚠️ <b>建議觀望</b> — 1H+4H均處盤整，方向不明")
+            lines.append(f"  突破壓力 <b>{format_price(s1['recent_high'])}</b> 再考慮做多")
+            lines.append(f"  跌破支撐 <b>{format_price(s1['recent_low'])}</b>  再考慮做空")
+            return lines
+
+        if both_bull:
+            if s1['cross_up']:
+                lines.append("🚀 <b>現在可做多</b> — 1H剛發生黃金交叉，4H多頭確認")
+            elif s1['rsi'] > 68:
+                lines.append(f"⚠️ <b>多頭但RSI過熱({s1['rsi']:.0f})，建議等回踩</b>")
+                lines.append(f"  等價格回踩 MA8 附近 <b>{format_price(s1['ma8'])}</b> 再進多")
+            else:
+                lines.append("✅ <b>多頭排列，適合做多</b> — 1H+4H方向一致")
+                lines.append(f"  限價掛 <b>{format_price(s1['ma8'])}</b>（MA8）或市價追多")
+            sl = s1['ma8'] - s1['atr'] * 1.5
+            lines.append(f"  止損參考：<b>{format_price(sl)}</b>（MA8下方 1.5×ATR）")
+            lines.append(f"  做空觀望：等MA8跌破EMA89 <b>{format_price(s1['ema89'])}</b>")
+
+        elif both_bear:
+            if s1['cross_down']:
+                lines.append("📉 <b>現在可做空</b> — 1H剛發生死亡交叉，4H空頭確認")
+            elif s1['rsi'] < 32:
+                lines.append(f"⚠️ <b>空頭但RSI超賣({s1['rsi']:.0f})，建議等反彈</b>")
+                lines.append(f"  等價格反彈至 MA8 附近 <b>{format_price(s1['ma8'])}</b> 再進空")
+            else:
+                lines.append("✅ <b>空頭排列，適合做空</b> — 1H+4H方向一致")
+                lines.append(f"  限價掛 <b>{format_price(s1['ma8'])}</b>（MA8）或市價追空")
+            sl = s1['ma8'] + s1['atr'] * 1.5
+            lines.append(f"  止損參考：<b>{format_price(sl)}</b>（MA8上方 1.5×ATR）")
+            lines.append(f"  做多觀望：等MA8突破EMA89 <b>{format_price(s1['ema89'])}</b>")
+
+        else:  # mixed
+            lines.append("⚠️ <b>1H與4H方向分歧，建議觀望</b>")
+            if s1['ma_above']:
+                lines.append(f"  1H偏多但4H偏空 — 等4H轉多再做多")
+                lines.append(f"  4H轉多觀察點：<b>{format_price(s4['ema89'])}</b>（4H EMA89）")
+                lines.append(f"  做空等1H跌破EMA89：<b>{format_price(s1['ema89'])}</b>")
+            else:
+                lines.append(f"  1H偏空但4H偏多 — 不宜逆勢做空")
+                lines.append(f"  等1H轉多（突破 <b>{format_price(s1['ema89'])}</b>）再做多")
+
+        return lines
+
+    advice_lines = build_advice(s1, s4)
+
+    # ── 資金費率情緒 ──
+    if '主力偏多' in (build_sentiment_note("多", funding_rate, ls_ratio)[0]):
+        sentiment_tag = "偏多"
+    elif '主力偏空' in (build_sentiment_note("空", funding_rate, ls_ratio)[0]):
+        sentiment_tag = "偏空"
+    else:
+        sentiment_tag = "中性"
+    fr_pct = funding_rate * 100
+
+    # ── 組裝訊息 ──
+    msg = f"🔍 <b>{symbol} 即時分析</b>\n"
+    msg += f"<pre>現價  {format_price(price)}</pre>\n"
+    msg += "\n"
+    msg += f"<b>1H趨勢</b>  {trend_label(s1)}\n"
+    msg += f"<b>4H趨勢</b>  {trend_label(s4)}\n"
+    msg += f"<b>1H RSI</b>  {s1['rsi']:.1f}   <b>4H RSI</b>  {s4['rsi']:.1f}\n"
+    msg += "\n"
+    msg += "<b>─── 操作建議 ───</b>\n"
+    for line in advice_lines:
+        msg += f"{line}\n"
+    msg += "\n"
+    msg += f"<b>主力情緒</b>  {sentiment_tag}  費率{fr_pct:+.4f}%\n"
+    msg += f"<b>多空比</b>    多{long_pct}%：空{short_pct}%\n"
+    msg += f"<b>近期高點</b>  {format_price(s1['recent_high'])}\n"
+    msg += f"<b>近期低點</b>  {format_price(s1['recent_low'])}\n"
+
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}
+    )
+
 def format_price(p):
     if p == 0: return "0.00"
     if p >= 1: return f"{p:,.2f}" if p >= 100 else f"{p:,.4f}"
@@ -1200,6 +1395,19 @@ def handle_telegram_updates():
                             t = threading.Thread(target=send_holding_summary, args=(chat_id,))
                             t.daemon = True
                             t.start()
+
+                        elif text.startswith("/") and len(text) > 1:
+                            # 通用幣種查詢：/eth /btc /sol /doge 等
+                            coin_cmd = text.split()[0].lstrip("/").split("@")[0]
+                            if coin_cmd and coin_cmd.isalpha():
+                                print(f"🔍 收到幣種查詢指令：/{coin_cmd.upper()}")
+                                requests.post(
+                                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                    json={"chat_id": chat_id, "text": f"🔍 正在分析 {coin_cmd.upper()}，請稍候..."}
+                                )
+                                t = threading.Thread(target=send_coin_analysis, args=(coin_cmd, chat_id))
+                                t.daemon = True
+                                t.start()
 
         except Exception as e:
             print(f"⚠️ 監聽異常: {e}")
