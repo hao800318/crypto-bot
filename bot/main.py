@@ -596,14 +596,46 @@ def fetch_near_miss_candidate(asset, tf, btc_trend="neutral", market_fr=0.0):
 
         # 至少通過 1 道才值得顯示（接近訊號門檻較低）
         if failed_at and filters_passed >= 1:
+            current_atr  = c_last['ATR14']
+            current_ma8  = c_last['MA8']
+            current_ema89= c_last['EMA89']
+            if tf == "1h":
+                anchor_entry = current_ma8
+                anchor_label = f"MA8={format_price(current_ma8)}"
+                atr_mult  = 1.5
+                tp_mults  = (1.5, 3.0, 5.0)
+                tf_label  = "1H"
+            else:
+                anchor_entry = current_ema89
+                anchor_label = f"EMA89={format_price(current_ema89)}"
+                atr_mult  = 2.0
+                tp_mults  = (2.0, 4.0, 7.0)
+                tf_label  = "4H"
+            atr_dist = current_atr * atr_mult
+            if direction == "多":
+                sl_price = max(anchor_entry - atr_dist, anchor_entry * 0.96)
+                tp1 = anchor_entry + current_atr * tp_mults[0]
+                tp2 = anchor_entry + current_atr * tp_mults[1]
+                tp3 = anchor_entry + current_atr * tp_mults[2]
+            else:
+                sl_price = min(anchor_entry + atr_dist, anchor_entry * 1.04)
+                tp1 = anchor_entry - current_atr * tp_mults[0]
+                tp2 = anchor_entry - current_atr * tp_mults[1]
+                tp3 = anchor_entry - current_atr * tp_mults[2]
             return {
                 'asset':          asset.split('-')[0],
                 'dir':            direction,
-                'tf':             "1H" if tf == "1h" else "4H",
+                'tf':             tf_label,
                 'filters_passed': filters_passed,
                 'failed_at':      failed_at,
                 'rsi':            round(current_rsi, 1),
                 'adx':            round(current_adx, 1),
+                'entry':          anchor_entry,
+                'entry_label':    anchor_label,
+                'sl':             sl_price,
+                'tp1':            tp1,
+                'tp2':            tp2,
+                'tp3':            tp3,
             }
     except Exception:
         pass
@@ -627,7 +659,7 @@ def run_near_miss_scan():
         list(ex.map(lambda t: task(*t), tasks))
 
     results.sort(key=lambda x: x['filters_passed'], reverse=True)
-    return results[:5]
+    return results[:3]
 
 
 def run_strategy_scan():
@@ -1729,14 +1761,19 @@ def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False):
             near_misses = run_near_miss_scan()
             if near_misses:
                 dir_map = {"多": "🟩多", "空": "🟥空"}
-                lines = ["📭 <b>全網掃描完畢，暫無完整訊號</b>\n\n<b>── 接近訊號（供參考）──</b>"]
+                lines = ["📭 <b>全網掃描完畢，暫無完整訊號</b>\n\n<b>── 接近訊號 Top 3（供參考）──</b>"]
                 for nm in near_misses:
                     bar = "■" * nm['filters_passed'] + "□" * (4 - nm['filters_passed'])
                     d = dir_map.get(nm['dir'], nm['dir'])
                     lines.append(
-                        f"⚡ <b>{nm['asset']}</b>  {d}  {nm['tf']}\n"
-                        f"   通過 {nm['filters_passed']}/4 關  [{bar}]\n"
-                        f"   卡在：{nm['failed_at']}  ADX={nm['adx']}  RSI={nm['rsi']}"
+                        f"⚡ <b>{nm['asset']}</b>  {d}  {nm['tf']}  "
+                        f"通過 {nm['filters_passed']}/4 關  [{bar}]\n"
+                        f"   📍 進場：{nm['entry_label']}\n"
+                        f"   🛑 SL：{format_price(nm['sl'])}　"
+                        f"TP1：{format_price(nm['tp1'])}　"
+                        f"TP2：{format_price(nm['tp2'])}　"
+                        f"TP3：{format_price(nm['tp3'])}\n"
+                        f"   ⚠️ 卡在：{nm['failed_at']}　ADX={nm['adx']}　RSI={nm['rsi']}"
                     )
                 lines.append("\n<i>接近訊號未通過所有過濾條件，請自行評估進場風險。</i>")
                 text = "\n\n".join(lines)
