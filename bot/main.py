@@ -881,13 +881,13 @@ def analyze_position(pos):
                         f"現價 {format_price(current_price)}\n<b>訊號可能已失效，已自動取消掛單追蹤</b>")
                 return "⏰ 掛單逾時取消", note, True
 
-            # 3. 正常等待中，靜默監控不推送
+            # 3. 正常等待中 → 每次偵測週期推送，讓用戶決定繼續或撤單
             gap_pct = abs(current_price - entry) / entry * 100
             if dir == "多":
-                note = f"⏳ 掛單等待中，現價 {format_price(current_price)}，距進場點還差 {gap_pct:.2f}%↓"
+                note = f"現價 <code>{format_price(current_price)}</code>，距進場點還差 {gap_pct:.2f}%↓"
             else:
-                note = f"⏳ 掛單等待中，現價 {format_price(current_price)}，距進場點還差 {gap_pct:.2f}%↑"
-            return "⏳ 等待進場", note, False
+                note = f"現價 <code>{format_price(current_price)}</code>，距進場點還差 {gap_pct:.2f}%↑"
+            return "⏳ 等待進場", note, True
 
     # ── 已成交：取上次監控後的 K 線高低點（含 margin，防止 TP/SL 事件在監控間隔中被漏掉）──
     since_ts = pos.get('last_checked_ts', pos.get('reported_at', time.time() - 3600))
@@ -1208,6 +1208,7 @@ def run_position_monitor():
     now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
 
     alerts = []
+    pending_alerts = []   # 掛單等待中，需要單獨帶按鈕發送
     to_remove = []
 
     for pos in positions:
@@ -1281,7 +1282,10 @@ def run_position_monitor():
             continue
 
         if push:
-            alerts.append((pos, status, action))
+            if status == "⏳ 等待進場":
+                pending_alerts.append((pos, status, action))  # 單獨帶按鈕發送
+            else:
+                alerts.append((pos, status, action))
 
         # 止損觸發 / 全部止盈 / 保本回調 / 掛單取消 → 移除追蹤 + 記錄結果
         OUTCOME_MAP = {
@@ -1301,6 +1305,32 @@ def run_position_monitor():
             if p in active_positions:
                 active_positions.remove(p)
         save_positions(active_positions)   # 無論有無移除，都存一次（保留 tp_hit 旗標）
+
+    # ── 掛單等待中：逐筆推送，附「繼續等待」／「撤單」按鈕 ──
+    la_tz_p = pytz.timezone('America/Los_Angeles')
+    now_str_p = datetime.datetime.now(la_tz_p).strftime('%H:%M PT')
+    text_url_p = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    for pos_p, _, action_p in pending_alerts:
+        d_p  = "🟩多" if pos_p['dir'] == "多" else "🟥空"
+        waited_min = int((time.time() - pos_p['reported_at']) / 60)
+        tf_p = pos_p.get('tf', '4H')
+        expiry_h = 4 if '1H' in tf_p else 12
+        remain_min = max(0, expiry_h * 60 - waited_min)
+        msg_p = (
+            f"⏳ <b>{pos_p['asset']} 掛單等待中</b>  {now_str_p}\n"
+            f"{d_p}  {tf_p}  等待 <b>{waited_min}min</b>（逾時前剩 {remain_min}min）\n"
+            f"進場 <code>{format_price(pos_p['entry'])}</code>  止損 <code>{format_price(pos_p['sl'])}</code>\n"
+            f"{action_p}\n\n"
+            f"<b>繼續持有限價單，還是撤單？</b>"
+        )
+        markup_p = {"inline_keyboard": [[
+            {"text": "✅ 繼續等待", "callback_data": "ack_monitor"},
+            {"text": f"🗑️ 撤單 {pos_p['asset']}{pos_p['dir']}", "callback_data": f"cancel_pos_{pos_p['asset']}_{pos_p['dir']}"}
+        ]]}
+        requests.post(text_url_p, json={
+            "chat_id": str(TELEGRAM_CHAT_ID), "text": msg_p,
+            "parse_mode": "HTML", "reply_markup": markup_p
+        })
 
     if not alerts:
         print(f"✅ 持倉監控完成，{len(positions)} 筆持倉狀態正常")
@@ -2364,10 +2394,12 @@ def handle_telegram_updates():
                 t.daemon = True
                 t.start()
 
-            # B. 持倉監控（有 TP1/TP2 命中的倉位縮短至 15 分鐘，其餘 30 分鐘）
+            # B. 持倉監控（Plan B 動態間隔）
+            # 掛單等待 / TP1-TP2 已命中 → 5 分鐘；已成交未到 TP1 → 10 分鐘
             with active_positions_lock:
-                has_tp_hit = any(p.get('tp1_hit') or p.get('tp2_hit') for p in active_positions)
-            monitor_interval = 900 if has_tp_hit else 1800
+                has_tp_hit   = any(p.get('tp1_hit') or p.get('tp2_hit') for p in active_positions)
+                has_unfilled = any(not p.get('filled', False) for p in active_positions)
+            monitor_interval = 300 if (has_tp_hit or has_unfilled) else 600
             if now_ts - last_monitor_time >= monitor_interval:
                 print(f"🔍 觸發持倉監控：{now_la.strftime('%H:%M')}")
                 t = threading.Thread(target=run_position_monitor)
@@ -2428,6 +2460,23 @@ def handle_telegram_updates():
                                         print(f"📌 按鈕追蹤：{asset_cb} {dir_cb}")
                                     else:
                                         answer_callback(cb_id, "⚠️ 訊號已過期，請重新 /scan", alert=True)
+
+                        elif cb_data.startswith("cancel_pos_"):
+                            parts_cp = cb_data.split("_", 3)  # ["cancel","pos","ETH","多"]
+                            if len(parts_cp) == 4:
+                                asset_cp, dir_cp = parts_cp[2], parts_cp[3]
+                                with active_positions_lock:
+                                    before_cp = len(active_positions)
+                                    active_positions[:] = [p for p in active_positions
+                                                           if not (p['asset'] == asset_cp and p['dir'] == dir_cp
+                                                                   and not p.get('filled', False))]
+                                    removed_cp = before_cp > len(active_positions)
+                                    if removed_cp:
+                                        save_positions(active_positions)
+                                if removed_cp:
+                                    answer_callback(cb_id, f"🗑️ {asset_cp}{dir_cp} 掛單已撤銷，停止監控", alert=True)
+                                else:
+                                    answer_callback(cb_id, f"⚠️ 找不到 {asset_cp}{dir_cp} 的掛單（可能已成交或已取消）", alert=True)
 
                         elif cb_data.startswith("unwatch_"):
                             asset_uw = cb_data.split("_", 1)[1]
