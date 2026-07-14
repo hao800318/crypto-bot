@@ -1137,7 +1137,7 @@ def analyze_position(pos):
                         f"原因：{eval_detail}\n{gap_str}")
                 return "🚫 掛單已取消", note, True
             else:
-                note = f"{eval_summary}  {eval_detail}\n{gap_str}"
+                note = f"{eval_summary}\n{gap_str}"
                 return "⏳ 等待進場", note, True
 
     # ── 已成交：取上次監控後的 K 線高低點（含 margin，防止 TP/SL 事件在監控間隔中被漏掉）──
@@ -1564,14 +1564,11 @@ def run_position_monitor():
     text_url_p = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     for pos_p, _, action_p in pending_alerts:
         d_p  = "🟩多" if pos_p['dir'] == "多" else "🟥空"
-        waited_min = int((time.time() - pos_p['reported_at']) / 60)
         tf_p = pos_p.get('tf', '4H')
-        expiry_h = 4 if '1H' in tf_p else 12
-        remain_min = max(0, expiry_h * 60 - waited_min)
         msg_p = (
             f"⏳ <b>{pos_p['asset']} 掛單更新</b>  {now_str_p}\n"
-            f"{d_p}  {tf_p}  已等待 {waited_min}min（逾時前剩 {remain_min}min）\n"
-            f"進場 <code>{format_price(pos_p['entry'])}</code>  止損 <code>{format_price(pos_p['sl'])}</code>\n\n"
+            f"{d_p}  {tf_p}  "
+            f"進場 <code>{format_price(pos_p['entry'])}</code>  止損 <code>{format_price(pos_p['sl'])}</code>\n"
             f"{action_p}"
         )
         requests.post(text_url_p, json={
