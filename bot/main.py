@@ -1138,7 +1138,7 @@ def analyze_position(pos):
                 return "🚫 掛單已取消", note, True
             else:
                 note = f"{eval_summary}\n{gap_str}"
-                return "⏳ 等待進場", note, True
+                return "⏳ 等待進場", note, False
 
     # ── 已成交：取上次監控後的 K 線高低點（含 margin，防止 TP/SL 事件在監控間隔中被漏掉）──
     since_ts = pos.get('last_checked_ts', pos.get('reported_at', time.time() - 3600))
