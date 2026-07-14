@@ -325,10 +325,11 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             if current_adx < 20:
                 return None
 
-            # ② 成交量確認：交叉K棒量 > 過去5根均量 × 1.2
-            avg_vol_5 = df['vol'].iloc[-7:-2].mean()
-            cross_vol = df['vol'].iloc[-2]
-            volume_confirmed = cross_vol > avg_vol_5 * 1.2
+            # ② 成交量確認：交叉K棒量必須 > 過去20根均量（硬性過濾無量假突破）
+            avg_vol_20 = df['vol'].iloc[-22:-2].mean()
+            cross_vol  = df['vol'].iloc[-2]
+            if cross_vol <= avg_vol_20:
+                return None  # 無量突破直接過濾，不進入評分
 
             # ── RSI 勝率基礎評分 ──
             base_score = (100 - abs(current_rsi - 56)) if direction == "多" else (100 - abs(current_rsi - 44))
@@ -337,8 +338,8 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             funding_rate, ls_ratio = get_market_sentiment(asset)
             sentiment_note, sentiment_bonus = build_sentiment_note(direction, funding_rate, ls_ratio)
 
-            # ③ 成交量加分
-            vol_bonus = 8 if volume_confirmed else -10
+            # ③ 成交量加分（已通過硬性過濾；量越大加分越多）
+            vol_bonus = 8 if cross_vol > avg_vol_20 * 1.5 else 4
 
             # ④ 多時框對齊（1H看4H，4H看1D）
             tf_bonus = 0
@@ -387,37 +388,35 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
                 anchor_entry = current_ma8
                 anchor_label = f"MA8={format_price(current_ma8)}"
                 atr_mult = 1.5
-                tp_ratios_long  = (1.015, 1.030, 1.050)
-                tp_ratios_short = (0.985, 0.970, 0.950)
+                tp_mults = (1.5, 3.0, 5.0)   # ATR 倍數 TP1/TP2/TP3
             else:
                 anchor_entry = current_ema89
                 anchor_label = f"EMA89={format_price(current_ema89)}"
                 atr_mult = 2.0
-                tp_ratios_long  = (1.030, 1.060, 1.100)
-                tp_ratios_short = (0.970, 0.940, 0.900)
+                tp_mults = (2.0, 4.0, 7.0)
 
             entry_price = anchor_entry
 
-            # ⑦ ATR 動態止損
+            # ⑦ ATR 動態止損 + 止盈（全部用 ATR 倍數，波動大時目標自動拉寬）
             atr_sl_dist = current_atr * atr_mult
             if direction == "多":
-                sl_price = max(entry_price - atr_sl_dist, entry_price * 0.96)  # 最大止損 4%
+                sl_price = max(entry_price - atr_sl_dist, entry_price * 0.96)
+                tp1 = entry_price + current_atr * tp_mults[0]
+                tp2 = entry_price + current_atr * tp_mults[1]
+                tp3 = entry_price + current_atr * tp_mults[2]
                 if current_rsi > 65:
                     entry_type = f"⚠️ {tf_tag}RSI過熱({current_rsi:.1f})，掛限價等回踩 {anchor_label}"
                 else:
                     entry_type = f"📌 {tf_tag}掛限價 {anchor_label}，ATR止損={format_price(sl_price)}"
-                tp1 = entry_price * tp_ratios_long[0]
-                tp2 = entry_price * tp_ratios_long[1]
-                tp3 = entry_price * tp_ratios_long[2]
             else:
-                sl_price = min(entry_price + atr_sl_dist, entry_price * 1.04)  # 最大止損 4%
+                sl_price = min(entry_price + atr_sl_dist, entry_price * 1.04)
+                tp1 = entry_price - current_atr * tp_mults[0]
+                tp2 = entry_price - current_atr * tp_mults[1]
+                tp3 = entry_price - current_atr * tp_mults[2]
                 if current_rsi < 35:
                     entry_type = f"⚠️ {tf_tag}RSI超賣({current_rsi:.1f})，掛限價等反彈至 {anchor_label}"
                 else:
                     entry_type = f"📌 {tf_tag}掛限價 {anchor_label}，ATR止損={format_price(sl_price)}"
-                tp1 = entry_price * tp_ratios_short[0]
-                tp2 = entry_price * tp_ratios_short[1]
-                tp3 = entry_price * tp_ratios_short[2]
 
             return {
                 "asset":          asset.split('-')[0],
@@ -514,6 +513,39 @@ def save_positions(positions):
 
 active_positions = load_positions()   # 啟動時從檔案恢復
 active_positions_lock = threading.Lock()
+
+# ==================== 📈 勝率統計系統 ====================
+STATS_FILE = "trade_stats.json"
+
+def load_stats():
+    try:
+        if os.path.exists(STATS_FILE):
+            with open(STATS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"⚠️ 讀取統計檔案失敗：{e}")
+    return []
+
+def save_stats(records):
+    try:
+        with open(STATS_FILE, "w", encoding="utf-8") as f:
+            json.dump(records, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ 儲存統計檔案失敗：{e}")
+
+def record_trade_outcome(pos, outcome):
+    """記錄交易結果；outcome: win_tp3/win_tp2/breakeven/loss"""
+    records = load_stats()
+    records.append({
+        "asset":     pos['asset'],
+        "dir":       pos['dir'],
+        "tf":        pos.get('tf', '—'),
+        "entry":     pos.get('entry'),
+        "outcome":   outcome,
+        "timestamp": time.time(),
+    })
+    save_stats(records)
+    print(f"📊 記錄交易結果：{pos['asset']} {pos['dir']} → {outcome}")
 
 # 最近一次掃描結果快取（key = asset 如 "ETH"，value = signal dict）
 # 供 /open 指令查詢，不自動加入持倉監控
@@ -670,9 +702,15 @@ def analyze_position(pos):
             push = True
         elif effective_high >= tp1:
             if pos.get('tp1_hit'):
+                # 追蹤止損：TP1 後每次監控都把 SL 往上拉緊鎖利
+                trail_dist = pos.get('trail_dist', entry * 0.015)
+                new_trail_sl = current_price - trail_dist
+                if new_trail_sl > sl:
+                    pos['sl'] = new_trail_sl
+                    sl = new_trail_sl
                 # TP1 已在前次通知，本次靜默監控等待 TP2
                 status = "🟢 TP1已完成"
-                action = f"剩餘50%持倉中，等待TP2 <code>{format_price(tp2)}</code>，現價 {format_price(current_price)}"
+                action = f"剩餘50%持倉中，等待TP2 <code>{format_price(tp2)}</code>，追蹤止損 {format_price(sl)}，現價 {format_price(current_price)}"
                 deteri = check_market_deterioration(inst_id, dir, pos.get('tf','1H'))
                 if deteri:
                     status = "🚨 局勢惡化"
@@ -684,6 +722,7 @@ def analyze_position(pos):
                 status = "🟢 止盈1達標"
                 action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈1 {format_price(tp1)}，"
                           f"現價 {format_price(current_price)}｜<b>建議平倉50%</b>，止損上移至成本（{format_price(entry)}）")
+                pos['trail_dist'] = entry - sl  # 保存 ATR 距離供追蹤止損使用
                 pos['sl'] = entry  # 立即把 SL 移至進場點（保本止損）
                 sl = entry
                 push = True
@@ -731,9 +770,15 @@ def analyze_position(pos):
             push = True
         elif effective_low <= tp1:
             if pos.get('tp1_hit'):
+                # 追蹤止損：TP1 後每次監控都把 SL 往下拉緊鎖利（空頭）
+                trail_dist = pos.get('trail_dist', entry * 0.015)
+                new_trail_sl = current_price + trail_dist
+                if new_trail_sl < sl:
+                    pos['sl'] = new_trail_sl
+                    sl = new_trail_sl
                 # TP1 已在前次通知，本次靜默監控等待 TP2
                 status = "🟢 TP1已完成"
-                action = f"剩餘50%持倉中，等待TP2 <code>{format_price(tp2)}</code>，現價 {format_price(current_price)}"
+                action = f"剩餘50%持倉中，等待TP2 <code>{format_price(tp2)}</code>，追蹤止損 {format_price(sl)}，現價 {format_price(current_price)}"
                 deteri = check_market_deterioration(inst_id, dir, pos.get('tf','4H'))
                 if deteri:
                     status = "🚨 局勢惡化"
@@ -745,6 +790,7 @@ def analyze_position(pos):
                 status = "🟢 止盈1達標"
                 action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈1 {format_price(tp1)}，"
                           f"現價 {format_price(current_price)}｜<b>建議平倉50%</b>，止損下移至成本（{format_price(entry)}）")
+                pos['trail_dist'] = sl - entry  # 保存 ATR 距離供追蹤止損使用
                 pos['sl'] = entry  # 立即把 SL 移至進場點（保本止損）
                 sl = entry
                 push = True
@@ -961,9 +1007,16 @@ def run_position_monitor():
         if push:
             alerts.append((pos, status, action))
 
-        # 止損觸發 / 全部止盈 / 保本回調 / 掛單取消 → 移除追蹤
+        # 止損觸發 / 全部止盈 / 保本回調 / 掛單取消 → 移除追蹤 + 記錄結果
+        OUTCOME_MAP = {
+            "🟣 全部止盈":        "win_tp3",
+            "🛡️ 回調至保本止損":  "breakeven",
+            "🔴 止損觸發":        "loss",
+        }
         if status in ("🔴 止損觸發", "🟣 全部止盈", "🛡️ 回調至保本止損",
                       "🚫 掛單已取消", "⏰ 掛單逾時取消"):
+            if status in OUTCOME_MAP and pos.get('filled', True):
+                record_trade_outcome(pos, OUTCOME_MAP[status])
             to_remove.append(pos)
 
     # 清理過期 / 已結束的持倉，並儲存最新 TP 旗標
@@ -1665,12 +1718,71 @@ def handle_close_command(text, chat_id):
     )
 
 
+def send_stats_report(chat_id):
+    """每日勝率播報（近30天）"""
+    records = load_stats()
+    cutoff  = time.time() - 30 * 86400
+    recent  = [r for r in records if r.get('timestamp', 0) >= cutoff]
+    valid   = [r for r in recent if r['outcome'] in ('win_tp3', 'breakeven', 'loss')]
+
+    if not valid:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": str(chat_id),
+                  "text": "📊 近30天尚無完整交易記錄，繼續積累數據中。"}
+        )
+        return
+
+    wins       = [r for r in valid if r['outcome'] == 'win_tp3']
+    breakevens = [r for r in valid if r['outcome'] == 'breakeven']
+    losses     = [r for r in valid if r['outcome'] == 'loss']
+    total      = len(valid)
+    win_rate   = len(wins) / total * 100
+    be_rate    = len(breakevens) / total * 100
+
+    la_tz   = pytz.timezone('America/Los_Angeles')
+    now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d')
+
+    msg  = f"<b>【每日勝率統計】</b>  <code>{now_str}</code>\n"
+    msg += f"近30天共 <b>{total}</b> 筆完整交易\n"
+    msg += "─────────────────────────\n"
+    msg += f"🟣 全止盈    <b>{len(wins)}</b> 筆  ({win_rate:.1f}%)\n"
+    msg += f"🛡️ 保本出場  <b>{len(breakevens)}</b> 筆  ({be_rate:.1f}%)\n"
+    msg += f"🔴 止損      <b>{len(losses)}</b> 筆  ({100-win_rate-be_rate:.1f}%)\n"
+    msg += "─────────────────────────\n"
+    msg += f"整體勝率（止盈+保本）：<b>{win_rate+be_rate:.1f}%</b>\n\n"
+
+    # 各幣種細分
+    from collections import Counter
+    asset_wins   = Counter(r['asset'] for r in wins)
+    asset_losses = Counter(r['asset'] for r in losses)
+    all_assets   = sorted(set(r['asset'] for r in valid))
+    if all_assets:
+        msg += "<b>各幣種：</b>\n"
+        for a in all_assets:
+            w = asset_wins.get(a, 0)
+            l = asset_losses.get(a, 0)
+            b = sum(1 for r in breakevens if r['asset'] == a)
+            t = w + l + b
+            pct = (w + b) / t * 100 if t else 0
+            msg += f"  {a}：{w}W {b}BE {l}L  ({pct:.0f}%)\n"
+
+    msg += "\n<i>數據僅供參考，保持紀律為第一要務。</i>"
+
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": str(chat_id), "text": msg, "parse_mode": "HTML"}
+    )
+    print(f"📊 每日勝率播報完成（{total} 筆）")
+
+
 def handle_telegram_updates():
     print("🤖 幣圈分析師【勝率精選 5 幣版 + 主力動向確認 + 持倉監控版】雷達正在開機...")
     offset = None
     la_tz = pytz.timezone('America/Los_Angeles')
     last_reported_hour = -1
-    last_monitor_time  = 0  # epoch seconds，用絕對時間確保真正 1 小時間隔
+    last_monitor_time  = 0
+    last_stats_date    = None  # 每日勝率播報去重
 
     while True:
         try:
@@ -1684,6 +1796,14 @@ def handle_telegram_updates():
                 t.daemon = True
                 t.start()
                 last_reported_hour = now_la.hour
+
+            # B2. 每日勝率播報（00:00 PT）
+            if now_la.hour == 0 and now_la.minute < 2 and last_stats_date != now_la.date():
+                last_stats_date = now_la.date()
+                print(f"📊 觸發每日勝率播報：{now_la.strftime('%Y-%m-%d')}")
+                t = threading.Thread(target=send_stats_report, args=(TELEGRAM_CHAT_ID,))
+                t.daemon = True
+                t.start()
 
             # B. 持倉監控（每 30 分鐘執行一次，用絕對時間防止重啟重複觸發）
             if now_ts - last_monitor_time >= 1800:
@@ -1731,6 +1851,12 @@ def handle_telegram_updates():
                         elif text.lower().startswith("/close"):
                             print(f"🗑️ 收到 /close 指令：{text}")
                             t = threading.Thread(target=handle_close_command, args=(text, chat_id))
+                            t.daemon = True
+                            t.start()
+
+                        elif text.lower().startswith("/stats"):
+                            print(f"📊 收到 /stats 指令")
+                            t = threading.Thread(target=send_stats_report, args=(chat_id,))
                             t.daemon = True
                             t.start()
 
