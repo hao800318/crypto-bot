@@ -593,6 +593,11 @@ def analyze_position(pos):
             pos['filled'] = True
             how = "K線低點" if dir == "多" else "K線高點"
             print(f"✅ {pos['asset']} {dir}單已由{how}觸碰進場點 {format_price(entry)}，開始監控 TP/SL")
+            action = (f"🎯 {how} {format_price(effective_low if dir == '多' else effective_high)} "
+                      f"已觸及進場點 {format_price(entry)}，現價 {format_price(current_price)}\n"
+                      f"<b>限價單應已成交，開始監控 TP/SL</b>\n"
+                      f"若訂單未成交，請輸入 /close {pos['asset']} 取消追蹤")
+            return "✅ 已觸及進場點", action, True  # 推送進場確認，下次監控再做 TP/SL
         else:
             # 限價單尚未成交，僅顯示等待狀態，不觸發任何警報
             gap_pct = abs(current_price - entry) / entry * 100
@@ -967,6 +972,7 @@ def run_position_monitor():
 
     # 各狀態對應的持倉建議
     REC = {
+        "✅ 已觸及進場點":     ("確認成交，開始監控TP/SL", "🎯"),
         "🔴 止損觸發":         ("現價出場止損",   "🚪"),
         "🛡️ 回調至保本止損":   ("出場保本",       "🛡️"),
         "🟣 全部止盈":         ("全數出場",       "🎊"),
@@ -977,6 +983,7 @@ def run_position_monitor():
         "🚨 局勢惡化":         ("建議現價出場",   "🚪"),
         "🟢 TP1已完成":        ("繼續持有等TP2",  "⏳"),
         "🔄 持倉中":           ("繼續持有",       "✅"),
+        "⏳ 等待進場":         ("等待限價單成交", "⏳"),
     }
 
     for asset, asset_alerts in alerts_by_asset.items():
@@ -1495,11 +1502,11 @@ def handle_open_command(text, chat_id):
             'tp3':             sig['tp3'],
             'reported_at':     now_ts,
             'last_checked_ts': now_ts,
-            'filled':          True,   # 用戶手動確認已開倉 → 直接標為成交
+            'filled':          False,  # 掛單等待模式：等價格觸碰進場點後才開始 TP/SL 監控
         }
         dir_tag = "🟩多" if sig['dir'] == "多" else "🟥空"
         confirm_text = (
-            f"✅ <b>{symbol} {dir_tag} 已加入監控</b>\n"
+            f"⏳ <b>{symbol} {dir_tag} 掛單監控中</b>\n"
             f"<pre>"
             f"進場  {format_price(sig['entry'])}\n"
             f"止損  {format_price(sig['sl'])}\n"
@@ -1507,8 +1514,9 @@ def handle_open_command(text, chat_id):
             f"TP2   {format_price(sig['tp2'])}\n"
             f"TP3   {format_price(sig['tp3'])}\n"
             f"</pre>"
-            f"監控中，TP/SL/市場惡化時自動推送警報\n"
-            f"平倉後請輸入 /close {symbol} 解除監控"
+            f"📌 價格觸及進場點時自動推送確認通知\n"
+            f"確認成交後開始監控 TP/SL/市場惡化\n"
+            f"取消掛單請輸入 /close {symbol}"
         )
 
     else:
