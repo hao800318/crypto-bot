@@ -1541,7 +1541,7 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         print(f"❌ 報告發送失敗：{result}")
 
 # ==================== 📡 7. 原生無衝突監聽引擎 ====================
-def scan_worker_thread(msg_title, target_chat_id):
+def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False):
     valid_signals = run_strategy_scan()
     if valid_signals:
         send_html_report_via_requests(valid_signals, mode_title=msg_title, target_chat_id=target_chat_id)
@@ -1552,10 +1552,13 @@ def scan_worker_thread(msg_title, target_chat_id):
                 last_scan_cache[sig['asset']] = {**sig, 'cached_at': time.time()}
         print(f"📦 訊號已快取 {len(valid_signals)} 筆，等待 /open 指令確認")
     else:
-        text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        resp = requests.post(text_url, json={"chat_id": str(target_chat_id), "text": "📭 全網通掃完畢，當前盤面極其冷靜，暫無符合勝率條件之信號。"})
-        if resp.json().get("ok"):
-            print(f"✅ 「盤面冷靜」訊息發送成功")
+        if silent_on_empty:
+            print(f"📭 定時掃描無訊號，靜默略過（{msg_title}）")
+        else:
+            text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            resp = requests.post(text_url, json={"chat_id": str(target_chat_id), "text": "📭 全網通掃完畢，當前盤面極其冷靜，暫無符合勝率條件之信號。"})
+            if resp.json().get("ok"):
+                print(f"✅ 「盤面冷靜」訊息發送成功")
 
 def send_holding_summary(chat_id):
     """發送目前所有活躍持倉的狀態總覽"""
@@ -1878,7 +1881,7 @@ def handle_telegram_updates():
             # A. 定時播報（整點）
             if now_la.hour in SCHEDULE_HOURS and now_la.minute == 0 and now_la.hour != last_reported_hour:
                 print(f"🔔 觸發加州整點定時播報：{now_la.hour}:00")
-                t = threading.Thread(target=scan_worker_thread, args=("設定節點定時速報", TELEGRAM_CHAT_ID))
+                t = threading.Thread(target=scan_worker_thread, args=("設定節點定時速報", TELEGRAM_CHAT_ID, True))
                 t.daemon = True
                 t.start()
                 last_reported_hour = now_la.hour
