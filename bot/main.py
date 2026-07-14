@@ -134,9 +134,10 @@ def get_market_avg_funding_rate():
             pass
     return sum(rates) / len(rates) if rates else 0.0
 
-def get_candle_range_since(inst_id, since_ts, bar="1H"):
+def get_candle_range_since(inst_id, since_ts, bar="1H", no_margin=False):
     """取得 since_ts 以來所有 K 線的最高價和最低價。
     用於偵測監控間隔中曾觸碰的價格極值，防止漏掉 TP/SL/填單事件。
+    no_margin=True：嚴格只取 since_ts 之後開始的 K 棒（用於填單判定，避免納入舊棒）。
     回傳 (range_high, range_low) 或 (None, None)。
     """
     try:
@@ -148,9 +149,13 @@ def get_candle_range_since(inst_id, since_ts, bar="1H"):
             df['ts']   = df['ts'].astype(float) / 1000   # ms → seconds
             df['high'] = df['high'].astype(float)
             df['low']  = df['low'].astype(float)
-            # 包含 since_ts 之前 1 根 K 線（防止邊界漏算）
-            margin = 3600 if bar == "1H" else 14400
-            df = df[df['ts'] >= since_ts - margin]
+            if no_margin:
+                # 嚴格過濾：只包含在 since_ts 之後「開盤」的 K 棒
+                df = df[df['ts'] >= since_ts]
+            else:
+                # 包含 since_ts 之前 1 根 K 線（防止 TP/SL 事件在兩次監控間被漏掉）
+                margin = 3600 if bar == "1H" else 14400
+                df = df[df['ts'] >= since_ts - margin]
             if not df.empty:
                 return float(df['high'].max()), float(df['low'].min())
     except:
@@ -832,28 +837,25 @@ def analyze_position(pos):
     tp2   = pos['tp2']
     tp3   = pos['tp3']
 
-    # ── 取得上次監控後的 K 線高低點（防止 TP/SL/填單事件在監控間隔中被漏掉）──
-    since_ts = pos.get('last_checked_ts', pos.get('reported_at', time.time() - 3600))
-    bar      = "1H" if "1H" in pos.get('tf', '1H') else "4H"
-    rng_high, rng_low = get_candle_range_since(inst_id, since_ts, bar)
-    # 回退到現價作為保底
-    effective_high = max(rng_high, current_price) if rng_high else current_price
-    effective_low  = min(rng_low,  current_price) if rng_low  else current_price
-    # 更新本次監控時間戳
-    pos['last_checked_ts'] = time.time()
+    bar = "1H" if "1H" in pos.get('tf', '1H') else "4H"
 
     # ── 先確認限價單是否已被成交 ──
-    # 用 K 線高低點判斷（比只看現價更準確，防止進場點在兩次監控間被觸碰後反彈）
+    # 填單判定：只看「建倉後」開始的 K 棒，不使用 margin 往前延伸，
+    # 避免舊棒高低點（訊號出現前）被誤判為已觸碰進場點。
     if not pos.get('filled', False):
+        reported_at   = pos.get('reported_at', time.time())
+        fill_high, fill_low = get_candle_range_since(inst_id, reported_at, bar, no_margin=True)
+        fill_eff_high = max(fill_high, current_price) if fill_high else current_price
+        fill_eff_low  = min(fill_low,  current_price) if fill_low  else current_price
         filled_by_candle = (
-            (dir == "多" and effective_low  <= entry) or
-            (dir == "空" and effective_high >= entry)
+            (dir == "多" and fill_eff_low  <= entry) or
+            (dir == "空" and fill_eff_high >= entry)
         )
         if filled_by_candle:
             pos['filled'] = True
             how = "K線低點" if dir == "多" else "K線高點"
             print(f"✅ {pos['asset']} {dir}單已由{how}觸碰進場點 {format_price(entry)}，開始監控 TP/SL")
-            action = (f"🎯 {how} {format_price(effective_low if dir == '多' else effective_high)} "
+            action = (f"🎯 {how} {format_price(fill_eff_low if dir == '多' else fill_eff_high)} "
                       f"已觸及進場點 {format_price(entry)}，現價 {format_price(current_price)}\n"
                       f"<b>限價單應已成交，開始監控 TP/SL</b>")
             return "✅ 已觸及進場點", action, True  # 推送進場確認，下次監控再做 TP/SL
@@ -861,8 +863,8 @@ def analyze_position(pos):
             # ── 掛單尚未成交 ──
             # 1. 止損點已被突破 → 訊號作廢，自動取消
             sl_breached = (
-                (dir == "多" and effective_low  <= sl) or
-                (dir == "空" and effective_high >= sl)
+                (dir == "多" and fill_eff_low  <= sl) or
+                (dir == "空" and fill_eff_high >= sl)
             )
             if sl_breached:
                 note = (f"⛔ 現價 {format_price(current_price)} 已突破止損位 {format_price(sl)}，"
@@ -886,6 +888,13 @@ def analyze_position(pos):
             else:
                 note = f"⏳ 掛單等待中，現價 {format_price(current_price)}，距進場點還差 {gap_pct:.2f}%↑"
             return "⏳ 等待進場", note, False
+
+    # ── 已成交：取上次監控後的 K 線高低點（含 margin，防止 TP/SL 事件在監控間隔中被漏掉）──
+    since_ts = pos.get('last_checked_ts', pos.get('reported_at', time.time() - 3600))
+    rng_high, rng_low = get_candle_range_since(inst_id, since_ts, bar)
+    effective_high = max(rng_high, current_price) if rng_high else current_price
+    effective_low  = min(rng_low,  current_price) if rng_low  else current_price
+    pos['last_checked_ts'] = time.time()
 
     oi_change  = get_open_interest_change(inst_id)
     vol_spike  = get_volume_spike(inst_id)
