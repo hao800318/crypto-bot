@@ -2000,129 +2000,131 @@ def send_holding_summary(chat_id):
 # ==================== 📌 手動開倉/平倉指令 ====================
 def handle_open_command(text, chat_id):
     """
-    /open ETH        → 用最近快取訊號的進場參數開倉
-    /open ETH 多     → 指定方向（快取中有多空兩筆時）
+    /open ETH        → 即時重算指標，以 MA8/EMA89 為進場錨點
+    /open ETH 多     → 指定方向（若與指標方向相反會警告）
+    每次都即時重算，保證點位穩定且基於當前市況。
     """
+    send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     parts = text.strip().split()
     if len(parts) < 2:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id,
-                  "text": "❓ 用法：/open ETH 或 /open ETH 多\n如尚未掃描請先執行 /scan 取得訊號"}
-        )
+        requests.post(send_url, json={"chat_id": chat_id,
+            "text": "❓ 用法：/open ETH 或 /open ETH 多"})
         return
 
     symbol    = parts[1].upper()
-    direction = parts[2] if len(parts) >= 3 else None  # "多" or "空"
+    direction = parts[2] if len(parts) >= 3 and parts[2] in ("多", "空") else None
+    inst_id   = f"{symbol}-USDT-SWAP"
+    now_ts    = time.time()
 
-    with last_scan_lock:
-        sig = last_scan_cache.get(symbol)
+    # ── 即時重算兩個時框，挑條件最多的 ──
+    requests.post(send_url, json={"chat_id": chat_id,
+        "text": f"🔍 正在分析 {symbol} 當前指標，請稍候..."})
 
-    now_ts = time.time()
+    best = None
+    for tf in ('1h', '4h'):
+        st = fetch_coin_status(inst_id, tf)
+        if st and (best is None or st['passed'] > best['passed']):
+            best = st
 
-    # ── 有快取訊號 ──
-    if sig:
-        cache_age_min = (now_ts - sig.get('cached_at', 0)) / 60
-        if cache_age_min > 120:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id,
-                      "text": f"⚠️ {symbol} 的訊號已超過 2 小時，請重新執行 /scan 或 /{symbol.lower()} 後再開倉"}
-            )
-            return
+    if not best:
+        requests.post(send_url, json={"chat_id": chat_id,
+            "text": f"❌ 無法取得 {symbol} 的市場數據，請確認幣種名稱"})
+        return
 
-        if direction and sig['dir'] != direction:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id,
-                      "text": f"⚠️ 快取中 {symbol} 的訊號方向為「{sig['dir']}」，與你指定的「{direction}」不符\n如確認開倉請輸入 /open {symbol} {sig['dir']}"}
-            )
-            return
+    # ── 若未指定方向，採用指標判斷的方向 ──
+    if direction is None:
+        direction = best['dir']
 
-        new_pos = {
-            'asset':           sig['asset'],
-            'dir':             sig['dir'],
-            'tf':              sig['tf'],
-            'entry':           sig['entry'],
-            'sl':              sig['sl'],
-            'tp1':             sig['tp1'],
-            'tp2':             sig['tp2'],
-            'tp3':             sig['tp3'],
-            'reported_at':     now_ts,
-            'last_checked_ts': now_ts,
-            'filled':          False,  # 掛單等待模式：等價格觸碰進場點後才開始 TP/SL 監控
-        }
-        dir_tag = "🟩多" if sig['dir'] == "多" else "🟥空"
-        confirm_text = (
-            f"⏳ <b>{symbol} {dir_tag} 掛單監控中</b>\n"
-            f"<pre>"
-            f"進場  {format_price(sig['entry'])}\n"
-            f"止損  {format_price(sig['sl'])}\n"
-            f"TP1   {format_price(sig['tp1'])}\n"
-            f"TP2   {format_price(sig['tp2'])}\n"
-            f"TP3   {format_price(sig['tp3'])}\n"
-            f"</pre>"
-            f"📌 價格觸及進場點時自動推送確認通知\n"
-            f"確認成交後開始監控 TP/SL/市場惡化\n"
-            f"取消掛單請輸入 /close {symbol}"
+    # ── 方向與指標相反 → 拒絕，避免逆勢開倉 ──
+    if best['dir'] != direction:
+        f = best['filters']
+        filter_lines = (
+            f"   ADX={best['adx']} {'✅' if f['adx_ok'] else '❌'}\n"
+            f"   成交量={best['vol_pct']}%均量 {'✅' if f['vol_ok'] else '❌'}\n"
+            f"   EMA89斜率 {'✅' if f['slope_ok'] else '❌'}\n"
+            f"   RSI={best['rsi']} {'✅' if f['no_div'] else '❌ 背離'}"
         )
+        requests.post(send_url, json={"chat_id": chat_id, "parse_mode": "HTML",
+            "text": (
+                f"⛔ <b>{symbol}</b> 當前技術方向為「<b>{best['dir']}</b>」，"
+                f"你指定的「{direction}」與指標相反。\n\n"
+                f"當前指標狀況：\n{filter_lines}\n\n"
+                f"逆勢開倉風險極高，建議等待方向確認後再進場。\n"
+                f"若確認方向改變，請重新執行 /scan 取得最新訊號。"
+            )})
+        return
 
-    else:
-        # ── 無快取 → 用當前市價建立簡易監控 ──
-        inst_id = f"{symbol}-USDT-SWAP"
-        current_price = get_current_price(inst_id)
-        if not current_price:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id,
-                      "text": f"❌ 找不到 {symbol} 的市場數據，請確認幣種名稱"}
-            )
-            return
-
-        dir_use = direction if direction in ("多", "空") else "多"
-        # 用當前價作為進場，ATR 估算止損止盈
-        s1 = analyze_coin_snapshot(inst_id, "1H")
-        atr = s1['atr'] if s1 else current_price * 0.02
-        if dir_use == "多":
-            sl  = current_price - atr * 1.5
-            tp1 = current_price * 1.015
-            tp2 = current_price * 1.030
-            tp3 = current_price * 1.050
-        else:
-            sl  = current_price + atr * 1.5
-            tp1 = current_price * 0.985
-            tp2 = current_price * 0.970
-            tp3 = current_price * 0.950
-
-        new_pos = {
-            'asset':           symbol,
-            'dir':             dir_use,
-            'tf':              '手動',
-            'entry':           current_price,
-            'sl':              sl,
-            'tp1':             tp1,
-            'tp2':             tp2,
-            'tp3':             tp3,
-            'reported_at':     now_ts,
-            'last_checked_ts': now_ts,
-            'filled':          True,
-        }
-        dir_tag = "🟩多" if dir_use == "多" else "🟥空"
-        confirm_text = (
-            f"📌 <b>{symbol} {dir_tag}（手動建倉）已加入監控</b>\n"
-            f"<pre>"
-            f"進場  {format_price(current_price)}（市價）\n"
-            f"止損  {format_price(sl)}\n"
-            f"TP1   {format_price(tp1)}\n"
-            f"TP2   {format_price(tp2)}\n"
-            f"TP3   {format_price(tp3)}\n"
-            f"</pre>"
-            f"<i>⚠️ 止損/止盈由 ATR 自動估算，可用 /holding 查看</i>\n"
-            f"平倉後請輸入 /close {symbol} 解除監控"
+    # ── 通過條件不足 → 拒絕 ──
+    if best['passed'] < 2:
+        f = best['filters']
+        filter_lines = (
+            f"   ADX={best['adx']} {'✅' if f['adx_ok'] else '❌'}\n"
+            f"   成交量={best['vol_pct']}%均量 {'✅' if f['vol_ok'] else '❌'}\n"
+            f"   EMA89斜率 {'✅' if f['slope_ok'] else '❌'}\n"
+            f"   RSI={best['rsi']} {'✅' if f['no_div'] else '❌ 背離'}"
         )
+        requests.post(send_url, json={"chat_id": chat_id, "parse_mode": "HTML",
+            "text": (
+                f"⚠️ <b>{symbol} {direction}</b> 當前僅通過 {best['passed']}/4 個條件，"
+                f"訊號強度不足，不建議進場。\n\n"
+                f"當前條件狀況：\n{filter_lines}\n\n"
+                f"請等待訊號改善後再開倉（建議至少通過 2 個條件）。"
+            )})
+        return
+
+    # ── 條件足夠 → 以 MA8/EMA89 為進場錨點，不用當下市價 ──
+    entry = best['entry']   # 1H→MA8，4H→EMA89，穩定不跳動
+    sl    = best['sl']
+    tp1   = best['tp1']
+    tp2   = best['tp2']
+    tp3   = best['tp3']
+    tf_label = best['tf']
+
+    f = best['filters']
+    bar = "■" * best['passed'] + "□" * (4 - best['passed'])
+    cond_note = ""
+    if best['passed'] < 4:
+        missing = []
+        if not f['adx_ok']:    missing.append(f"ADX={best['adx']:.0f}<20")
+        if not f['vol_ok']:    missing.append(f"量能{best['vol_pct']}%均量")
+        if not f['slope_ok']:  missing.append("EMA89斜率")
+        if not f['no_div']:    missing.append("RSI背離")
+        cond_note = f"\n<i>⚠️ 未滿足：{'、'.join(missing)}（{best['passed']}/4）</i>"
+
+    dir_tag = "🟩多" if direction == "多" else "🟥空"
+    anchor_label = "MA8" if "1H" in tf_label else "EMA89"
+    confirm_text = (
+        f"⏳ <b>{symbol} {dir_tag} 掛單監控中</b>  [{bar}]\n"
+        f"進場錨點：{anchor_label}（{tf_label}），穩定不跳動\n"
+        f"<pre>"
+        f"進場  {format_price(entry)}\n"
+        f"止損  {format_price(sl)}\n"
+        f"TP1   {format_price(tp1)}\n"
+        f"TP2   {format_price(tp2)}\n"
+        f"TP3   {format_price(tp3)}\n"
+        f"</pre>"
+        f"現價 <code>{format_price(best['price'])}</code>  "
+        f"距進場點 {abs(best['price'] - entry) / entry * 100:.2f}%"
+        f"{cond_note}\n"
+        f"📌 價格觸及進場點時自動推送確認通知\n"
+        f"取消請輸入 /close {symbol}"
+    )
+
+    new_pos = {
+        'asset':           symbol,
+        'dir':             direction,
+        'tf':              tf_label,
+        'entry':           entry,
+        'sl':              sl,
+        'tp1':             tp1,
+        'tp2':             tp2,
+        'tp3':             tp3,
+        'reported_at':     now_ts,
+        'last_checked_ts': now_ts,
+        'filled':          False,
+    }
 
     with active_positions_lock:
-        # 同幣種+同方向若已存在則覆蓋
         active_positions[:] = [
             p for p in active_positions
             if not (p['asset'] == new_pos['asset'] and p['dir'] == new_pos['dir'])
@@ -2130,11 +2132,8 @@ def handle_open_command(text, chat_id):
         active_positions.append(new_pos)
         save_positions(active_positions)
 
-    print(f"📌 /open {symbol} {new_pos['dir']} 已加入監控，共 {len(active_positions)} 筆")
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": confirm_text, "parse_mode": "HTML"}
-    )
+    print(f"📌 /open {symbol} {direction} 已加入監控（{tf_label} {anchor_label}={format_price(entry)}），共 {len(active_positions)} 筆")
+    requests.post(send_url, json={"chat_id": chat_id, "text": confirm_text, "parse_mode": "HTML"})
 
 
 def handle_close_command(text, chat_id):
