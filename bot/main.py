@@ -935,8 +935,8 @@ def run_position_monitor():
         if push:
             alerts.append((pos, status, action))
 
-        # 止損觸發或全部止盈 → 移除追蹤
-        if status in ("🔴 止損觸發", "🟣 全部止盈"):
+        # 止損觸發 / 全部止盈 / 保本回調 → 移除追蹤
+        if status in ("🔴 止損觸發", "🟣 全部止盈", "🛡️ 回調至保本止損"):
             to_remove.append(pos)
 
     # 清理過期 / 已結束的持倉，並儲存最新 TP 旗標
@@ -965,6 +965,20 @@ def run_position_monitor():
     msg += f"監控 <b>{len(positions)}</b> 筆  ·  <b>{len(alerts_by_asset)}</b> 幣種需注意\n"
     msg += "─────────────────────────\n"
 
+    # 各狀態對應的持倉建議
+    REC = {
+        "🔴 止損觸發":         ("現價出場止損",   "🚪"),
+        "🛡️ 回調至保本止損":   ("出場保本",       "🛡️"),
+        "🟣 全部止盈":         ("全數出場",       "🎊"),
+        "🔵 止盈2達標":        ("平倉30%，持有剩餘", "📤"),
+        "🟢 止盈1達標":        ("平倉50%，持有剩餘", "📤"),
+        "⚠️ 即將觸及保本止損": ("主動出場保本",   "⚠️"),
+        "⚠️ 接近止損":         ("考慮現價出場",   "⚠️"),
+        "🚨 局勢惡化":         ("建議現價出場",   "🚪"),
+        "🟢 TP1已完成":        ("繼續持有等TP2",  "⏳"),
+        "🔄 持倉中":           ("繼續持有",       "✅"),
+    }
+
     for asset, asset_alerts in alerts_by_asset.items():
         inst_id = asset + '-USDT-SWAP'
         cp = get_current_price(inst_id)
@@ -974,12 +988,17 @@ def run_position_monitor():
         for i, (pos, status, action) in enumerate(asset_alerts, 1):
             d   = "🟩<b>多</b>" if pos['dir'] == "多" else "🟥<b>空</b>"
             sub = f"#{i} " if len(asset_alerts) > 1 else ""
+            rec_text, rec_icon = REC.get(status, ("自行判斷", "❓"))
             msg += f"{sub}{d}  {pos['tf']}  {status}\n"
             msg += "<pre>"
             msg += f"進場  {format_price(pos['entry'])}\n"
             msg += f"止損  {format_price(pos['sl'])}\n"
             msg += "</pre>"
             msg += f"▸ {action}\n"
+            msg += f"<b>【持倉建議】{rec_icon} {rec_text}</b>\n"
+            # 保本出場 / 止損 / 全止盈 → 標註自動移除
+            if status in ("🔴 止損觸發", "🛡️ 回調至保本止損", "🟣 全部止盈"):
+                msg += f"<i>（此持倉已自動移除追蹤）</i>\n"
 
         conclusion = build_coin_conclusion(all_by_asset[asset], cp)
         if conclusion:
