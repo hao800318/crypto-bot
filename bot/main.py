@@ -337,16 +337,38 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
             df['ADX'] = dx.rolling(14).mean()
 
-            p_last = df.iloc[-2]
             c_last = df.iloc[-1]
 
-            is_cross_up   = (p_last['MA8'] <= p_last['EMA89']) and (c_last['MA8'] > c_last['EMA89'])
-            is_cross_down = (p_last['MA8'] >= p_last['EMA89']) and (c_last['MA8'] < c_last['EMA89'])
+            # ── 交叉偵測：依時框調整回望窗口 ──
+            # 15m=8根(2h) | 1h=4根(4h) | 4h=2根(8h)
+            cross_window = 8 if tf == "15m" else (4 if tf == "1h" else 2)
+            is_cross_up   = False
+            is_cross_down = False
+            cross_vol     = None   # 交叉當根的成交量
+
+            for _i in range(1, min(cross_window + 1, len(df) - 1)):
+                _curr = df.iloc[-_i]
+                _prev = df.iloc[-(_i + 1)]
+                if _prev['MA8'] <= _prev['EMA89'] and _curr['MA8'] > _curr['EMA89']:
+                    is_cross_up = True
+                    cross_vol   = _curr['vol']
+                    break
+                elif _prev['MA8'] >= _prev['EMA89'] and _curr['MA8'] < _curr['EMA89']:
+                    is_cross_down = True
+                    cross_vol     = _curr['vol']
+                    break
 
             if not (is_cross_up or is_cross_down):
                 return None
 
-            direction     = "多" if is_cross_up else "空"
+            direction = "多" if is_cross_up else "空"
+
+            # 確認現在仍維持交叉方向（交叉後未立即反轉）
+            if direction == "多" and c_last['MA8'] <= c_last['EMA89']:
+                return None
+            if direction == "空" and c_last['MA8'] >= c_last['EMA89']:
+                return None
+
             current_price = c_last['close']
             current_rsi   = c_last['RSI']
             current_ema89 = c_last['EMA89']
@@ -360,7 +382,8 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
 
             # ② 成交量確認：交叉K棒量必須 > 過去20根均量（硬性過濾無量假突破）
             avg_vol_20 = df['vol'].iloc[-22:-2].mean()
-            cross_vol  = df['vol'].iloc[-2]
+            if cross_vol is None:
+                cross_vol = df['vol'].iloc[-2]
             if cross_vol <= avg_vol_20:
                 return None  # 無量突破直接過濾，不進入評分
 
