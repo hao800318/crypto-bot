@@ -473,6 +473,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
                 "ls_ratio":       ls_ratio,
                 "adx":            round(current_adx, 1),
                 "vol_confirmed":  volume_confirmed,
+                "tf_note":        tf_note,
             }
     except:
         pass
@@ -1507,7 +1508,8 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
                          f"⚡<b>{item['leverage']}</b>  {item['tf']}  "
                          f"<b>{win_rate}%</b> {stars}\n")
         # ── 趨勢 + 主力 ──
-        html_message += f"趨勢 {adx_bar} <b>{adx_level}</b>  ｜  {sentiment_short}\n"
+        tf_note_display = item.get('tf_note', '')
+        html_message += f"趨勢 {adx_bar} <b>{adx_level}</b>  {tf_note_display}  ｜  {sentiment_short}\n"
         # ── 分隔 ──
         html_message += "┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         # ── 進場 / 止損 / TP（等寬對齊，CJK=2格 ASCII=1格，統一補至6格） ──
