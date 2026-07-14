@@ -731,7 +731,7 @@ def analyze_position(pos):
         elif effective_high >= tp3:
             status = "🟣 全部止盈"
             action = (f"🎯 K線高點 {format_price(effective_high)} 已達止盈3 {format_price(tp3)}，"
-                      f"現價 {format_price(current_price)}｜<b>建議全數平倉</b>")
+                      f"現價 {format_price(current_price)}")
             push = True
         elif effective_high >= tp2:
             if pos.get('tp2_hit'):
@@ -756,7 +756,7 @@ def analyze_position(pos):
                 sl = tp1
                 status = "🔵 止盈2達標"
                 action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈2 {format_price(tp2)}，"
-                          f"現價 {format_price(current_price)}｜<b>建議再平倉30%</b>，止損已鎖至TP1（{format_price(tp1)}）")
+                          f"現價 {format_price(current_price)}｜止損已自動上移至TP1（<code>{format_price(tp1)}</code>），剩餘倉位零風險")
                 push = True
         elif effective_high >= tp1:
             if pos.get('tp1_hit'):
@@ -779,7 +779,7 @@ def analyze_position(pos):
             else:
                 status = "🟢 止盈1達標"
                 action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈1 {format_price(tp1)}，"
-                          f"現價 {format_price(current_price)}｜<b>建議平倉50%</b>，止損上移至成本（{format_price(entry)}）")
+                          f"現價 {format_price(current_price)}｜止損已自動上移至進場成本（<code>{format_price(entry)}</code>）")
                 pos['trail_dist'] = entry - sl  # 保存 ATR 距離供追蹤止損使用
                 pos['sl'] = entry  # 立即把 SL 移至進場點（保本止損）
                 sl = entry
@@ -819,7 +819,7 @@ def analyze_position(pos):
         elif effective_low <= tp3:
             status = "🟣 全部止盈"
             action = (f"🎯 K線低點 {format_price(effective_low)} 已達止盈3 {format_price(tp3)}，"
-                      f"現價 {format_price(current_price)}｜<b>建議全數平倉</b>")
+                      f"現價 {format_price(current_price)}")
             push = True
         elif effective_low <= tp2:
             if pos.get('tp2_hit'):
@@ -844,7 +844,7 @@ def analyze_position(pos):
                 sl = tp1
                 status = "🔵 止盈2達標"
                 action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈2 {format_price(tp2)}，"
-                          f"現價 {format_price(current_price)}｜<b>建議再平倉30%</b>，止損已鎖至TP1（{format_price(tp1)}）")
+                          f"現價 {format_price(current_price)}｜止損已自動下移至TP1（<code>{format_price(tp1)}</code>），剩餘倉位零風險")
                 push = True
         elif effective_low <= tp1:
             if pos.get('tp1_hit'):
@@ -867,7 +867,7 @@ def analyze_position(pos):
             else:
                 status = "🟢 止盈1達標"
                 action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈1 {format_price(tp1)}，"
-                          f"現價 {format_price(current_price)}｜<b>建議平倉50%</b>，止損下移至成本（{format_price(entry)}）")
+                          f"現價 {format_price(current_price)}｜止損已自動下移至進場成本（<code>{format_price(entry)}</code>）")
                 pos['trail_dist'] = sl - entry  # 保存 ATR 距離供追蹤止損使用
                 pos['sl'] = entry  # 立即把 SL 移至進場點（保本止損）
                 sl = entry
