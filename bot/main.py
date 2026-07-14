@@ -595,11 +595,31 @@ def analyze_position(pos):
             print(f"✅ {pos['asset']} {dir}單已由{how}觸碰進場點 {format_price(entry)}，開始監控 TP/SL")
             action = (f"🎯 {how} {format_price(effective_low if dir == '多' else effective_high)} "
                       f"已觸及進場點 {format_price(entry)}，現價 {format_price(current_price)}\n"
-                      f"<b>限價單應已成交，開始監控 TP/SL</b>\n"
-                      f"若訂單未成交，請輸入 /close {pos['asset']} 取消追蹤")
+                      f"<b>限價單應已成交，開始監控 TP/SL</b>")
             return "✅ 已觸及進場點", action, True  # 推送進場確認，下次監控再做 TP/SL
         else:
-            # 限價單尚未成交，僅顯示等待狀態，不觸發任何警報
+            # ── 掛單尚未成交 ──
+            # 1. 止損點已被突破 → 訊號作廢，自動取消
+            sl_breached = (
+                (dir == "多" and effective_low  <= sl) or
+                (dir == "空" and effective_high >= sl)
+            )
+            if sl_breached:
+                note = (f"⛔ 現價 {format_price(current_price)} 已突破止損位 {format_price(sl)}，"
+                        f"進場點 {format_price(entry)} 訊號作廢\n<b>已自動取消掛單追蹤</b>")
+                return "🚫 掛單已取消", note, True
+
+            # 2. 等待逾時（1H→2H、4H/手動→8H）→ 自動取消
+            tf = pos.get('tf', '4H')
+            timeout_sec = 7200 if '1H' in tf else 28800  # 2H or 8H
+            pending_sec = time.time() - pos.get('reported_at', time.time())
+            if pending_sec > timeout_sec:
+                hours = int(pending_sec / 3600)
+                note = (f"⏰ 掛單等待已超過 {hours} 小時，進場點 {format_price(entry)} 仍未觸及，"
+                        f"現價 {format_price(current_price)}\n<b>訊號可能已失效，已自動取消掛單追蹤</b>")
+                return "⏰ 掛單逾時取消", note, True
+
+            # 3. 正常等待中，靜默監控不推送
             gap_pct = abs(current_price - entry) / entry * 100
             if dir == "多":
                 note = f"⏳ 掛單等待中，現價 {format_price(current_price)}，距進場點還差 {gap_pct:.2f}%↓"
@@ -940,8 +960,9 @@ def run_position_monitor():
         if push:
             alerts.append((pos, status, action))
 
-        # 止損觸發 / 全部止盈 / 保本回調 → 移除追蹤
-        if status in ("🔴 止損觸發", "🟣 全部止盈", "🛡️ 回調至保本止損"):
+        # 止損觸發 / 全部止盈 / 保本回調 / 掛單取消 → 移除追蹤
+        if status in ("🔴 止損觸發", "🟣 全部止盈", "🛡️ 回調至保本止損",
+                      "🚫 掛單已取消", "⏰ 掛單逾時取消"):
             to_remove.append(pos)
 
     # 清理過期 / 已結束的持倉，並儲存最新 TP 旗標
@@ -973,6 +994,8 @@ def run_position_monitor():
     # 各狀態對應的持倉建議
     REC = {
         "✅ 已觸及進場點":     ("確認成交，開始監控TP/SL", "🎯"),
+        "🚫 掛單已取消":       ("止損已破，掛單自動取消",  "🚫"),
+        "⏰ 掛單逾時取消":     ("逾時未成交，自動取消",   "⏰"),
         "🔴 止損觸發":         ("現價出場止損",   "🚪"),
         "🛡️ 回調至保本止損":   ("出場保本",       "🛡️"),
         "🟣 全部止盈":         ("全數出場",       "🎊"),
