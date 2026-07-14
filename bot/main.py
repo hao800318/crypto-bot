@@ -1770,12 +1770,14 @@ def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False):
                     lines.append(
                         f"⚡ <b>{nm['asset']}</b>  {d}  {nm['tf']}  "
                         f"通過 {nm['filters_passed']}/4 關  [{bar}]\n"
-                        f"   📍 進場：{nm['entry_label']}\n"
-                        f"   🛑 SL：{format_price(nm['sl'])}　"
-                        f"TP1：{format_price(nm['tp1'])}　"
-                        f"TP2：{format_price(nm['tp2'])}　"
-                        f"TP3：{format_price(nm['tp3'])}\n"
-                        f"   ⚠️ 卡在：{nm['failed_at']}　ADX={nm['adx']}　RSI={nm['rsi']}"
+                        f"<pre>"
+                        f"進場  {nm['entry_label'].split('=')[-1]}\n"
+                        f"止損  {format_price(nm['sl'])}\n"
+                        f"TP1   {format_price(nm['tp1'])}\n"
+                        f"TP2   {format_price(nm['tp2'])}\n"
+                        f"TP3   {format_price(nm['tp3'])}"
+                        f"</pre>"
+                        f"⚠️ 卡在：{nm['failed_at']}　ADX={nm['adx']}　RSI={nm['rsi']}"
                     )
                 lines.append("\n<i>接近訊號未通過所有過濾條件，請自行評估進場風險。</i>")
                 text = "\n\n".join(lines)
