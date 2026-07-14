@@ -265,6 +265,28 @@ def score_to_leverage(win_rate, max_leverage):
     lev = max(1, round(max_leverage * ratio))
     return f"{lev}x"
 
+def get_higher_tf_ema89_slope(asset, current_bar):
+    """取高一級時間框架的 EMA89 斜率：1H→4H，4H→1D。回傳正數=上行，負數=下行，None=取得失敗。"""
+    htf_bar = "4H" if current_bar == "1H" else "1D"
+    url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={htf_bar}&limit=100"
+    try:
+        res = requests.get(url, timeout=2.5).json()
+        if res.get('code') != '0' or len(res['data']) < 30:
+            return None
+        closes = [float(r[4]) for r in reversed(res['data'])]
+        k = 2 / (89 + 1)
+        ema = closes[0]
+        for c in closes[1:]:
+            ema = c * k + ema * (1 - k)
+        # 重跑一次取倒數第4根的 EMA89
+        ema_3ago = closes[0]
+        for c in closes[1:-3]:
+            ema_3ago = c * k + ema_3ago * (1 - k)
+        return ema - ema_3ago   # 正=上行，負=下行
+    except Exception:
+        return None
+
+
 def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr=0.0):
     bar_param = "1H" if tf == "1h" else "4H"
     url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={bar_param}&limit=100"
@@ -345,6 +367,14 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
                 return None  # 頂背離：價格新高但 RSI 沒跟上，多頭動能衰竭
             if direction == "空" and current_price < price_5ago and current_rsi > rsi_5ago:
                 return None  # 底背離：價格新低但 RSI 沒跟上，空頭動能衰竭
+
+            # ⑤ 多時間框架確認（MTF）：高一級 TF 的 EMA89 方向必須與訊號一致
+            htf_slope = get_higher_tf_ema89_slope(asset, bar_param)
+            if htf_slope is not None:
+                if direction == "多" and htf_slope <= 0:
+                    return None  # 高TF EMA89 仍下行，1H多頭與大趨勢背道
+                if direction == "空" and htf_slope >= 0:
+                    return None  # 高TF EMA89 仍上行，1H空頭與大趨勢背道
 
             # ── RSI 勝率基礎評分 ──
             base_score = (100 - abs(current_rsi - 56)) if direction == "多" else (100 - abs(current_rsi - 44))
