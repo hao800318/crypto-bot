@@ -980,7 +980,22 @@ def evaluate_pending_order(pos):
     """
     inst_id = pos['asset'] + '-USDT-SWAP'
     tf_raw  = pos.get('tf', '4H')
-    tf_low  = "1h" if "1H" in tf_raw else "4h"
+
+    # 正確對應時框
+    if "15M" in tf_raw:
+        tf_low = "15m"
+    elif "1H" in tf_raw:
+        tf_low = "1h"
+    else:
+        tf_low = "4h"
+
+    # 寬限期：訊號剛建立時 MA8/EMA89 正在收斂，不做自動撤單評估
+    # 15M → 30分鐘 | 1H → 60分鐘 | 4H → 120分鐘
+    grace_sec = 1800 if "15M" in tf_raw else (3600 if "1H" in tf_raw else 7200)
+    age_sec   = time.time() - pos.get('reported_at', time.time())
+    if age_sec < grace_sec:
+        remain = int((grace_sec - age_sec) / 60)
+        return "✅ 繼續等待", f"訊號建立未滿寬限期，{remain}min 後開始評估", False
 
     st = fetch_coin_status(inst_id, tf_low)
     if not st:
