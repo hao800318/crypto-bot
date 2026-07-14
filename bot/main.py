@@ -340,8 +340,8 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             c_last = df.iloc[-1]
 
             # ── 交叉偵測：依時框調整回望窗口 ──
-            # 15m=8根(2h) | 1h=4根(4h) | 4h=2根(8h)
-            cross_window = 8 if tf == "15m" else (4 if tf == "1h" else 2)
+            # 15m=12根(3h) | 1h=10根(10h) | 4h=5根(20h)
+            cross_window = 12 if tf == "15m" else (10 if tf == "1h" else 5)
             is_cross_up   = False
             is_cross_down = False
             cross_vol     = None   # 交叉當根的成交量
@@ -380,12 +380,12 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             if current_adx < 20:
                 return None
 
-            # ② 成交量確認：交叉K棒量必須 > 過去20根均量（硬性過濾無量假突破）
+            # ② 成交量確認：極低量（< 40% 均量）才硬擋，其餘進入評分懲罰
             avg_vol_20 = df['vol'].iloc[-22:-2].mean()
             if cross_vol is None:
                 cross_vol = df['vol'].iloc[-2]
-            if cross_vol <= avg_vol_20:
-                return None  # 無量突破直接過濾，不進入評分
+            if cross_vol <= avg_vol_20 * 0.4:
+                return None  # 極低量假突破直接過濾
 
             # ③ EMA89 斜率過濾：EMA89 橫盤或逆向時交叉幾乎全是假突破
             ema89_slope = c_last['EMA89'] - df['EMA89'].iloc[-4]  # 最近3根的斜率
@@ -409,8 +409,15 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             funding_rate, ls_ratio = get_market_sentiment(asset)
             sentiment_note, sentiment_bonus = build_sentiment_note(direction, funding_rate, ls_ratio)
 
-            # ③ 成交量加分（已通過硬性過濾；量越大加分越多）
-            vol_bonus = 8 if cross_vol > avg_vol_20 * 1.5 else 4
+            # ③ 成交量加分（軟性：量大加分，量小扣分）
+            if cross_vol > avg_vol_20 * 1.5:
+                vol_bonus = 8    # 放量突破
+            elif cross_vol > avg_vol_20 * 0.8:
+                vol_bonus = 4    # 正常量
+            elif cross_vol > avg_vol_20 * 0.4:
+                vol_bonus = -8   # 偏低量，扣分降低勝率顯示
+            else:
+                vol_bonus = 0    # 已在前面硬擋，不會到這裡
 
             # ④ 多時框對齊（15M看1H，1H看4H，4H看1D）
             tf_bonus = 0
