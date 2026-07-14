@@ -485,6 +485,127 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
         pass
     return None
 
+def fetch_trend_state(inst_id, tf):
+    """
+    永遠回傳當前趨勢狀態（不需要交叉事件）。
+    用於自選監控：即使 MA8/EMA89 已交叉好幾天，仍能看到趨勢資訊。
+    回傳 dict 或 None（API 失敗時）
+    """
+    bar_param = "1H" if tf == "1h" else "4H"
+    url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar_param}&limit=100"
+    try:
+        res = requests.get(url, timeout=3.0).json()
+        if res.get('code') != '0' or len(res['data']) < 30:
+            return None
+        df = pd.DataFrame(res['data'], columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
+        for col in ['open','high','low','close','vol']:
+            df[col] = df[col].astype(float)
+        df = df.iloc[::-1].reset_index(drop=True)
+        df['MA8']   = df['close'].rolling(8).mean()
+        df['EMA89'] = df['close'].ewm(span=89, adjust=False).mean()
+        delta = df['close'].diff()
+        gain  = delta.where(delta > 0, 0).rolling(14).mean()
+        loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        df['RSI'] = 100 - (100 / (1 + gain / (loss + 1e-10)))
+        df['H-L']  = df['high'] - df['low']
+        df['H-PC'] = (df['high'] - df['close'].shift(1)).abs()
+        df['L-PC'] = (df['low']  - df['close'].shift(1)).abs()
+        df['TR']   = df[['H-L','H-PC','L-PC']].max(axis=1)
+        df['ATR14']= df['TR'].rolling(14).mean()
+        plus_dm  = df['high'].diff().clip(lower=0)
+        minus_dm = (-df['low'].diff()).clip(lower=0)
+        mask = plus_dm >= minus_dm
+        plus_dm_clean  = plus_dm.where(mask, 0)
+        minus_dm_clean = minus_dm.where(~mask, 0)
+        atr14_s  = df['ATR14'] + 1e-10
+        plus_di  = 100 * plus_dm_clean.rolling(14).mean() / atr14_s
+        minus_di = 100 * minus_dm_clean.rolling(14).mean() / atr14_s
+        dx  = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
+        df['ADX'] = dx.rolling(14).mean()
+
+        c = df.iloc[-1]
+        avg_vol = df['vol'].iloc[-22:-2].mean()
+
+        ma8       = c['MA8']
+        ema89     = c['EMA89']
+        price     = c['close']
+        rsi       = c['RSI']
+        adx       = c['ADX']
+        atr       = c['ATR14']
+        vol_pct   = round(c['vol'] / avg_vol * 100)
+        ema_slope = c['EMA89'] - df['EMA89'].iloc[-4]
+
+        direction  = "多" if ma8 > ema89 else "空"
+        gap_pct    = abs(ma8 - ema89) / ema89 * 100
+
+        # 判斷是否近期出現過交叉（8根內）
+        recent_cross = False
+        for i in range(-9, -1):
+            prev_r = df.iloc[i]; curr_r = df.iloc[i + 1]
+            if (prev_r['MA8'] <= prev_r['EMA89'] and curr_r['MA8'] > curr_r['EMA89']) or \
+               (prev_r['MA8'] >= prev_r['EMA89'] and curr_r['MA8'] < curr_r['EMA89']):
+                recent_cross = True
+                break
+
+        # 條件評分（同 fetch_coin_status）
+        adx_ok   = adx >= 20
+        vol_ok   = c['vol'] > avg_vol
+        slope_ok = (direction == "多" and ema_slope > 0) or (direction == "空" and ema_slope < 0)
+        price_5ago = df['close'].iloc[-6]
+        rsi_5ago   = df['RSI'].iloc[-6]
+        no_div = not (
+            (direction == "多" and price > price_5ago and rsi < rsi_5ago) or
+            (direction == "空" and price < price_5ago and rsi > rsi_5ago)
+        )
+        passed = sum([adx_ok, vol_ok, slope_ok, no_div])
+
+        # 進場/止損點位
+        if direction == "多":
+            entry = ma8
+            sl    = min(ema89, ma8 - atr * 1.5)
+            tp1   = price + atr * 1.5
+            tp2   = price + atr * 2.5
+            tp3   = price + atr * 4.0
+        else:
+            entry = ma8
+            sl    = max(ema89, ma8 + atr * 1.5)
+            tp1   = price - atr * 1.5
+            tp2   = price - atr * 2.5
+            tp3   = price - atr * 4.0
+
+        # 趨勢延續：MA8 > EMA89 已多根，價格是否回踩 MA8 附近（再入場機會）
+        pullback_pct = abs(price - ma8) / ma8 * 100
+        is_pullback = (pullback_pct <= 1.5 and adx >= 20)  # 回踩 MA8 1.5% 以內
+
+        return {
+            'asset':        inst_id.split('-')[0],
+            'dir':          direction,
+            'tf':           "1H" if tf == "1h" else "4H",
+            'price':        price,
+            'ma8':          round(ma8, 6),
+            'ema89':        round(ema89, 6),
+            'rsi':          round(rsi, 1),
+            'adx':          round(adx, 1),
+            'vol_pct':      vol_pct,
+            'gap_pct':      round(gap_pct, 2),
+            'passed':       passed,
+            'filters':      {'adx_ok': adx_ok, 'vol_ok': vol_ok,
+                             'slope_ok': slope_ok, 'no_div': no_div},
+            'entry':        entry,
+            'sl':           sl,
+            'tp1':          tp1,
+            'tp2':          tp2,
+            'tp3':          tp3,
+            'recent_cross': recent_cross,
+            'is_pullback':  is_pullback,
+            'pullback_pct': round(pullback_pct, 2),
+            'crossed':      recent_cross,
+        }
+    except Exception as e:
+        print(f"⚠️ fetch_trend_state({inst_id}) 失敗：{e}")
+        return None
+
+
 def fetch_near_miss_candidate(asset, tf, btc_trend="neutral", market_fr=0.0):
     """同 fetch_candle_sync 但追蹤各過濾器結果，回傳接近通過的訊號資訊"""
     bar_param = "1H" if tf == "1h" else "4H"
@@ -521,10 +642,10 @@ def fetch_near_miss_candidate(asset, tf, btc_trend="neutral", market_fr=0.0):
 
         c_last = df.iloc[-1]
 
-        # ── 近期交叉偵測（最近 3 根 K 棒內曾發生交叉）──
+        # ── 近期交叉偵測（最近 8 根 K 棒內曾發生交叉）──
         direction = None
         cross_bar_idx = None
-        for i in range(-4, -1):           # 檢查 -4,-3,-2 → 前一根
+        for i in range(-9, -1):           # 檢查最近 8 根
             prev = df.iloc[i]
             curr = df.iloc[i + 1]
             if prev['MA8'] <= prev['EMA89'] and curr['MA8'] > curr['EMA89']:
@@ -536,7 +657,7 @@ def fetch_near_miss_candidate(asset, tf, btc_trend="neutral", market_fr=0.0):
                 cross_bar_idx = i + 1
                 break
 
-        # ── 即將交叉偵測（MA8 距 EMA89 在 0.5% 以內且朝正確方向靠近）──
+        # ── 即將交叉偵測（MA8 距 EMA89 在 1.5% 以內且朝正確方向靠近）──
         approaching_note = None
         if direction is None:
             ma8_now  = c_last['MA8']
@@ -544,7 +665,7 @@ def fetch_near_miss_candidate(asset, tf, btc_trend="neutral", market_fr=0.0):
             ma8_prev = df.iloc[-2]['MA8']
             ema_prev = df.iloc[-2]['EMA89']
             gap_pct  = abs(ma8_now - ema_now) / (ema_now + 1e-10) * 100
-            if gap_pct <= 0.5:
+            if gap_pct <= 1.5:
                 if ma8_prev < ema_prev and ma8_now < ema_now:   # 多頭蓄勢
                     direction      = "多"
                     approaching_note = f"MA8趨近EMA89（差{gap_pct:.2f}%）"
@@ -2406,15 +2527,22 @@ def check_watched_coin(asset, chat_id, force_update=False):
                         w['last_notified'] = now_ts
             return
 
-        # ── 無完整訊號 → 取最佳時框狀態 ──
+        # ── 無完整訊號 → 先試近期交叉狀態，再退回趨勢狀態 ──
         best = None
         for tf in ('1h', '4h'):
             st = fetch_coin_status(inst_id, tf)
             if st and (best is None or st['passed'] > best['passed']):
                 best = st
 
+        # 若 fetch_coin_status 也找不到（交叉時間太久遠），用趨勢延續偵測
         if not best:
-            print(f"⚠️ 自選監控 {asset}：fetch_coin_status 回傳空值，跳過")
+            for tf in ('1h', '4h'):
+                st = fetch_trend_state(inst_id, tf)
+                if st and (best is None or st['passed'] > best['passed']):
+                    best = st
+
+        if not best:
+            print(f"⚠️ 自選監控 {asset}：所有偵測均失敗，跳過")
             return
 
         # ── 決定是否要推送 ──
@@ -2435,9 +2563,20 @@ def check_watched_coin(asset, chat_id, force_update=False):
         bar = "■" * best['passed'] + "□" * (4 - best['passed'])
         f   = best['filters']
         reason = ""
-        if improved:       reason = "📈 條件進步！"
+        if improved:        reason = "📈 條件進步！"
         elif heartbeat_due: reason = "🔔 30 分鐘更新"
         elif force_update:  reason = "🔍 即時查詢"
+
+        # 趨勢來源標籤
+        is_trend_mode = not best.get('crossed', False) and not best.get('recent_cross', False)
+        if is_trend_mode:
+            trend_label = f"趨勢延續（MA8{'>' if best['dir']=='多' else '<'}EMA89 差{best.get('gap_pct',0):.1f}%）"
+            pullback_note = ""
+            if best.get('is_pullback'):
+                pullback_note = f"\n🎯 <b>回踩 MA8（{best.get('pullback_pct',0):.2f}%），潛在再入場機會</b>"
+        else:
+            trend_label = "近期交叉訊號"
+            pullback_note = ""
 
         lines = (
             f"   ADX={best['adx']} {'✅' if f['adx_ok'] else '❌'}\n"
@@ -2446,17 +2585,19 @@ def check_watched_coin(asset, chat_id, force_update=False):
             f"   RSI={best['rsi']} {'✅' if f['no_div'] else '❌ 背離'}"
         )
         msg = (f"👁 <b>{best['asset']} 自選監控</b>  {now_str}  {reason}\n"
-               f"{d}  {best['tf']}  通過 {best['passed']}/4 關  [{bar}]\n"
+               f"{d}  {best['tf']}  {trend_label}  [{bar}] {best['passed']}/4\n"
                f"現價 <code>{format_price(best['price'])}</code>\n"
-               f"{lines}\n")
+               f"{lines}"
+               f"{pullback_note}\n")
         if best['passed'] >= 2:
+            entry_label = "MA8（回踩再入）" if is_trend_mode else "進場"
             msg += (f"\n<b>─ 當前建議點位（參考）─</b>\n"
-                    f"<pre>進場  {format_price(best['entry'])}\n"
+                    f"<pre>{entry_label}  {format_price(best['entry'])}\n"
                     f"止損  {format_price(best['sl'])}\n"
                     f"TP1   {format_price(best['tp1'])}\n"
                     f"TP2   {format_price(best['tp2'])}\n"
                     f"TP3   {format_price(best['tp3'])}</pre>"
-                    f"<i>尚未通過全部條件，點位僅供參考</i>")
+                    f"<i>{'趨勢延續回踩點位，非新交叉' if is_trend_mode else '尚未通過全部條件，點位僅供參考'}</i>")
         markup = {"inline_keyboard": [[
             {"text": "🗑️ 停止監控", "callback_data": f"unwatch_{asset}"}
         ]]}
