@@ -756,7 +756,7 @@ def analyze_position(pos):
                 sl = tp1
                 status = "🔵 止盈2達標"
                 action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈2 {format_price(tp2)}，"
-                          f"現價 {format_price(current_price)}｜止損已自動上移至TP1（<code>{format_price(tp1)}</code>），剩餘倉位零風險")
+                          f"現價 {format_price(current_price)}｜<b>建議將止損上移至TP1（<code>{format_price(tp1)}</code>）</b>")
                 push = True
         elif effective_high >= tp1:
             if pos.get('tp1_hit'):
@@ -844,7 +844,7 @@ def analyze_position(pos):
                 sl = tp1
                 status = "🔵 止盈2達標"
                 action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈2 {format_price(tp2)}，"
-                          f"現價 {format_price(current_price)}｜止損已自動下移至TP1（<code>{format_price(tp1)}</code>），剩餘倉位零風險")
+                          f"現價 {format_price(current_price)}｜<b>建議將止損下移至TP1（<code>{format_price(tp1)}</code>）</b>")
                 push = True
         elif effective_low <= tp1:
             if pos.get('tp1_hit'):
