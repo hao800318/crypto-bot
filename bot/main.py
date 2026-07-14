@@ -1170,8 +1170,13 @@ def run_position_monitor():
 
     msg += "<i>以上為自動監控建議，請結合自身判斷操作。</i>"
 
+    # B. 監控警報底部加「已了解」按鈕
+    monitor_markup = {"inline_keyboard": [[{"text": "📌 已了解", "callback_data": "ack_monitor"}]]}
     text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    resp = requests.post(text_url, json={"chat_id": str(TELEGRAM_CHAT_ID), "text": msg, "parse_mode": "HTML"})
+    resp = requests.post(text_url, json={
+        "chat_id": str(TELEGRAM_CHAT_ID), "text": msg,
+        "parse_mode": "HTML", "reply_markup": monitor_markup
+    })
     if resp.json().get("ok"):
         print(f"✅ 持倉監控警報已發送（{len(alerts)} 筆）")
     else:
@@ -1462,6 +1467,18 @@ def format_price(p):
     precision = num_zeros + 4
     return f"{p:.{precision}f}"
 
+def answer_callback(callback_id, text="", alert=False):
+    """回應 Telegram inline button 點擊"""
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+            json={"callback_query_id": callback_id, "text": text, "show_alert": alert},
+            timeout=3
+        )
+    except Exception:
+        pass
+
+
 def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報", target_chat_id=None):
     if target_chat_id is None:
         target_chat_id = TELEGRAM_CHAT_ID
@@ -1526,8 +1543,16 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
 
     html_message += "<i>勝率 = RSI＋成交量＋多時框＋主力動向＋BTC方向  |  槓桿僅供參考</i>"
 
+    # A. 追蹤快捷按鈕（每個訊號一顆，點擊等同 /open）
+    buttons = [[{"text": f"✅ 追蹤 {item['asset']}{item['dir']}", "callback_data": f"open_{item['asset']}_{item['dir']}"}]
+               for item in valid_signals]
+    reply_markup = {"inline_keyboard": buttons}
+
     text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    resp = requests.post(text_url, json={"chat_id": str(target_chat_id), "text": html_message, "parse_mode": "HTML"})
+    resp = requests.post(text_url, json={
+        "chat_id": str(target_chat_id), "text": html_message,
+        "parse_mode": "HTML", "reply_markup": reply_markup
+    })
     result = resp.json()
     if result.get("ok"):
         print(f"✅ 精選 5 強報告發送成功 → chat_id={target_chat_id}")
@@ -1606,8 +1631,13 @@ def send_holding_summary(chat_id):
         msg += "─────────────────────────\n"
 
     msg += "<i>📌 /open ETH  確認開倉並加入監控\n🗑️ /close ETH  平倉後解除監控\n⚡ 警報僅在 TP/SL/市場惡化時推送</i>"
+    # C. 快捷按鈕
+    holding_markup = {"inline_keyboard": [[
+        {"text": "🔄 重新掃描", "callback_data": "cmd_scan"},
+        {"text": "📊 查看勝率", "callback_data": "cmd_stats"}
+    ]]}
     text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    requests.post(text_url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"})
+    requests.post(text_url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "reply_markup": holding_markup})
 
 # ==================== 📌 手動開倉/平倉指令 ====================
 def handle_open_command(text, chat_id):
@@ -1909,6 +1939,59 @@ def handle_telegram_updates():
             if res.get("ok") and res.get("result"):
                 for update in res["result"]:
                     offset = update["update_id"] + 1
+                    # ── Inline button 回調處理 ──
+                    if "callback_query" in update:
+                        cq      = update["callback_query"]
+                        cb_id   = cq["id"]
+                        cb_data = cq.get("data", "")
+                        cb_chat = str(cq["message"]["chat"]["id"])
+
+                        if cb_data.startswith("open_"):
+                            parts = cb_data.split("_", 2)   # ["open","ETH","多"]
+                            if len(parts) == 3:
+                                asset_cb, dir_cb = parts[1], parts[2]
+                                with active_positions_lock:
+                                    already = any(p['asset'] == asset_cb and p['dir'] == dir_cb
+                                                  for p in active_positions)
+                                if already:
+                                    answer_callback(cb_id, f"✅ {asset_cb}{dir_cb} 已在追蹤中", alert=True)
+                                else:
+                                    with last_scan_lock:
+                                        sig_cb = last_scan_cache.get(asset_cb)
+                                    if sig_cb and sig_cb.get('dir') == dir_cb:
+                                        now_ts_cb = time.time()
+                                        new_pos_cb = {
+                                            'asset': sig_cb['asset'], 'dir': sig_cb['dir'],
+                                            'tf': sig_cb['tf'], 'entry': sig_cb['entry'],
+                                            'sl': sig_cb['sl'], 'tp1': sig_cb['tp1'],
+                                            'tp2': sig_cb['tp2'], 'tp3': sig_cb['tp3'],
+                                            'reported_at': now_ts_cb,
+                                            'last_checked_ts': now_ts_cb,
+                                            'filled': False,
+                                        }
+                                        with active_positions_lock:
+                                            active_positions.append(new_pos_cb)
+                                            save_positions(active_positions)
+                                        answer_callback(cb_id, f"⏳ {asset_cb}{dir_cb} 掛單監控已開始！", alert=True)
+                                        print(f"📌 按鈕追蹤：{asset_cb} {dir_cb}")
+                                    else:
+                                        answer_callback(cb_id, "⚠️ 訊號已過期，請重新 /scan", alert=True)
+
+                        elif cb_data == "ack_monitor":
+                            answer_callback(cb_id, "✅ 已收到", alert=False)
+
+                        elif cb_data == "cmd_scan":
+                            answer_callback(cb_id, "⚡ 開始掃描，請稍候約 15 秒...", alert=False)
+                            t = threading.Thread(target=scan_worker_thread, args=("手動現場突擊播報", cb_chat))
+                            t.daemon = True
+                            t.start()
+
+                        elif cb_data == "cmd_stats":
+                            answer_callback(cb_id, "📊 查詢中...", alert=False)
+                            t = threading.Thread(target=send_stats_report, args=(cb_chat,))
+                            t.daemon = True
+                            t.start()
+
                     if "message" in update and "text" in update["message"]:
                         msg = update["message"]
                         text = msg["text"].strip()
