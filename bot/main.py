@@ -823,6 +823,64 @@ def get_volume_spike(inst_id):
         pass
     return 1.0
 
+def evaluate_pending_order(pos):
+    """分析掛單等待期間的訊號健康度，決定繼續等待或自動撤單。
+    回傳 (summary: str, detail: str, auto_cancel: bool)
+    auto_cancel=True → 條件已失效，主流程自動移除追蹤。
+    """
+    inst_id = pos['asset'] + '-USDT-SWAP'
+    tf_raw  = pos.get('tf', '4H')
+    tf_low  = "1h" if "1H" in tf_raw else "4h"
+
+    st = fetch_coin_status(inst_id, tf_low)
+    if not st:
+        return "✅ 繼續等待", "無法取得市場資料，保持掛單", False
+
+    direction  = pos['dir']
+    hard_reasons = []
+    soft_reasons = []
+
+    # ── 硬性撤單條件（任一成立 → 立即自動撤單）──
+    if st['dir'] != direction:
+        hard_reasons.append(f"MA8/EMA89方向已反轉（訊號{direction}，現{st['dir']}）")
+
+    if st['adx'] < 15:
+        hard_reasons.append(f"ADX={st['adx']:.1f} 趨勢已完全消失")
+
+    # ── 軟性警訊（累積 ≥2 個 → 自動撤單）──
+    if 15 <= st['adx'] < 20:
+        soft_reasons.append(f"ADX={st['adx']:.1f} 趨勢偏弱")
+
+    if not st['filters']['slope_ok']:
+        soft_reasons.append("EMA89斜率不利")
+
+    if not st['filters']['no_div']:
+        soft_reasons.append("RSI背離出現")
+
+    if not st['filters']['vol_ok']:
+        soft_reasons.append(f"成交量萎縮至均量{st['vol_pct']}%")
+
+    try:
+        btc_trend = get_btc_trend()
+        if (direction == "多" and btc_trend == "bear") or (direction == "空" and btc_trend == "bull"):
+            soft_reasons.append("BTC大方向不利")
+    except Exception:
+        pass
+
+    if hard_reasons or len(soft_reasons) >= 2:
+        all_reasons = hard_reasons + soft_reasons
+        detail = "、".join(all_reasons[:3])
+        return "🚫 自動撤單", detail, True
+
+    # ── 繼續等待 ──
+    hints = soft_reasons[:1]   # 最多顯示 1 個小警訊
+    passed = st['passed']
+    bar    = "■" * passed + "□" * (4 - passed)
+    summary = f"✅ 訊號仍有效  [{bar}] {passed}/4"
+    detail  = ("、".join(hints) + "  " if hints else "") + f"ADX={st['adx']:.1f}"
+    return summary, detail, False
+
+
 def analyze_position(pos):
     """分析持倉狀態，回傳 (狀態標籤, 建議訊息, 是否需要推送)"""
     inst_id = pos['asset'] + '-USDT-SWAP'
@@ -881,13 +939,18 @@ def analyze_position(pos):
                         f"現價 {format_price(current_price)}\n<b>訊號可能已失效，已自動取消掛單追蹤</b>")
                 return "⏰ 掛單逾時取消", note, True
 
-            # 3. 正常等待中 → 每次偵測週期推送，讓用戶決定繼續或撤單
+            # 3. 正常等待中 → 自動評估訊號健康度，決定繼續等待或自動撤單
+            eval_summary, eval_detail, auto_cancel = evaluate_pending_order(pos)
             gap_pct = abs(current_price - entry) / entry * 100
-            if dir == "多":
-                note = f"現價 <code>{format_price(current_price)}</code>，距進場點還差 {gap_pct:.2f}%↓"
+            gap_dir = "↓" if dir == "多" else "↑"
+            gap_str = f"現價 <code>{format_price(current_price)}</code>，距進場點還差 {gap_pct:.2f}%{gap_dir}"
+            if auto_cancel:
+                note = (f"🤖 市場條件失效，<b>系統自動撤單</b>\n"
+                        f"原因：{eval_detail}\n{gap_str}")
+                return "🚫 掛單已取消", note, True
             else:
-                note = f"現價 <code>{format_price(current_price)}</code>，距進場點還差 {gap_pct:.2f}%↑"
-            return "⏳ 等待進場", note, True
+                note = f"{eval_summary}  {eval_detail}\n{gap_str}"
+                return "⏳ 等待進場", note, True
 
     # ── 已成交：取上次監控後的 K 線高低點（含 margin，防止 TP/SL 事件在監控間隔中被漏掉）──
     since_ts = pos.get('last_checked_ts', pos.get('reported_at', time.time() - 3600))
