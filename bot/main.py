@@ -479,6 +479,122 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
         pass
     return None
 
+def fetch_near_miss_candidate(asset, tf, btc_trend="neutral", market_fr=0.0):
+    """同 fetch_candle_sync 但追蹤各過濾器結果，回傳接近通過的訊號資訊"""
+    bar_param = "1H" if tf == "1h" else "4H"
+    url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={bar_param}&limit=100"
+    try:
+        res = requests.get(url, timeout=2.0).json()
+        if res.get('code') != '0' or len(res['data']) < 90:
+            return None
+        df = pd.DataFrame(res['data'], columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
+        for col in ['open','high','low','close','vol']:
+            df[col] = df[col].astype(float)
+        df = df.iloc[::-1].reset_index(drop=True)
+        df['MA8']   = df['close'].rolling(8).mean()
+        df['EMA89'] = df['close'].ewm(span=89, adjust=False).mean()
+        delta = df['close'].diff()
+        gain  = delta.where(delta > 0, 0).rolling(14).mean()
+        loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        df['RSI'] = 100 - (100 / (1 + gain / (loss + 1e-10)))
+        df['H-L']  = df['high'] - df['low']
+        df['H-PC'] = (df['high'] - df['close'].shift(1)).abs()
+        df['L-PC'] = (df['low']  - df['close'].shift(1)).abs()
+        df['TR']   = df[['H-L','H-PC','L-PC']].max(axis=1)
+        df['ATR14']= df['TR'].rolling(14).mean()
+        plus_dm  = df['high'].diff().clip(lower=0)
+        minus_dm = (-df['low'].diff()).clip(lower=0)
+        mask = plus_dm >= minus_dm
+        plus_dm_clean  = plus_dm.where(mask, 0)
+        minus_dm_clean = minus_dm.where(~mask, 0)
+        atr14_s = df['ATR14'] + 1e-10
+        plus_di  = 100 * plus_dm_clean.rolling(14).mean() / atr14_s
+        minus_di = 100 * minus_dm_clean.rolling(14).mean() / atr14_s
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
+        df['ADX'] = dx.rolling(14).mean()
+
+        p_last = df.iloc[-2]
+        c_last = df.iloc[-1]
+        is_cross_up   = (p_last['MA8'] <= p_last['EMA89']) and (c_last['MA8'] > c_last['EMA89'])
+        is_cross_down = (p_last['MA8'] >= p_last['EMA89']) and (c_last['MA8'] < c_last['EMA89'])
+        if not (is_cross_up or is_cross_down):
+            return None  # 沒有交叉，不算接近訊號
+
+        direction     = "多" if is_cross_up else "空"
+        current_price = c_last['close']
+        current_rsi   = c_last['RSI']
+        current_adx   = c_last['ADX']
+        avg_vol_20    = df['vol'].iloc[-22:-2].mean()
+        cross_vol     = df['vol'].iloc[-2]
+        ema89_slope   = c_last['EMA89'] - df['EMA89'].iloc[-4]
+        price_5ago    = df['close'].iloc[-6]
+        rsi_5ago      = df['RSI'].iloc[-6]
+
+        filters_passed = 0
+        failed_at = None
+
+        # ① ADX
+        if current_adx < 20:
+            failed_at = f"ADX偏弱（{current_adx:.0f}）"
+        else:
+            filters_passed += 1
+            # ② 成交量
+            if cross_vol <= avg_vol_20:
+                failed_at = "成交量不足"
+            else:
+                filters_passed += 1
+                # ③ EMA89 斜率
+                slope_fail = (direction == "多" and ema89_slope <= 0) or (direction == "空" and ema89_slope >= 0)
+                if slope_fail:
+                    failed_at = "EMA89斜率偏平"
+                else:
+                    filters_passed += 1
+                    # ④ RSI 背離
+                    rsi_div = (direction == "多" and current_price > price_5ago and current_rsi < rsi_5ago) or \
+                              (direction == "空" and current_price < price_5ago and current_rsi > rsi_5ago)
+                    if rsi_div:
+                        failed_at = "RSI背離"
+                    else:
+                        filters_passed += 1
+                        # 全部通過 → 是正式訊號，不算接近訊號
+                        return None
+
+        # 至少通過 2 道才值得顯示
+        if failed_at and filters_passed >= 2:
+            return {
+                'asset':          asset.split('-')[0],
+                'dir':            direction,
+                'tf':             "1H" if tf == "1h" else "4H",
+                'filters_passed': filters_passed,
+                'failed_at':      failed_at,
+                'rsi':            round(current_rsi, 1),
+                'adx':            round(current_adx, 1),
+            }
+    except Exception:
+        pass
+    return None
+
+
+def run_near_miss_scan():
+    """掃描全市場接近通過訊號（交叉存在但被某過濾器擋下），回傳最多 5 筆"""
+    all_assets, _ = get_all_okx_swap_assets()
+    tasks    = [(a, tf) for a in all_assets for tf in ("1h", "4h")]
+    results  = []
+    lock     = threading.Lock()
+
+    def task(asset, tf):
+        r = fetch_near_miss_candidate(asset, tf)
+        if r:
+            with lock:
+                results.append(r)
+
+    with ThreadPoolExecutor(max_workers=25) as ex:
+        list(ex.map(lambda t: task(*t), tasks))
+
+    results.sort(key=lambda x: x['filters_passed'], reverse=True)
+    return results[:5]
+
+
 def run_strategy_scan():
     all_assets, leverage_map = get_all_okx_swap_assets()
 
@@ -1564,7 +1680,6 @@ def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False):
     valid_signals = run_strategy_scan()
     if valid_signals:
         send_html_report_via_requests(valid_signals, mode_title=msg_title, target_chat_id=target_chat_id)
-        # 快取最新訊號供 /open 指令查詢（不自動加入持倉監控，等用戶確認開倉）
         with last_scan_lock:
             last_scan_cache.clear()
             for sig in valid_signals:
@@ -1574,10 +1689,28 @@ def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False):
         if silent_on_empty:
             print(f"📭 定時掃描無訊號，靜默略過（{msg_title}）")
         else:
+            # 無主訊號 → 跑接近訊號掃描
+            print("🔍 無主訊號，掃描接近訊號中...")
+            near_misses = run_near_miss_scan()
+            if near_misses:
+                dir_map = {"多": "🟩多", "空": "🟥空"}
+                lines = ["📭 <b>全網掃描完畢，暫無完整訊號</b>\n\n<b>── 接近訊號（供參考）──</b>"]
+                for nm in near_misses:
+                    bar = "■" * nm['filters_passed'] + "□" * (4 - nm['filters_passed'])
+                    d = dir_map.get(nm['dir'], nm['dir'])
+                    lines.append(
+                        f"⚡ <b>{nm['asset']}</b>  {d}  {nm['tf']}\n"
+                        f"   通過 {nm['filters_passed']}/4 關  [{bar}]\n"
+                        f"   卡在：{nm['failed_at']}  ADX={nm['adx']}  RSI={nm['rsi']}"
+                    )
+                lines.append("\n<i>接近訊號未通過所有過濾條件，請自行評估進場風險。</i>")
+                text = "\n\n".join(lines)
+            else:
+                text = "📭 全網通掃完畢，當前盤面極其冷靜，暫無符合勝率條件之信號。"
             text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            resp = requests.post(text_url, json={"chat_id": str(target_chat_id), "text": "📭 全網通掃完畢，當前盤面極其冷靜，暫無符合勝率條件之信號。"})
+            resp = requests.post(text_url, json={"chat_id": str(target_chat_id), "text": text, "parse_mode": "HTML"})
             if resp.json().get("ok"):
-                print(f"✅ 「盤面冷靜」訊息發送成功")
+                print(f"✅ 掃描結果發送成功（{'有' if near_misses else '無'}接近訊號）")
 
 def send_holding_summary(chat_id):
     """發送目前所有活躍持倉的狀態總覽"""
@@ -2000,7 +2133,7 @@ def handle_telegram_updates():
                         if text.startswith("/scan"):
                             print(f"⚡ 收到 /scan 指令")
                             confirm_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                            requests.post(confirm_url, json={"chat_id": chat_id, "text": "⚡ 收到指令！正在進行全網掃描 + 主力動向確認，精選勝率最高 5 標的，請稍候約 15 秒..."})
+                            requests.post(confirm_url, json={"chat_id": chat_id, "text": "⚡ 收到指令！正在進行全網掃描 + 主力動向確認，精選最高勝率訊號，請稍候約 15 秒..."})
                             t = threading.Thread(target=scan_worker_thread, args=("手動現場突擊播報", chat_id))
                             t.daemon = True
                             t.start()
