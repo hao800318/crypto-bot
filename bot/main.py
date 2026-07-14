@@ -775,6 +775,9 @@ last_scan_cache: dict = {}
 last_scan_lock  = threading.Lock()
 near_miss_cache: dict = {}
 near_miss_lock  = threading.Lock()
+watch_list: list = []          # [{'asset':'BTC','chat_id':'123','added_at':ts}]
+watch_list_lock = threading.Lock()
+WATCHLIST_INTERVAL_MINUTES = 5
 
 def get_current_price(inst_id):
     try:
@@ -2147,18 +2150,194 @@ def send_stats_report(chat_id):
     print(f"📊 每日勝率播報完成（{total} 筆）")
 
 
+def fetch_coin_status(inst_id, tf):
+    """取得幣種當前完整指標狀態（不要求交叉）"""
+    bar_param = "1H" if tf == "1h" else "4H"
+    url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar_param}&limit=100"
+    try:
+        res = requests.get(url, timeout=2.0).json()
+        if res.get('code') != '0' or len(res['data']) < 90:
+            return None
+        df = pd.DataFrame(res['data'], columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
+        for col in ['open','high','low','close','vol']:
+            df[col] = df[col].astype(float)
+        df = df.iloc[::-1].reset_index(drop=True)
+        df['MA8']   = df['close'].rolling(8).mean()
+        df['EMA89'] = df['close'].ewm(span=89, adjust=False).mean()
+        delta = df['close'].diff()
+        gain  = delta.where(delta > 0, 0).rolling(14).mean()
+        loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        df['RSI']  = 100 - (100 / (1 + gain / (loss + 1e-10)))
+        df['H-L']  = df['high'] - df['low']
+        df['H-PC'] = (df['high'] - df['close'].shift(1)).abs()
+        df['L-PC'] = (df['low']  - df['close'].shift(1)).abs()
+        df['TR']   = df[['H-L','H-PC','L-PC']].max(axis=1)
+        df['ATR14']= df['TR'].rolling(14).mean()
+        plus_dm  = df['high'].diff().clip(lower=0)
+        minus_dm = (-df['low'].diff()).clip(lower=0)
+        mask = plus_dm >= minus_dm
+        plus_dm_c = plus_dm.where(mask, 0)
+        minus_dm_c= minus_dm.where(~mask, 0)
+        s = df['ATR14'] + 1e-10
+        plus_di  = 100 * plus_dm_c.rolling(14).mean() / s
+        minus_di = 100 * minus_dm_c.rolling(14).mean() / s
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
+        df['ADX'] = dx.rolling(14).mean()
+        c = df.iloc[-1]; p = df.iloc[-2]
+        direction  = "多" if c['MA8'] > c['EMA89'] else "空"
+        crossed    = (p['MA8'] <= p['EMA89'] and c['MA8'] > c['EMA89']) or \
+                     (p['MA8'] >= p['EMA89'] and c['MA8'] < c['EMA89'])
+        avg_vol    = df['vol'].iloc[-22:-2].mean()
+        slope      = c['EMA89'] - df['EMA89'].iloc[-4]
+        price_5ago = df['close'].iloc[-6]
+        rsi_5ago   = df['RSI'].iloc[-6]
+        adx_ok     = c['ADX'] >= 20
+        vol_ok     = c['vol'] > avg_vol
+        slope_ok   = (direction == "多" and slope > 0) or (direction == "空" and slope < 0)
+        no_div     = not ((direction == "多" and c['close'] > price_5ago and c['RSI'] < rsi_5ago) or
+                          (direction == "空" and c['close'] < price_5ago and c['RSI'] > rsi_5ago))
+        if tf == "1h":
+            anchor = c['MA8'];   atr_m = 1.5; tp_m = (1.5, 3.0, 5.0)
+        else:
+            anchor = c['EMA89']; atr_m = 2.0; tp_m = (2.0, 4.0, 7.0)
+        atr = c['ATR14']
+        if direction == "多":
+            sl  = max(anchor - atr * atr_m, anchor * 0.96)
+            tp1 = anchor + atr * tp_m[0]
+            tp2 = anchor + atr * tp_m[1]
+            tp3 = anchor + atr * tp_m[2]
+        else:
+            sl  = min(anchor + atr * atr_m, anchor * 1.04)
+            tp1 = anchor - atr * tp_m[0]
+            tp2 = anchor - atr * tp_m[1]
+            tp3 = anchor - atr * tp_m[2]
+        passed = sum([adx_ok, vol_ok, slope_ok, no_div])
+        return {
+            'asset': inst_id.split('-')[0], 'dir': direction,
+            'tf': "1H" if tf == "1h" else "4H",
+            'price': c['close'], 'ma8': c['MA8'], 'ema89': c['EMA89'],
+            'rsi': round(c['RSI'], 1), 'adx': round(c['ADX'], 1),
+            'vol_pct': round(c['vol'] / avg_vol * 100),
+            'crossed': crossed, 'passed': passed,
+            'filters': {'adx_ok': adx_ok, 'vol_ok': vol_ok,
+                        'slope_ok': slope_ok, 'no_div': no_div},
+            'entry': anchor, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp3': tp3,
+        }
+    except Exception:
+        return None
+
+
+def check_watched_coin(asset, chat_id):
+    """檢查單一自選幣種當前狀態並推送報告"""
+    with active_positions_lock:
+        in_pos = any(p['asset'] == asset for p in active_positions)
+    if in_pos:
+        return  # 持倉監控已接管
+
+    inst_id = f"{asset}-USDT-SWAP"
+    la_tz   = pytz.timezone('America/Los_Angeles')
+    now_str = datetime.datetime.now(la_tz).strftime('%H:%M PT')
+    url     = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    # 先試完整訊號（1H/4H）
+    full_sig = None
+    for tf in ('1h', '4h'):
+        s = fetch_candle_sync(inst_id, tf, max_leverage=20)
+        if s:
+            full_sig = s
+            break
+
+    if full_sig:
+        msg = (f"🚨 <b>自選監控觸發完整訊號！</b>  {now_str}\n\n"
+               f"⚡ <b>{full_sig['asset']}</b>  "
+               f"{'🟩多' if full_sig['dir']=='多' else '🟥空'}  "
+               f"{full_sig['tf']}  <b>{full_sig['win_rate']}%</b>\n"
+               f"<pre>進場  {format_price(full_sig['entry'])}\n"
+               f"止損  {format_price(full_sig['sl'])}\n"
+               f"TP1   {format_price(full_sig['tp1'])}\n"
+               f"TP2   {format_price(full_sig['tp2'])}\n"
+               f"TP3   {format_price(full_sig['tp3'])}</pre>"
+               f"▸ TP1達標 → 止損移至 <code>{format_price(full_sig['entry'])}</code>")
+        with last_scan_lock:
+            last_scan_cache[asset] = {**full_sig, 'cached_at': time.time()}
+        markup = {"inline_keyboard": [[
+            {"text": f"✅ 追蹤 {asset}{full_sig['dir']}",
+             "callback_data": f"open_{asset}_{full_sig['dir']}"},
+            {"text": "🗑️ 停止監控", "callback_data": f"unwatch_{asset}"},
+        ]]}
+        requests.post(url, json={"chat_id": str(chat_id), "text": msg,
+                                 "parse_mode": "HTML", "reply_markup": markup})
+        return
+
+    # 無完整訊號 → 取最佳時框狀態
+    best = None
+    for tf in ('1h', '4h'):
+        st = fetch_coin_status(inst_id, tf)
+        if st and (best is None or st['passed'] > best['passed']):
+            best = st
+    if not best:
+        return
+
+    d   = "🟩多" if best['dir'] == "多" else "🟥空"
+    bar = "■" * best['passed'] + "□" * (4 - best['passed'])
+    f   = best['filters']
+    lines = (
+        f"   ADX={best['adx']} {'✅' if f['adx_ok'] else '❌'}\n"
+        f"   成交量={best['vol_pct']}%均量 {'✅' if f['vol_ok'] else '❌'}\n"
+        f"   EMA89斜率 {'✅' if f['slope_ok'] else '❌'}\n"
+        f"   RSI={best['rsi']} {'✅' if f['no_div'] else '❌ 背離'}"
+    )
+    msg = (f"👁 <b>{best['asset']} 自選監控</b>  {now_str}\n"
+           f"{d}  {best['tf']}  通過 {best['passed']}/4 關  [{bar}]\n"
+           f"現價 <code>{format_price(best['price'])}</code>\n"
+           f"{lines}\n")
+    if best['passed'] >= 2:
+        msg += (f"\n<b>─ 當前建議點位（參考）─</b>\n"
+                f"<pre>進場  {format_price(best['entry'])}\n"
+                f"止損  {format_price(best['sl'])}\n"
+                f"TP1   {format_price(best['tp1'])}\n"
+                f"TP2   {format_price(best['tp2'])}\n"
+                f"TP3   {format_price(best['tp3'])}</pre>"
+                f"<i>尚未通過全部條件，點位僅供參考</i>")
+    markup = {"inline_keyboard": [[
+        {"text": "🗑️ 停止監控", "callback_data": f"unwatch_{asset}"}
+    ]]}
+    requests.post(url, json={"chat_id": str(chat_id), "text": msg,
+                             "parse_mode": "HTML", "reply_markup": markup})
+
+
+def run_watchlist_check():
+    """每 5 分鐘檢查所有自選監控幣種"""
+    with watch_list_lock:
+        items = list(watch_list)
+    if not items:
+        return
+    print(f"👁 自選監控：檢查 {len(items)} 顆幣...")
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        for item in items:
+            ex.submit(check_watched_coin, item['asset'], item['chat_id'])
+
+
 def handle_telegram_updates():
     print("🤖 幣圈分析師【勝率精選 5 幣版 + 主力動向確認 + 持倉監控版】雷達正在開機...")
     offset = None
     la_tz = pytz.timezone('America/Los_Angeles')
-    last_auto_scan_time = 0
-    last_monitor_time  = 0
-    last_stats_date    = None  # 每日勝率播報去重
+    last_auto_scan_time      = 0
+    last_monitor_time        = 0
+    last_watchlist_check_time_local = 0
+    last_stats_date          = None  # 每日勝率播報去重
 
     while True:
         try:
             now_la   = datetime.datetime.now(la_tz)
             now_ts   = time.time()
+
+            # A0. 自選監控（每 5 分鐘）
+            if now_ts - last_watchlist_check_time_local >= WATCHLIST_INTERVAL_MINUTES * 60:
+                t = threading.Thread(target=run_watchlist_check)
+                t.daemon = True
+                t.start()
+                last_watchlist_check_time_local = now_ts
 
             # A. 定時播報（每 15 分鐘）
             if now_ts - last_auto_scan_time >= SCAN_INTERVAL_MINUTES * 60:
@@ -2241,6 +2420,12 @@ def handle_telegram_updates():
                                     else:
                                         answer_callback(cb_id, "⚠️ 訊號已過期，請重新 /scan", alert=True)
 
+                        elif cb_data.startswith("unwatch_"):
+                            asset_uw = cb_data.split("_", 1)[1]
+                            with watch_list_lock:
+                                watch_list[:] = [w for w in watch_list if w['asset'] != asset_uw]
+                            answer_callback(cb_id, f"🗑️ {asset_uw} 已停止監控", alert=True)
+
                         elif cb_data == "ack_monitor":
                             answer_callback(cb_id, "✅ 已收到", alert=False)
 
@@ -2281,6 +2466,42 @@ def handle_telegram_updates():
                             t.daemon = True
                             t.start()
 
+                        elif text.lower().startswith("/watch "):
+                            coin_w = text.split()[1].upper().strip() if len(text.split()) > 1 else ""
+                            if coin_w:
+                                with watch_list_lock:
+                                    already_w = any(w['asset'] == coin_w for w in watch_list)
+                                    if not already_w:
+                                        watch_list.append({'asset': coin_w, 'chat_id': chat_id, 'added_at': time.time()})
+                                msg_w = f"👁 <b>{coin_w}</b> 已加入自選監控，每 {WATCHLIST_INTERVAL_MINUTES} 分鐘更新一次。\n發送 /unwatch {coin_w} 可停止。" if not already_w else f"⚠️ {coin_w} 已在監控清單中。"
+                                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                              json={"chat_id": chat_id, "text": msg_w, "parse_mode": "HTML"})
+                                if not already_w:
+                                    t = threading.Thread(target=check_watched_coin, args=(coin_w, chat_id))
+                                    t.daemon = True; t.start()
+
+                        elif text.lower().startswith("/unwatch"):
+                            coin_uw = text.split()[1].upper().strip() if len(text.split()) > 1 else ""
+                            if coin_uw:
+                                with watch_list_lock:
+                                    before = len(watch_list)
+                                    watch_list[:] = [w for w in watch_list if w['asset'] != coin_uw]
+                                    removed = before > len(watch_list)
+                                msg_uw = f"🗑️ <b>{coin_uw}</b> 已從監控清單移除。" if removed else f"⚠️ {coin_uw} 不在監控清單中。"
+                                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                              json={"chat_id": chat_id, "text": msg_uw, "parse_mode": "HTML"})
+
+                        elif text.lower().startswith("/watching"):
+                            with watch_list_lock:
+                                wl = list(watch_list)
+                            if wl:
+                                lines_wl = "\n".join(f"• {w['asset']}" for w in wl)
+                                msg_wl = f"👁 <b>自選監控清單（{len(wl)} 顆）</b>\n{lines_wl}\n\n每 {WATCHLIST_INTERVAL_MINUTES} 分鐘更新一次\n輸入 /unwatch [幣種] 移除"
+                            else:
+                                msg_wl = "📭 監控清單為空。\n輸入 /watch BTC 開始監控。"
+                            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                          json={"chat_id": chat_id, "text": msg_wl, "parse_mode": "HTML"})
+
                         elif text.lower().startswith("/close"):
                             print(f"🗑️ 收到 /close 指令：{text}")
                             t = threading.Thread(target=handle_close_command, args=(text, chat_id))
@@ -2296,7 +2517,7 @@ def handle_telegram_updates():
                         elif text.startswith("/") and len(text) > 1:
                             # 通用幣種查詢：/eth /btc /sol /doge 等
                             coin_cmd = text.split()[0].lstrip("/").split("@")[0]
-                            if coin_cmd and coin_cmd.isalpha() and coin_cmd.lower() not in ("open","close","scan","holding"):
+                            if coin_cmd and coin_cmd.isalpha() and coin_cmd.lower() not in ("open","close","scan","holding","watch","unwatch","watching","stats"):
                                 print(f"🔍 收到幣種查詢指令：/{coin_cmd.upper()}")
                                 requests.post(
                                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
