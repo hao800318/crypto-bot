@@ -716,7 +716,9 @@ def run_strategy_scan():
     return top_signals
 
 # ==================== 📊 5. 持倉監控系統 ====================
-POSITIONS_FILE = "active_positions.json"
+# Railway Volume 掛載在 /data，本機開發時退回當前目錄
+_DATA_DIR = "/data" if os.path.isdir("/data") else "."
+POSITIONS_FILE = os.path.join(_DATA_DIR, "active_positions.json")
 
 def load_positions():
     """從 JSON 檔案讀取持倉記錄（Bot 啟動時呼叫）"""
@@ -742,7 +744,7 @@ active_positions = load_positions()   # 啟動時從檔案恢復
 active_positions_lock = threading.Lock()
 
 # ==================== 📈 勝率統計系統 ====================
-STATS_FILE = "trade_stats.json"
+STATS_FILE = os.path.join(_DATA_DIR, "trade_stats.json")
 
 def load_stats():
     try:
@@ -780,7 +782,7 @@ last_scan_cache: dict = {}
 last_scan_lock  = threading.Lock()
 near_miss_cache: dict = {}
 near_miss_lock  = threading.Lock()
-WATCH_FILE = "watch_list.json"
+WATCH_FILE = os.path.join(_DATA_DIR, "watch_list.json")
 
 def load_watch_list():
     """Bot 啟動時從 JSON 檔案恢復自選監控清單"""
