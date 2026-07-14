@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ==================== 🔑 1. Telegram 設定 ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-SCHEDULE_HOURS = [8, 12, 18, 22]
+SCHEDULE_HOURS = [6, 8, 10, 12, 14, 18, 22]
 
 BASE_URL = "https://www.okx.com"
 
