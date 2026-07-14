@@ -818,7 +818,7 @@ def run_near_miss_scan():
 
 
 def fetch_pre_signal_candidate(asset, tf):
-    """偵測 MA8 正在趨近 EMA89 且尚未交叉的幣種（預備訊號）"""
+    """偵測 MA8 正在趨近 EMA89 且尚未交叉的幣種，附帶完整開單策略"""
     bar_param = _TF_BAR.get(tf, "1H")
     url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={bar_param}&limit=100"
     try:
@@ -832,6 +832,11 @@ def fetch_pre_signal_candidate(asset, tf):
         df = df.iloc[::-1].reset_index(drop=True)
         df['MA8']   = df['close'].rolling(8).mean()
         df['EMA89'] = df['close'].ewm(span=89, adjust=False).mean()
+        df['H-L']   = df['high'] - df['low']
+        df['H-PC']  = (df['high'] - df['close'].shift(1)).abs()
+        df['L-PC']  = (df['low']  - df['close'].shift(1)).abs()
+        df['TR']    = df[['H-L','H-PC','L-PC']].max(axis=1)
+        df['ATR14'] = df['TR'].rolling(14).mean()
 
         c_last = df.iloc[-1]
         c_prev = df.iloc[-2]
@@ -842,36 +847,69 @@ def fetch_pre_signal_candidate(asset, tf):
         ma8_prev = c_prev['MA8']
         ema_prev = c_prev['EMA89']
 
-        # 必須還沒交叉（MA8 仍在 EMA89 同側）
         if pd.isna(ma8_now) or pd.isna(ema_now):
             return None
+        # 必須還沒交叉（MA8 仍在 EMA89 同側）
         if (ma8_now > ema_now) != (ma8_prev > ema_prev):
-            return None  # 已經剛交叉，不算預備
+            return None
 
         gap_now  = abs(ma8_now - ema_now)
         gap_prev = abs(ma8_prev - ema_prev)
         gap_pct  = gap_now / (ema_now + 1e-10) * 100
 
-        # 門檻：差距 ≤ 1.0%，且差距在縮小（收斂）
+        # 差距 ≤ 1.0% 且收斂中
         if gap_pct > 1.0 or gap_now >= gap_prev:
             return None
 
         direction = "多" if ma8_now < ema_now else "空"
 
-        # EMA89 斜率須與方向一致（過濾盤整橫走）
+        # EMA89 斜率須與方向一致
         ema_slope = ema_now - c_4ago['EMA89']
         if direction == "多" and ema_slope < 0:
             return None
         if direction == "空" and ema_slope > 0:
             return None
 
+        # ── 開單策略計算（與主訊號相同邏輯）──
+        atr = c_last['ATR14']
+        if tf in ("15m", "1h"):
+            anchor = ma8_now
+            atr_mult  = 1.2 if tf == "15m" else 1.5
+            tp_mults  = (1.0, 2.0, 3.5) if tf == "15m" else (1.5, 3.0, 5.0)
+            anchor_label = f"MA8≈{format_price(ma8_now)}"
+        else:
+            anchor = ema_now
+            atr_mult  = 2.0
+            tp_mults  = (2.0, 4.0, 7.0)
+            anchor_label = f"EMA89≈{format_price(ema_now)}"
+
+        if direction == "多":
+            entry = anchor
+            sl    = max(anchor - atr * atr_mult, anchor * 0.96)
+            tp1   = anchor + atr * tp_mults[0]
+            tp2   = anchor + atr * tp_mults[1]
+            tp3   = anchor + atr * tp_mults[2]
+        else:
+            entry = anchor
+            sl    = min(anchor + atr * atr_mult, anchor * 1.04)
+            tp1   = anchor - atr * tp_mults[0]
+            tp2   = anchor - atr * tp_mults[1]
+            tp3   = anchor - atr * tp_mults[2]
+
         return {
-            'asset':   asset.split('-')[0],
-            'inst_id': asset,
-            'dir':     direction,
-            'tf':      _TF_LABEL.get(tf, tf.upper()),
-            'gap_pct': round(gap_pct, 3),
-            'price':   c_last['close'],
+            'asset':        asset.split('-')[0],
+            'inst_id':      asset,
+            'dir':          direction,
+            'tf':           _TF_LABEL.get(tf, tf.upper()),
+            'tf_raw':       tf,
+            'gap_pct':      round(gap_pct, 3),
+            'price':        c_last['close'],
+            'entry':        entry,
+            'entry_label':  anchor_label,
+            'sl':           sl,
+            'tp1':          tp1,
+            'tp2':          tp2,
+            'tp3':          tp3,
         }
     except Exception:
         pass
@@ -2240,15 +2278,25 @@ def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False, include
         dir_map = {"多": "🟩多", "空": "🟥空"}
         lines_pre = [
             f"🔔 <b>預備訊號警報</b>  {now_str_pre}",
-            "MA8 正在趨近 EMA89，預計即將出現交叉\n",
+            f"MA8 趨近 EMA89，差距 ≤1%，即將出現交叉（共 {len(new_pre)} 筆）",
+            "─────────────────────────",
         ]
         for ps in new_pre:
             d = dir_map.get(ps['dir'], ps['dir'])
             lines_pre.append(
-                f"<b>{ps['asset']}</b>  {d}  {ps['tf']}  "
-                f"差距僅 <b>{ps['gap_pct']:.2f}%</b>　現價 <code>{format_price(ps['price'])}</code>"
+                f"{d} <b>{ps['asset']}</b>  {ps['tf']}  差距 <b>{ps['gap_pct']:.2f}%</b>\n"
+                f"<pre>"
+                f"現價  {format_price(ps['price'])}\n"
+                f"進場  {ps['entry_label']}\n"
+                f"止損  {format_price(ps['sl'])}\n"
+                f"TP1   {format_price(ps['tp1'])}\n"
+                f"TP2   {format_price(ps['tp2'])}\n"
+                f"TP3   {format_price(ps['tp3'])}"
+                f"</pre>"
+                f"💡 等交叉確認後，在 <b>{ps['entry_label'].split('≈')[-1]}</b> 附近掛限價單"
             )
-        lines_pre.append("\n<i>⚠️ 非正式訊號，等 MA8/EMA89 實際交叉確認後再掛單。</i>")
+        lines_pre.append("─────────────────────────")
+        lines_pre.append("<i>⚠️ 非正式訊號，MA8/EMA89 實際交叉並確認後再掛單，勿搶跑。</i>")
         text_pre = "\n".join(lines_pre)
         resp_pre = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
