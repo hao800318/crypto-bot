@@ -1588,17 +1588,22 @@ def run_position_monitor():
         for i, (pos, status, action) in enumerate(asset_alerts, 1):
             d   = "🟩<b>多</b>" if pos['dir'] == "多" else "🟥<b>空</b>"
             sub = f"#{i} " if len(asset_alerts) > 1 else ""
-            rec_text, rec_icon = REC.get(status, ("自行判斷", "❓"))
             msg += f"{sub}{d}  {pos['tf']}  {status}\n"
             msg += "<pre>"
             msg += f"進場  {format_price(pos['entry'])}\n"
             msg += f"止損  {format_price(pos['sl'])}\n"
             msg += "</pre>"
             msg += f"▸ {action}\n"
-            msg += f"<b>【持倉建議】{rec_icon} {rec_text}</b>\n"
-            # 保本出場 / 止損 / 全止盈 → 標註自動移除
-            if status in ("🔴 止損觸發", "🛡️ 回調至保本止損", "🟣 全部止盈"):
+            # 掛單取消：action 已說明真正原因，不再重複 REC 文字
+            if status in ("🚫 掛單已取消", "⏰ 掛單逾時取消"):
+                msg += f"<i>（掛單已自動取消並移除追蹤）</i>\n"
+            elif status in ("🔴 止損觸發", "🛡️ 回調至保本止損", "🟣 全部止盈"):
+                rec_text, rec_icon = REC.get(status, ("自行判斷", "❓"))
+                msg += f"<b>【持倉建議】{rec_icon} {rec_text}</b>\n"
                 msg += f"<i>（此持倉已自動移除追蹤）</i>\n"
+            else:
+                rec_text, rec_icon = REC.get(status, ("自行判斷", "❓"))
+                msg += f"<b>【持倉建議】{rec_icon} {rec_text}</b>\n"
 
         conclusion = build_coin_conclusion(all_by_asset[asset], cp)
         if conclusion:
