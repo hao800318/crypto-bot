@@ -302,7 +302,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
     bar_param = _TF_BAR.get(tf, "1H")
     url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={bar_param}&limit=100"
     try:
-        res = requests.get(url, timeout=2.0).json()
+        res = requests.get(url, timeout=1.5).json()
         if res.get('code') == '0' and len(res['data']) >= 90:
             df = pd.DataFrame(res['data'], columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
             for col in ['open','high','low','close','vol']:
@@ -616,7 +616,7 @@ def fetch_near_miss_candidate(asset, tf, btc_trend="neutral", market_fr=0.0):
     bar_param = _TF_BAR.get(tf, "1H")
     url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={bar_param}&limit=100"
     try:
-        res = requests.get(url, timeout=2.0).json()
+        res = requests.get(url, timeout=1.5).json()
         if res.get('code') != '0' or len(res['data']) < 90:
             return None
         df = pd.DataFrame(res['data'], columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
@@ -787,7 +787,7 @@ def run_near_miss_scan():
             with lock:
                 results.append(r)
 
-    with ThreadPoolExecutor(max_workers=25) as ex:
+    with ThreadPoolExecutor(max_workers=40) as ex:
         list(ex.map(lambda t: task(*t), tasks))
 
     results.sort(key=lambda x: x['filters_passed'], reverse=True)
@@ -817,7 +817,7 @@ def run_strategy_scan():
         return fetch_candle_sync(asset, tf, max_leverage=max_lev,
                                  btc_trend=btc_trend, market_fr=market_fr)
 
-    with ThreadPoolExecutor(max_workers=25) as executor:
+    with ThreadPoolExecutor(max_workers=40) as executor:
         futures = {executor.submit(scan_task, asset, tf): (asset, tf) for asset, tf in tasks}
         for future in as_completed(futures):
             with lock:
@@ -833,7 +833,7 @@ def run_strategy_scan():
                 pass
 
     elapsed = time.time() - scan_start
-    print(f"\n✨ 全網掃描完畢！耗時：{elapsed:.1f} 秒（共 {len(all_assets)} 支幣種 × 2 時框）")
+    print(f"\n✨ 全網掃描完畢！耗時：{elapsed:.1f} 秒（共 {len(all_assets)} 支幣種 × 3 時框）")
 
     all_signals.sort(key=lambda x: x['score'], reverse=True)
     top_signals = all_signals[:3]
