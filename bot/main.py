@@ -514,6 +514,11 @@ def save_positions(positions):
 active_positions = load_positions()   # 啟動時從檔案恢復
 active_positions_lock = threading.Lock()
 
+# 最近一次掃描結果快取（key = asset 如 "ETH"，value = signal dict）
+# 供 /open 指令查詢，不自動加入持倉監控
+last_scan_cache: dict = {}
+last_scan_lock  = threading.Lock()
+
 def get_current_price(inst_id):
     try:
         url = f"{BASE_URL}/api/v5/market/ticker?instId={inst_id}"
@@ -643,7 +648,7 @@ def analyze_position(pos):
                     action += f"\n{deteri}"
                     push = True
                 else:
-                    push = bool(whale_warn)
+                    push = False   # 鯨魚警報單獨不推送，只附在訊息裡
             else:
                 status = "🟢 止盈1達標"
                 action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈1 {format_price(tp1)}，"
@@ -662,7 +667,7 @@ def analyze_position(pos):
                 action = f"持倉正常，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%\n{deteri}"
                 push = True
             else:
-                push = bool(whale_warn)
+                push = False   # 鯨魚警報單獨不推送
     else:  # 空
         dist_to_sl_pct = (sl - current_price) / entry * 100
         # 止損：用 K 線高點
@@ -693,7 +698,7 @@ def analyze_position(pos):
                     action += f"\n{deteri}"
                     push = True
                 else:
-                    push = bool(whale_warn)
+                    push = False   # 鯨魚警報單獨不推送
             else:
                 status = "🟢 止盈1達標"
                 action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈1 {format_price(tp1)}，"
@@ -712,7 +717,7 @@ def analyze_position(pos):
                 action = f"持倉正常，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%\n{deteri}"
                 push = True
             else:
-                push = bool(whale_warn)
+                push = False   # 鯨魚警報單獨不推送
 
     full_action = action
     if whale_warn:
@@ -1329,37 +1334,12 @@ def scan_worker_thread(msg_title, target_chat_id):
     valid_signals = run_strategy_scan()
     if valid_signals:
         send_html_report_via_requests(valid_signals, mode_title=msg_title, target_chat_id=target_chat_id)
-        # 儲存已播報的訊號進持倉監控清單
-        now_ts = time.time()
-        with active_positions_lock:
+        # 快取最新訊號供 /open 指令查詢（不自動加入持倉監控，等用戶確認開倉）
+        with last_scan_lock:
+            last_scan_cache.clear()
             for sig in valid_signals:
-                # 完全相同（幣種+方向+進場+止損+止盈點位）→ 視為同一筆，跳過
-                def same_price(a, b):
-                    return abs(a - b) / max(abs(b), 1e-9) < 0.0001  # 容差 0.01%
-                exists = any(
-                    p['asset'] == sig['asset'] and
-                    p['dir']   == sig['dir']   and
-                    same_price(p['entry'], sig['entry']) and
-                    same_price(p['sl'],    sig['sl'])    and
-                    same_price(p['tp1'],   sig['tp1'])
-                    for p in active_positions
-                )
-                if not exists:
-                    active_positions.append({
-                        'asset':            sig['asset'],
-                        'dir':              sig['dir'],
-                        'tf':               sig['tf'],
-                        'entry':            sig['entry'],
-                        'sl':               sig['sl'],
-                        'tp1':              sig['tp1'],
-                        'tp2':              sig['tp2'],
-                        'tp3':              sig['tp3'],
-                        'reported_at':      now_ts,
-                        'last_checked_ts':  now_ts,   # 用於 K 線高低點回顧
-                        'filled':           False,    # 限價單尚未成交
-                    })
-        save_positions(active_positions)   # 新增後立即寫入磁碟
-        print(f"📌 已加入持倉監控，目前追蹤 {len(active_positions)} 筆")
+                last_scan_cache[sig['asset']] = {**sig, 'cached_at': time.time()}
+        print(f"📦 訊號已快取 {len(valid_signals)} 筆，等待 /open 指令確認")
     else:
         text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         resp = requests.post(text_url, json={"chat_id": str(target_chat_id), "text": "📭 全網通掃完畢，當前盤面極其冷靜，暫無符合勝率條件之信號。"})
@@ -1417,9 +1397,200 @@ def send_holding_summary(chat_id):
             msg += f"{conclusion}\n"
         msg += "─────────────────────────\n"
 
-    msg += "<i>持倉監控每小時自動推送警報</i>"
+    msg += "<i>📌 /open ETH  確認開倉並加入監控\n🗑️ /close ETH  平倉後解除監控\n⚡ 警報僅在 TP/SL/市場惡化時推送</i>"
     text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     requests.post(text_url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"})
+
+# ==================== 📌 手動開倉/平倉指令 ====================
+def handle_open_command(text, chat_id):
+    """
+    /open ETH        → 用最近快取訊號的進場參數開倉
+    /open ETH 多     → 指定方向（快取中有多空兩筆時）
+    """
+    parts = text.strip().split()
+    if len(parts) < 2:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id,
+                  "text": "❓ 用法：/open ETH 或 /open ETH 多\n如尚未掃描請先執行 /scan 取得訊號"}
+        )
+        return
+
+    symbol    = parts[1].upper()
+    direction = parts[2] if len(parts) >= 3 else None  # "多" or "空"
+
+    with last_scan_lock:
+        sig = last_scan_cache.get(symbol)
+
+    now_ts = time.time()
+
+    # ── 有快取訊號 ──
+    if sig:
+        cache_age_min = (now_ts - sig.get('cached_at', 0)) / 60
+        if cache_age_min > 120:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id,
+                      "text": f"⚠️ {symbol} 的訊號已超過 2 小時，請重新執行 /scan 或 /{symbol.lower()} 後再開倉"}
+            )
+            return
+
+        if direction and sig['dir'] != direction:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id,
+                      "text": f"⚠️ 快取中 {symbol} 的訊號方向為「{sig['dir']}」，與你指定的「{direction}」不符\n如確認開倉請輸入 /open {symbol} {sig['dir']}"}
+            )
+            return
+
+        new_pos = {
+            'asset':           sig['asset'],
+            'dir':             sig['dir'],
+            'tf':              sig['tf'],
+            'entry':           sig['entry'],
+            'sl':              sig['sl'],
+            'tp1':             sig['tp1'],
+            'tp2':             sig['tp2'],
+            'tp3':             sig['tp3'],
+            'reported_at':     now_ts,
+            'last_checked_ts': now_ts,
+            'filled':          True,   # 用戶手動確認已開倉 → 直接標為成交
+        }
+        dir_tag = "🟩多" if sig['dir'] == "多" else "🟥空"
+        confirm_text = (
+            f"✅ <b>{symbol} {dir_tag} 已加入監控</b>\n"
+            f"<pre>"
+            f"進場  {format_price(sig['entry'])}\n"
+            f"止損  {format_price(sig['sl'])}\n"
+            f"TP1   {format_price(sig['tp1'])}\n"
+            f"TP2   {format_price(sig['tp2'])}\n"
+            f"TP3   {format_price(sig['tp3'])}\n"
+            f"</pre>"
+            f"監控中，TP/SL/市場惡化時自動推送警報\n"
+            f"平倉後請輸入 /close {symbol} 解除監控"
+        )
+
+    else:
+        # ── 無快取 → 用當前市價建立簡易監控 ──
+        inst_id = f"{symbol}-USDT-SWAP"
+        current_price = get_current_price(inst_id)
+        if not current_price:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id,
+                      "text": f"❌ 找不到 {symbol} 的市場數據，請確認幣種名稱"}
+            )
+            return
+
+        dir_use = direction if direction in ("多", "空") else "多"
+        # 用當前價作為進場，ATR 估算止損止盈
+        s1 = analyze_coin_snapshot(inst_id, "1H")
+        atr = s1['atr'] if s1 else current_price * 0.02
+        if dir_use == "多":
+            sl  = current_price - atr * 1.5
+            tp1 = current_price * 1.015
+            tp2 = current_price * 1.030
+            tp3 = current_price * 1.050
+        else:
+            sl  = current_price + atr * 1.5
+            tp1 = current_price * 0.985
+            tp2 = current_price * 0.970
+            tp3 = current_price * 0.950
+
+        new_pos = {
+            'asset':           symbol,
+            'dir':             dir_use,
+            'tf':              '手動',
+            'entry':           current_price,
+            'sl':              sl,
+            'tp1':             tp1,
+            'tp2':             tp2,
+            'tp3':             tp3,
+            'reported_at':     now_ts,
+            'last_checked_ts': now_ts,
+            'filled':          True,
+        }
+        dir_tag = "🟩多" if dir_use == "多" else "🟥空"
+        confirm_text = (
+            f"📌 <b>{symbol} {dir_tag}（手動建倉）已加入監控</b>\n"
+            f"<pre>"
+            f"進場  {format_price(current_price)}（市價）\n"
+            f"止損  {format_price(sl)}\n"
+            f"TP1   {format_price(tp1)}\n"
+            f"TP2   {format_price(tp2)}\n"
+            f"TP3   {format_price(tp3)}\n"
+            f"</pre>"
+            f"<i>⚠️ 止損/止盈由 ATR 自動估算，可用 /holding 查看</i>\n"
+            f"平倉後請輸入 /close {symbol} 解除監控"
+        )
+
+    with active_positions_lock:
+        # 同幣種+同方向若已存在則覆蓋
+        active_positions[:] = [
+            p for p in active_positions
+            if not (p['asset'] == new_pos['asset'] and p['dir'] == new_pos['dir'])
+        ]
+        active_positions.append(new_pos)
+        save_positions(active_positions)
+
+    print(f"📌 /open {symbol} {new_pos['dir']} 已加入監控，共 {len(active_positions)} 筆")
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": confirm_text, "parse_mode": "HTML"}
+    )
+
+
+def handle_close_command(text, chat_id):
+    """
+    /close ETH     → 移除 ETH 所有持倉
+    /close ETH 多  → 只移除多倉
+    /close all     → 清空所有持倉
+    """
+    parts = text.strip().split()
+    if len(parts) < 2:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id,
+                  "text": "❓ 用法：/close ETH  或  /close ETH 多  或  /close all"}
+        )
+        return
+
+    target  = parts[1].upper()
+    direction = parts[2] if len(parts) >= 3 else None
+
+    with active_positions_lock:
+        before = len(active_positions)
+        if target == "ALL":
+            active_positions.clear()
+            removed = before
+        else:
+            if direction:
+                active_positions[:] = [
+                    p for p in active_positions
+                    if not (p['asset'] == target and p['dir'] == direction)
+                ]
+            else:
+                active_positions[:] = [
+                    p for p in active_positions
+                    if p['asset'] != target
+                ]
+            removed = before - len(active_positions)
+        save_positions(active_positions)
+
+    if removed == 0:
+        msg = f"❓ 找不到 {target} 的持倉記錄（可用 /holding 查看目前持倉）"
+    elif target == "ALL":
+        msg = f"✅ 已清空所有持倉監控（共移除 {removed} 筆）"
+    else:
+        dir_note = f" {direction}" if direction else ""
+        msg = f"✅ {target}{dir_note} 已移除持倉監控（移除 {removed} 筆）"
+
+    print(f"🗑️ /close {target}: 移除 {removed} 筆")
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": msg}
+    )
+
 
 def handle_telegram_updates():
     print("🤖 幣圈分析師【勝率精選 5 幣版 + 主力動向確認 + 持倉監控版】雷達正在開機...")
@@ -1478,10 +1649,22 @@ def handle_telegram_updates():
                             t.daemon = True
                             t.start()
 
+                        elif text.lower().startswith("/open"):
+                            print(f"📌 收到 /open 指令：{text}")
+                            t = threading.Thread(target=handle_open_command, args=(text, chat_id))
+                            t.daemon = True
+                            t.start()
+
+                        elif text.lower().startswith("/close"):
+                            print(f"🗑️ 收到 /close 指令：{text}")
+                            t = threading.Thread(target=handle_close_command, args=(text, chat_id))
+                            t.daemon = True
+                            t.start()
+
                         elif text.startswith("/") and len(text) > 1:
                             # 通用幣種查詢：/eth /btc /sol /doge 等
                             coin_cmd = text.split()[0].lstrip("/").split("@")[0]
-                            if coin_cmd and coin_cmd.isalpha():
+                            if coin_cmd and coin_cmd.isalpha() and coin_cmd.lower() not in ("open","close","scan","holding"):
                                 print(f"🔍 收到幣種查詢指令：/{coin_cmd.upper()}")
                                 requests.post(
                                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
