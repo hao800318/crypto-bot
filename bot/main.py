@@ -817,6 +817,91 @@ def run_near_miss_scan():
     return results[:3]
 
 
+def fetch_pre_signal_candidate(asset, tf):
+    """偵測 MA8 正在趨近 EMA89 且尚未交叉的幣種（預備訊號）"""
+    bar_param = _TF_BAR.get(tf, "1H")
+    url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={bar_param}&limit=100"
+    try:
+        res = requests.get(url, timeout=1.5).json()
+        if res.get('code') != '0' or len(res['data']) < 90:
+            return None
+        df = pd.DataFrame(res['data'],
+                          columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
+        for col in ['open','high','low','close','vol']:
+            df[col] = df[col].astype(float)
+        df = df.iloc[::-1].reset_index(drop=True)
+        df['MA8']   = df['close'].rolling(8).mean()
+        df['EMA89'] = df['close'].ewm(span=89, adjust=False).mean()
+
+        c_last = df.iloc[-1]
+        c_prev = df.iloc[-2]
+        c_4ago = df.iloc[-4]
+
+        ma8_now  = c_last['MA8']
+        ema_now  = c_last['EMA89']
+        ma8_prev = c_prev['MA8']
+        ema_prev = c_prev['EMA89']
+
+        # 必須還沒交叉（MA8 仍在 EMA89 同側）
+        if pd.isna(ma8_now) or pd.isna(ema_now):
+            return None
+        if (ma8_now > ema_now) != (ma8_prev > ema_prev):
+            return None  # 已經剛交叉，不算預備
+
+        gap_now  = abs(ma8_now - ema_now)
+        gap_prev = abs(ma8_prev - ema_prev)
+        gap_pct  = gap_now / (ema_now + 1e-10) * 100
+
+        # 門檻：差距 ≤ 1.0%，且差距在縮小（收斂）
+        if gap_pct > 1.0 or gap_now >= gap_prev:
+            return None
+
+        direction = "多" if ma8_now < ema_now else "空"
+
+        # EMA89 斜率須與方向一致（過濾盤整橫走）
+        ema_slope = ema_now - c_4ago['EMA89']
+        if direction == "多" and ema_slope < 0:
+            return None
+        if direction == "空" and ema_slope > 0:
+            return None
+
+        return {
+            'asset':   asset.split('-')[0],
+            'inst_id': asset,
+            'dir':     direction,
+            'tf':      _TF_LABEL.get(tf, tf.upper()),
+            'gap_pct': round(gap_pct, 3),
+            'price':   c_last['close'],
+        }
+    except Exception:
+        pass
+    return None
+
+
+def run_pre_signal_scan(skip_assets: set = None):
+    """掃描全市場預備訊號（MA8 收斂趨近 EMA89 但尚未交叉），回傳差距最小的前 5 筆"""
+    if skip_assets is None:
+        skip_assets = set()
+    all_assets, _ = get_all_okx_swap_assets()
+    results = []
+    lock    = threading.Lock()
+
+    def task(asset, tf):
+        if asset.split('-')[0] in skip_assets:
+            return
+        r = fetch_pre_signal_candidate(asset, tf)
+        if r:
+            with lock:
+                results.append(r)
+
+    with ThreadPoolExecutor(max_workers=40) as ex:
+        list(ex.map(lambda t: task(*t),
+                    [(a, tf) for a in all_assets for tf in ("15m", "1h", "4h")]))
+
+    results.sort(key=lambda x: x['gap_pct'])
+    return results[:5]
+
+
 def run_strategy_scan():
     all_assets, leverage_map = get_all_okx_swap_assets()
 
@@ -931,6 +1016,9 @@ last_scan_cache: dict = {}
 last_scan_lock  = threading.Lock()
 near_miss_cache: dict = {}
 near_miss_lock  = threading.Lock()
+pre_signal_sent: dict = {}
+pre_signal_lock = threading.Lock()
+PRE_SIGNAL_COOLDOWN = 7200  # 同幣種+時框 2 小時內不重複推播
 WATCH_FILE = os.path.join(_DATA_DIR, "watch_list.json")
 
 def load_watch_list():
@@ -2127,6 +2215,54 @@ def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False, include
             resp = requests.post(text_url, json=payload)
             if resp.json().get("ok"):
                 print(f"✅ 掃描結果發送成功（{'有' if near_misses else '無'}接近訊號）")
+
+    # ── 預備訊號掃描（每次定時掃描都跑，與主訊號/接近訊號無關）──
+    print("🔍 掃描預備訊號中...")
+    skip_set = set()
+    with last_scan_lock:
+        skip_set.update(last_scan_cache.keys())
+    with active_positions_lock:
+        skip_set.update(p['asset'] for p in active_positions)
+
+    pre_signals = run_pre_signal_scan(skip_assets=skip_set)
+
+    now_ts_pre = time.time()
+    new_pre = []
+    with pre_signal_lock:
+        for ps in pre_signals:
+            key = f"{ps['asset']}_{ps['tf']}"
+            if now_ts_pre - pre_signal_sent.get(key, 0) >= PRE_SIGNAL_COOLDOWN:
+                new_pre.append(ps)
+
+    if new_pre:
+        la_tz_pre  = pytz.timezone('America/Los_Angeles')
+        now_str_pre = datetime.datetime.now(la_tz_pre).strftime('%H:%M PT')
+        dir_map = {"多": "🟩多", "空": "🟥空"}
+        lines_pre = [
+            f"🔔 <b>預備訊號警報</b>  {now_str_pre}",
+            "MA8 正在趨近 EMA89，預計即將出現交叉\n",
+        ]
+        for ps in new_pre:
+            d = dir_map.get(ps['dir'], ps['dir'])
+            lines_pre.append(
+                f"<b>{ps['asset']}</b>  {d}  {ps['tf']}  "
+                f"差距僅 <b>{ps['gap_pct']:.2f}%</b>　現價 <code>{format_price(ps['price'])}</code>"
+            )
+        lines_pre.append("\n<i>⚠️ 非正式訊號，等 MA8/EMA89 實際交叉確認後再掛單。</i>")
+        text_pre = "\n".join(lines_pre)
+        resp_pre = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": str(target_chat_id), "text": text_pre, "parse_mode": "HTML"}
+        )
+        if resp_pre.json().get("ok"):
+            with pre_signal_lock:
+                for ps in new_pre:
+                    pre_signal_sent[f"{ps['asset']}_{ps['tf']}"] = now_ts_pre
+            print(f"🔔 預備訊號已推播 {len(new_pre)} 筆")
+        else:
+            print(f"❌ 預備訊號推播失敗：{resp_pre.json()}")
+    else:
+        print("📭 無新預備訊號（或全部在冷卻中）")
 
 def send_holding_summary(chat_id):
     """發送目前所有活躍持倉的狀態總覽"""
