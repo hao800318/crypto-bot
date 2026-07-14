@@ -368,14 +368,6 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             if direction == "空" and current_price < price_5ago and current_rsi > rsi_5ago:
                 return None  # 底背離：價格新低但 RSI 沒跟上，空頭動能衰竭
 
-            # ⑤ 多時間框架確認（MTF）：高一級 TF 的 EMA89 方向必須與訊號一致
-            htf_slope = get_higher_tf_ema89_slope(asset, bar_param)
-            if htf_slope is not None:
-                if direction == "多" and htf_slope <= 0:
-                    return None  # 高TF EMA89 仍下行，1H多頭與大趨勢背道
-                if direction == "空" and htf_slope >= 0:
-                    return None  # 高TF EMA89 仍上行，1H空頭與大趨勢背道
-
             # ── RSI 勝率基礎評分 ──
             base_score = (100 - abs(current_rsi - 56)) if direction == "多" else (100 - abs(current_rsi - 44))
 
@@ -392,18 +384,18 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             if tf == "1h":
                 aligned = get_higher_tf_alignment(asset, direction, higher_bar="4H")
                 if aligned:
-                    tf_bonus = 10
+                    tf_bonus = 20
                     tf_note  = " ✅4H對齊"
                 else:
-                    tf_bonus = -20
+                    tf_bonus = 0
                     tf_note  = " ⚠️4H逆向"
             else:  # 4h
                 aligned = get_higher_tf_alignment(asset, direction, higher_bar="1D")
                 if aligned:
-                    tf_bonus = 10
+                    tf_bonus = 20
                     tf_note  = " ✅1D對齊"
                 else:
-                    tf_bonus = -20
+                    tf_bonus = 0
                     tf_note  = " ⚠️1D逆向"
 
             # ⑤ BTC 方向過濾
