@@ -622,9 +622,14 @@ def analyze_position(pos):
         dist_to_sl_pct = (current_price - sl) / entry * 100
         # 止損：用 K 線低點（只要低點碰過 SL 就算觸發）
         if effective_low <= sl:
-            status = "🔴 止損觸發"
-            action = (f"⛔ K線低點 {format_price(effective_low)} 已觸及止損位 {format_price(sl)}，"
-                      f"現價 {format_price(current_price)}｜<b>建議立即平倉</b>")
+            if pos.get('tp1_hit'):
+                status = "🛡️ 回調至保本止損"
+                action = (f"📉 K線低點 {format_price(effective_low)} 回調至保本止損 {format_price(sl)}，"
+                          f"現價 {format_price(current_price)}｜<b>剩餘倉位建議出場，TP1利潤已鎖定</b>")
+            else:
+                status = "🔴 止損觸發"
+                action = (f"⛔ K線低點 {format_price(effective_low)} 已觸及止損位 {format_price(sl)}，"
+                          f"現價 {format_price(current_price)}｜<b>建議立即平倉</b>")
             push = True
         # 止盈：用 K 線高點（只要高點碰過 TP 就算達標）
         elif effective_high >= tp3:
@@ -653,10 +658,16 @@ def analyze_position(pos):
                 status = "🟢 止盈1達標"
                 action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈1 {format_price(tp1)}，"
                           f"現價 {format_price(current_price)}｜<b>建議平倉50%</b>，止損上移至成本（{format_price(entry)}）")
+                pos['sl'] = entry  # 立即把 SL 移至進場點（保本止損）
+                sl = entry
                 push = True
         elif dist_to_sl_pct < 0.5:
-            status = "⚠️ 接近止損"
-            action = f"⚠️ 距止損僅 {dist_to_sl_pct:.2f}%，現價 {format_price(current_price)}｜<b>建議收緊止損或現價平倉</b>"
+            if pos.get('tp1_hit'):
+                status = "⚠️ 即將觸及保本止損"
+                action = f"⚠️ 距保本止損（{format_price(sl)}）僅 {dist_to_sl_pct:.2f}%，現價 {format_price(current_price)}｜<b>考慮主動出場鎖利</b>"
+            else:
+                status = "⚠️ 接近止損"
+                action = f"⚠️ 距止損僅 {dist_to_sl_pct:.2f}%，現價 {format_price(current_price)}｜<b>建議收緊止損或現價平倉</b>"
             push = True
         else:
             status = "🔄 持倉中"
@@ -672,9 +683,14 @@ def analyze_position(pos):
         dist_to_sl_pct = (sl - current_price) / entry * 100
         # 止損：用 K 線高點
         if effective_high >= sl:
-            status = "🔴 止損觸發"
-            action = (f"⛔ K線高點 {format_price(effective_high)} 已觸及止損位 {format_price(sl)}，"
-                      f"現價 {format_price(current_price)}｜<b>建議立即平倉</b>")
+            if pos.get('tp1_hit'):
+                status = "🛡️ 回調至保本止損"
+                action = (f"📈 K線高點 {format_price(effective_high)} 回調至保本止損 {format_price(sl)}，"
+                          f"現價 {format_price(current_price)}｜<b>剩餘倉位建議出場，TP1利潤已鎖定</b>")
+            else:
+                status = "🔴 止損觸發"
+                action = (f"⛔ K線高點 {format_price(effective_high)} 已觸及止損位 {format_price(sl)}，"
+                          f"現價 {format_price(current_price)}｜<b>建議立即平倉</b>")
             push = True
         # 止盈：用 K 線低點
         elif effective_low <= tp3:
@@ -703,10 +719,16 @@ def analyze_position(pos):
                 status = "🟢 止盈1達標"
                 action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈1 {format_price(tp1)}，"
                           f"現價 {format_price(current_price)}｜<b>建議平倉50%</b>，止損下移至成本（{format_price(entry)}）")
+                pos['sl'] = entry  # 立即把 SL 移至進場點（保本止損）
+                sl = entry
                 push = True
         elif dist_to_sl_pct < 0.5:
-            status = "⚠️ 接近止損"
-            action = f"⚠️ 距止損僅 {dist_to_sl_pct:.2f}%，現價 {format_price(current_price)}｜<b>建議收緊止損或現價平倉</b>"
+            if pos.get('tp1_hit'):
+                status = "⚠️ 即將觸及保本止損"
+                action = f"⚠️ 距保本止損（{format_price(sl)}）僅 {dist_to_sl_pct:.2f}%，現價 {format_price(current_price)}｜<b>考慮主動出場鎖利</b>"
+            else:
+                status = "⚠️ 接近止損"
+                action = f"⚠️ 距止損僅 {dist_to_sl_pct:.2f}%，現價 {format_price(current_price)}｜<b>建議收緊止損或現價平倉</b>"
             push = True
         else:
             status = "🔄 持倉中"
