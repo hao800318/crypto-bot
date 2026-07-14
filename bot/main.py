@@ -780,7 +780,29 @@ last_scan_cache: dict = {}
 last_scan_lock  = threading.Lock()
 near_miss_cache: dict = {}
 near_miss_lock  = threading.Lock()
-watch_list: list = []          # [{'asset':'BTC','chat_id':'123','added_at':ts}]
+WATCH_FILE = "watch_list.json"
+
+def load_watch_list():
+    """Bot 啟動時從 JSON 檔案恢復自選監控清單"""
+    try:
+        if os.path.exists(WATCH_FILE):
+            with open(WATCH_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            print(f"📂 已從檔案讀取 {len(data)} 筆自選監控記錄")
+            return data
+    except Exception as e:
+        print(f"⚠️ 讀取自選監控檔案失敗：{e}")
+    return []
+
+def save_watch_list(wl):
+    """每次新增/移除後寫入 JSON 檔案"""
+    try:
+        with open(WATCH_FILE, "w", encoding="utf-8") as f:
+            json.dump(wl, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ 儲存自選監控檔案失敗：{e}")
+
+watch_list: list = load_watch_list()   # 啟動時從檔案恢復
 watch_list_lock = threading.Lock()
 WATCHLIST_INTERVAL_MINUTES = 5
 
@@ -2539,6 +2561,7 @@ def handle_telegram_updates():
                             asset_uw = cb_data.split("_", 1)[1]
                             with watch_list_lock:
                                 watch_list[:] = [w for w in watch_list if w['asset'] != asset_uw]
+                                save_watch_list(watch_list)
                             answer_callback(cb_id, f"🗑️ {asset_uw} 已停止監控", alert=True)
 
                         elif cb_data == "ack_monitor":
@@ -2588,6 +2611,7 @@ def handle_telegram_updates():
                                     already_w = any(w['asset'] == coin_w for w in watch_list)
                                     if not already_w:
                                         watch_list.append({'asset': coin_w, 'chat_id': chat_id, 'added_at': time.time()})
+                                        save_watch_list(watch_list)
                                 msg_w = f"👁 <b>{coin_w}</b> 已加入自選監控，每 {WATCHLIST_INTERVAL_MINUTES} 分鐘更新一次。\n發送 /unwatch {coin_w} 可停止。" if not already_w else f"⚠️ {coin_w} 已在監控清單中。"
                                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                                               json={"chat_id": chat_id, "text": msg_w, "parse_mode": "HTML"})
@@ -2602,6 +2626,8 @@ def handle_telegram_updates():
                                     before = len(watch_list)
                                     watch_list[:] = [w for w in watch_list if w['asset'] != coin_uw]
                                     removed = before > len(watch_list)
+                                    if removed:
+                                        save_watch_list(watch_list)
                                 msg_uw = f"🗑️ <b>{coin_uw}</b> 已從監控清單移除。" if removed else f"⚠️ {coin_uw} 不在監控清單中。"
                                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                                               json={"chat_id": chat_id, "text": msg_uw, "parse_mode": "HTML"})
