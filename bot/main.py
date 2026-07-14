@@ -513,7 +513,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
                 "sentiment_note": sentiment_note,
                 "ls_ratio":       ls_ratio,
                 "adx":            round(current_adx, 1),
-                "vol_confirmed":  volume_confirmed,
+                "vol_confirmed":  cross_vol > avg_vol_20,
                 "tf_note":        tf_note,
             }
     except:
