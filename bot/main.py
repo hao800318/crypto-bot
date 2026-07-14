@@ -64,7 +64,8 @@ def get_market_sentiment(asset):
         pass
 
     try:
-        ls_url = f"{BASE_URL}/api/v5/rubik/stat/contracts/long-short-account-ratio?instId={asset}&period=5m"
+        ccy = asset.split('-')[0]   # ETH-USDT-SWAP → ETH；ETH → ETH
+        ls_url = f"{BASE_URL}/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={ccy}&period=5m"
         ls_res = requests.get(ls_url, timeout=2.0).json()
         if ls_res.get('code') == '0' and ls_res.get('data'):
             ls_ratio = float(ls_res['data'][0][1])
