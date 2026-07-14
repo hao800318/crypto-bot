@@ -1369,7 +1369,7 @@ def run_position_monitor():
                 active_positions.remove(p)
         save_positions(active_positions)   # 無論有無移除，都存一次（保留 tp_hit 旗標）
 
-    # ── 掛單等待中：逐筆推送，附「繼續等待」／「撤單」按鈕 ──
+    # ── 掛單等待中：逐筆推送機器人直觀判斷，無需用戶選擇 ──
     la_tz_p = pytz.timezone('America/Los_Angeles')
     now_str_p = datetime.datetime.now(la_tz_p).strftime('%H:%M PT')
     text_url_p = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -1380,19 +1380,14 @@ def run_position_monitor():
         expiry_h = 4 if '1H' in tf_p else 12
         remain_min = max(0, expiry_h * 60 - waited_min)
         msg_p = (
-            f"⏳ <b>{pos_p['asset']} 掛單等待中</b>  {now_str_p}\n"
-            f"{d_p}  {tf_p}  等待 <b>{waited_min}min</b>（逾時前剩 {remain_min}min）\n"
-            f"進場 <code>{format_price(pos_p['entry'])}</code>  止損 <code>{format_price(pos_p['sl'])}</code>\n"
-            f"{action_p}\n\n"
-            f"<b>繼續持有限價單，還是撤單？</b>"
+            f"⏳ <b>{pos_p['asset']} 掛單更新</b>  {now_str_p}\n"
+            f"{d_p}  {tf_p}  已等待 {waited_min}min（逾時前剩 {remain_min}min）\n"
+            f"進場 <code>{format_price(pos_p['entry'])}</code>  止損 <code>{format_price(pos_p['sl'])}</code>\n\n"
+            f"{action_p}"
         )
-        markup_p = {"inline_keyboard": [[
-            {"text": "✅ 繼續等待", "callback_data": "ack_monitor"},
-            {"text": f"🗑️ 撤單 {pos_p['asset']}{pos_p['dir']}", "callback_data": f"cancel_pos_{pos_p['asset']}_{pos_p['dir']}"}
-        ]]}
         requests.post(text_url_p, json={
             "chat_id": str(TELEGRAM_CHAT_ID), "text": msg_p,
-            "parse_mode": "HTML", "reply_markup": markup_p
+            "parse_mode": "HTML"
         })
 
     if not alerts:
