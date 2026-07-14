@@ -1705,10 +1705,21 @@ def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False):
                     )
                 lines.append("\n<i>接近訊號未通過所有過濾條件，請自行評估進場風險。</i>")
                 text = "\n\n".join(lines)
+                # 每個接近訊號一個追蹤按鈕（標注「自選」提示風險）
+                buttons = [
+                    [{"text": f"👁 自選追蹤 {nm['asset']}{nm['dir']} ({nm['filters_passed']}/4)",
+                      "callback_data": f"open_{nm['asset']}_{nm['dir']}"}]
+                    for nm in near_misses
+                ]
+                reply_markup = {"inline_keyboard": buttons}
             else:
                 text = "📭 全網通掃完畢，當前盤面極其冷靜，暫無符合勝率條件之信號。"
+                reply_markup = None
             text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            resp = requests.post(text_url, json={"chat_id": str(target_chat_id), "text": text, "parse_mode": "HTML"})
+            payload = {"chat_id": str(target_chat_id), "text": text, "parse_mode": "HTML"}
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
+            resp = requests.post(text_url, json=payload)
             if resp.json().get("ok"):
                 print(f"✅ 掃描結果發送成功（{'有' if near_misses else '無'}接近訊號）")
 
