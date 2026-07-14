@@ -2093,20 +2093,59 @@ def send_holding_summary(chat_id):
     with active_positions_lock:
         positions = list(active_positions)
 
+    text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
     if not positions:
-        text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         requests.post(text_url, json={"chat_id": chat_id, "text": "📭 目前沒有追蹤中的持倉。請先執行 /scan 產生訊號。"})
         return
 
     la_tz = pytz.timezone('America/Los_Angeles')
     now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
+
+    # ── 先清除已取消 / 已結束的掛單，並推送即時通知 ──
+    _TERMINAL = {"🚫 掛單已取消", "⏰ 掛單逾時取消",
+                 "🔴 止損觸發", "🟣 全部止盈", "🛡️ 回調至保本止損"}
+    to_remove   = []
+    active_rows = []   # (pos, status, action) 真正需要顯示的
+    for pos in positions:
+        status, action, _ = analyze_position(pos)
+        if status is None:
+            status, action = "❓ 無法取得現價", "—"
+        if status in _TERMINAL:
+            to_remove.append(pos)
+            d_tag = "🟩多" if pos['dir'] == "多" else "🟥空"
+            icon  = "🚫" if "取消" in status else ("🔴" if "止損" in status else "🟣")
+            note  = (
+                f"{icon} <b>{status}</b>  <code>{now_str} PT</code>\n\n"
+                f"<b>{pos['asset']}</b>  {d_tag}  {pos['tf']}\n"
+                f"▸ {action}\n\n"
+                f"<i>（已自動從監控清單移除）</i>"
+            )
+            requests.post(text_url, json={"chat_id": str(TELEGRAM_CHAT_ID),
+                                          "text": note, "parse_mode": "HTML"})
+        else:
+            active_rows.append((pos, status, action))
+
+    if to_remove:
+        with active_positions_lock:
+            for p in to_remove:
+                if p in active_positions:
+                    active_positions.remove(p)
+        save_positions(active_positions)
+
+    if not active_rows:
+        requests.post(text_url, json={"chat_id": chat_id,
+            "text": "📭 目前沒有持倉中的追蹤記錄。"})
+        return
+
+    # ── 只顯示真正持倉中的幣種 ──
     msg = f"<b>【持倉監控總覽】</b>  <code>{now_str} PT</code>\n"
-    msg += f"共追蹤 <b>{len(positions)}</b> 筆持倉\n"
+    msg += f"共追蹤 <b>{len(active_rows)}</b> 筆持倉\n"
     msg += "─────────────────────────\n"
 
     by_asset = defaultdict(list)
-    for pos in positions:
-        by_asset[pos['asset']].append(pos)
+    for pos, status, action in active_rows:
+        by_asset[pos['asset']].append((pos, status, action))
 
     for asset, group in by_asset.items():
         inst_id = asset + '-USDT-SWAP'
@@ -2114,13 +2153,10 @@ def send_holding_summary(chat_id):
         price_str = format_price(cp) if cp else "—"
         msg += f"<b>{asset}</b>  現價 <code>{price_str}</code>\n"
 
-        for i, pos in enumerate(group, 1):
-            age_h  = (time.time() - pos['reported_at']) / 3600
-            status, action, _ = analyze_position(pos)
-            if status is None:
-                status, action = "❓ 無法取得現價", "—"
-            d   = "🟩<b>多</b>" if pos['dir'] == "多" else "🟥<b>空</b>"
-            sub = f"#{i} " if len(group) > 1 else ""
+        for i, (pos, status, action) in enumerate(group, 1):
+            age_h = (time.time() - pos['reported_at']) / 3600
+            d     = "🟩<b>多</b>" if pos['dir'] == "多" else "🟥<b>空</b>"
+            sub   = f"#{i} " if len(group) > 1 else ""
             msg += f"{sub}{d}  {pos['tf']}  {status}  <i>({age_h:.1f}h前)</i>\n"
             t1 = "✅" if pos.get('tp1_hit') else ""
             t2 = "✅" if pos.get('tp2_hit') else ""
@@ -2134,7 +2170,8 @@ def send_holding_summary(chat_id):
             msg += "</pre>"
             msg += f"▸ {action}\n"
 
-        conclusion = build_coin_conclusion(group, cp)
+        all_pos_in_asset = [r[0] for r in group]
+        conclusion = build_coin_conclusion(all_pos_in_asset, cp)
         if conclusion:
             msg += f"{conclusion}\n"
         msg += "─────────────────────────\n"
