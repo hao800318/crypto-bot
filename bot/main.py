@@ -483,10 +483,10 @@ def run_strategy_scan():
     print(f"\n✨ 全網掃描完畢！耗時：{elapsed:.1f} 秒（共 {len(all_assets)} 支幣種 × 2 時框）")
 
     all_signals.sort(key=lambda x: x['score'], reverse=True)
-    top_5_signals = all_signals[:5]
+    top_signals = all_signals[:3]
 
-    print(f"📊 掃描結果：共找到 {len(all_signals)} 組信號，精選前 {len(top_5_signals)} 名")
-    return top_5_signals
+    print(f"📊 掃描結果：共找到 {len(all_signals)} 組信號，精選前 {len(top_signals)} 名")
+    return top_signals
 
 # ==================== 📊 5. 持倉監控系統 ====================
 POSITIONS_FILE = "active_positions.json"
