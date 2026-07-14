@@ -772,6 +772,8 @@ def record_trade_outcome(pos, outcome):
 # 供 /open 指令查詢，不自動加入持倉監控
 last_scan_cache: dict = {}
 last_scan_lock  = threading.Lock()
+near_miss_cache: dict = {}
+near_miss_lock  = threading.Lock()
 
 def get_current_price(inst_id):
     try:
@@ -1777,6 +1779,11 @@ def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False):
                     )
                 lines.append("\n<i>接近訊號未通過所有過濾條件，請自行評估進場風險。</i>")
                 text = "\n\n".join(lines)
+                # 快取接近訊號供按鈕回調查詢
+                with near_miss_lock:
+                    near_miss_cache.clear()
+                    for nm in near_misses:
+                        near_miss_cache[nm['asset']] = {**nm, 'cached_at': time.time()}
                 # 每個接近訊號一個追蹤按鈕（標注「自選」提示風險）
                 buttons = [
                     [{"text": f"👁 自選追蹤 {nm['asset']}{nm['dir']} ({nm['filters_passed']}/4)",
@@ -2174,6 +2181,12 @@ def handle_telegram_updates():
                                 else:
                                     with last_scan_lock:
                                         sig_cb = last_scan_cache.get(asset_cb)
+                                    # 若主訊號快取無資料，查接近訊號快取
+                                    if not (sig_cb and sig_cb.get('dir') == dir_cb):
+                                        with near_miss_lock:
+                                            nm_cb = near_miss_cache.get(asset_cb)
+                                        if nm_cb and nm_cb.get('dir') == dir_cb:
+                                            sig_cb = nm_cb
                                     if sig_cb and sig_cb.get('dir') == dir_cb:
                                         now_ts_cb = time.time()
                                         new_pos_cb = {
