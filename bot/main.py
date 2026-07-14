@@ -9,6 +9,7 @@ import threading
 from collections import defaultdict
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import xml.etree.ElementTree as ET
 
 # ==================== 🔑 1. Telegram 設定 ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -1664,7 +1665,31 @@ def answer_callback(callback_id, text="", alert=False):
         pass
 
 
-def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報", target_chat_id=None):
+def fetch_coin_news(coin: str, max_items: int = 2) -> list[str]:
+    """用 Google News RSS 抓取幣種相關新聞標題（繁中優先，免 key）"""
+    try:
+        query   = requests.utils.quote(f"{coin} crypto")
+        url     = (f"https://news.google.com/rss/search"
+                   f"?q={query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant")
+        resp    = requests.get(url, timeout=5,
+                               headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code != 200:
+            return []
+        root    = ET.fromstring(resp.content)
+        items   = root.findall(".//item")
+        titles  = []
+        for item in items[:max_items]:
+            t = item.findtext("title") or ""
+            # Google News title 格式常帶 "- 媒體名"，把尾巴截掉
+            t = t.rsplit(" - ", 1)[0].strip()
+            if t:
+                titles.append(t)
+        return titles
+    except Exception:
+        return []
+
+
+def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報", target_chat_id=None, include_news=False):
     if target_chat_id is None:
         target_chat_id = TELEGRAM_CHAT_ID
 
@@ -1724,6 +1749,13 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         html_message += "</pre>"
         # ── TP1後止損提示 ──
         html_message += f"▸ TP1達標 → 止損移至 <code>{format_price(item['entry'])}</code>\n"
+        # ── 時事新聞（僅定時播報）──
+        if include_news:
+            news_items = fetch_coin_news(item['asset'])
+            if news_items:
+                html_message += "📰 <i>"
+                html_message += "  ·  ".join(news_items)
+                html_message += "</i>\n"
         html_message += "─────────────────────────\n"
 
     html_message += "<i>勝率 = RSI＋成交量＋多時框＋主力動向＋BTC方向  |  槓桿僅供參考</i>"
@@ -1745,10 +1777,11 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         print(f"❌ 報告發送失敗：{result}")
 
 # ==================== 📡 7. 原生無衝突監聽引擎 ====================
-def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False):
+def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False, include_news=False):
     valid_signals = run_strategy_scan()
     if valid_signals:
-        send_html_report_via_requests(valid_signals, mode_title=msg_title, target_chat_id=target_chat_id)
+        send_html_report_via_requests(valid_signals, mode_title=msg_title,
+                                      target_chat_id=target_chat_id, include_news=include_news)
         with last_scan_lock:
             last_scan_cache.clear()
             for sig in valid_signals:
@@ -2130,7 +2163,7 @@ def handle_telegram_updates():
             # A. 定時播報（每 15 分鐘）
             if now_ts - last_auto_scan_time >= SCAN_INTERVAL_MINUTES * 60:
                 print(f"🔔 觸發定時掃描：{now_la.strftime('%H:%M')}")
-                t = threading.Thread(target=scan_worker_thread, args=("定時自動速報", TELEGRAM_CHAT_ID, True))
+                t = threading.Thread(target=scan_worker_thread, args=("定時自動速報", TELEGRAM_CHAT_ID, True, True))
                 t.daemon = True
                 t.start()
                 last_auto_scan_time = now_ts
