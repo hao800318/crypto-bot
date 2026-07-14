@@ -513,19 +513,49 @@ def fetch_near_miss_candidate(asset, tf, btc_trend="neutral", market_fr=0.0):
         dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
         df['ADX'] = dx.rolling(14).mean()
 
-        p_last = df.iloc[-2]
         c_last = df.iloc[-1]
-        is_cross_up   = (p_last['MA8'] <= p_last['EMA89']) and (c_last['MA8'] > c_last['EMA89'])
-        is_cross_down = (p_last['MA8'] >= p_last['EMA89']) and (c_last['MA8'] < c_last['EMA89'])
-        if not (is_cross_up or is_cross_down):
-            return None  # 沒有交叉，不算接近訊號
 
-        direction     = "多" if is_cross_up else "空"
+        # ── 近期交叉偵測（最近 3 根 K 棒內曾發生交叉）──
+        direction = None
+        cross_bar_idx = None
+        for i in range(-4, -1):           # 檢查 -4,-3,-2 → 前一根
+            prev = df.iloc[i]
+            curr = df.iloc[i + 1]
+            if prev['MA8'] <= prev['EMA89'] and curr['MA8'] > curr['EMA89']:
+                direction     = "多"
+                cross_bar_idx = i + 1
+                break
+            if prev['MA8'] >= prev['EMA89'] and curr['MA8'] < curr['EMA89']:
+                direction     = "空"
+                cross_bar_idx = i + 1
+                break
+
+        # ── 即將交叉偵測（MA8 距 EMA89 在 0.5% 以內且朝正確方向靠近）──
+        approaching_note = None
+        if direction is None:
+            ma8_now  = c_last['MA8']
+            ema_now  = c_last['EMA89']
+            ma8_prev = df.iloc[-2]['MA8']
+            ema_prev = df.iloc[-2]['EMA89']
+            gap_pct  = abs(ma8_now - ema_now) / (ema_now + 1e-10) * 100
+            if gap_pct <= 0.5:
+                if ma8_prev < ema_prev and ma8_now < ema_now:   # 多頭蓄勢
+                    direction      = "多"
+                    approaching_note = f"MA8趨近EMA89（差{gap_pct:.2f}%）"
+                elif ma8_prev > ema_prev and ma8_now > ema_now:  # 空頭蓄勢
+                    direction      = "空"
+                    approaching_note = f"MA8趨近EMA89（差{gap_pct:.2f}%）"
+
+        if direction is None:
+            return None  # 沒有交叉也沒有接近，不算接近訊號
+
         current_price = c_last['close']
         current_rsi   = c_last['RSI']
         current_adx   = c_last['ADX']
         avg_vol_20    = df['vol'].iloc[-22:-2].mean()
-        cross_vol     = df['vol'].iloc[-2]
+        # 成交量取交叉那根（或最新根）
+        vol_idx       = cross_bar_idx if cross_bar_idx is not None else -1
+        cross_vol     = df['vol'].iloc[vol_idx]
         ema89_slope   = c_last['EMA89'] - df['EMA89'].iloc[-4]
         price_5ago    = df['close'].iloc[-6]
         rsi_5ago      = df['RSI'].iloc[-6]
@@ -556,11 +586,16 @@ def fetch_near_miss_candidate(asset, tf, btc_trend="neutral", market_fr=0.0):
                         failed_at = "RSI背離"
                     else:
                         filters_passed += 1
-                        # 全部通過 → 是正式訊號，不算接近訊號
-                        return None
+                        # 全部通過
+                        if approaching_note:
+                            # 即將交叉且所有過濾器就緒 → 蓄勢接近訊號
+                            failed_at = approaching_note
+                        else:
+                            # 已交叉且全部通過 → 正式訊號，不算接近訊號
+                            return None
 
-        # 至少通過 2 道才值得顯示
-        if failed_at and filters_passed >= 2:
+        # 至少通過 1 道才值得顯示（接近訊號門檻較低）
+        if failed_at and filters_passed >= 1:
             return {
                 'asset':          asset.split('-')[0],
                 'dir':            direction,
