@@ -1427,7 +1427,7 @@ def run_position_monitor():
     for pos in positions:
         age_hours = (time.time() - pos['reported_at']) / 3600
 
-        # 未成交掛單過期（1H訊號4小時、4H訊號12小時）
+        # 未成交掛單過期（1H訊號4小時、4H訊號12小時）→ 強制清除並通知
         if not pos.get('filled', False):
             expiry_h = 4 if '1H' in pos.get('tf', '1H') else 12
             if age_hours > expiry_h:
@@ -1452,7 +1452,8 @@ def run_position_monitor():
                 requests.post(text_url, json={"chat_id": str(TELEGRAM_CHAT_ID), "text": cancel_msg, "parse_mode": "HTML"})
                 print(f"📤 撤單通知已發送：{pos['asset']} {pos['dir']}")
                 to_remove.append(pos)
-            continue  # 未成交的單不做 SL/TP 監控
+                continue  # 已處理，跳至下一筆
+            # 未過期的掛單：繼續往下呼叫 analyze_position，偵測止損突破/指標惡化
 
         # 已成交且超過 24 小時 → 發出最後警告再移除
         if age_hours > 24:
