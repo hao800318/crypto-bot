@@ -331,6 +331,21 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             if cross_vol <= avg_vol_20:
                 return None  # 無量突破直接過濾，不進入評分
 
+            # ③ EMA89 斜率過濾：EMA89 橫盤或逆向時交叉幾乎全是假突破
+            ema89_slope = c_last['EMA89'] - df['EMA89'].iloc[-4]  # 最近3根的斜率
+            if direction == "多" and ema89_slope <= 0:
+                return None  # EMA89 仍在下行或橫盤，多頭訊號不可信
+            if direction == "空" and ema89_slope >= 0:
+                return None  # EMA89 仍在上行或橫盤，空頭訊號不可信
+
+            # ④ RSI 背離過濾：價格方向與 RSI 動能背離 → 假突破機率高
+            price_5ago = df['close'].iloc[-6]  # 交叉棒往前5根
+            rsi_5ago   = df['RSI'].iloc[-6]
+            if direction == "多" and current_price > price_5ago and current_rsi < rsi_5ago:
+                return None  # 頂背離：價格新高但 RSI 沒跟上，多頭動能衰竭
+            if direction == "空" and current_price < price_5ago and current_rsi > rsi_5ago:
+                return None  # 底背離：價格新低但 RSI 沒跟上，空頭動能衰竭
+
             # ── RSI 勝率基礎評分 ──
             base_score = (100 - abs(current_rsi - 56)) if direction == "多" else (100 - abs(current_rsi - 44))
 
@@ -696,10 +711,30 @@ def analyze_position(pos):
                       f"現價 {format_price(current_price)}｜<b>建議全數平倉</b>")
             push = True
         elif effective_high >= tp2:
-            status = "🔵 止盈2達標"
-            action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈2 {format_price(tp2)}，"
-                      f"現價 {format_price(current_price)}｜<b>建議再平倉30%</b>，止損上移至止盈1（{format_price(tp1)}）")
-            push = True
+            if pos.get('tp2_hit'):
+                # TP2 已完成，追蹤止損繼續鎖利剩餘 20%
+                trail_dist = pos.get('trail_dist', entry * 0.015)
+                new_trail_sl = current_price - trail_dist
+                if new_trail_sl > sl:
+                    pos['sl'] = new_trail_sl
+                    sl = new_trail_sl
+                status = "🔵 TP2已完成"
+                action = f"剩餘20%持倉中，等待TP3 <code>{format_price(tp3)}</code>，追蹤止損 {format_price(sl)}，現價 {format_price(current_price)}"
+                deteri = check_market_deterioration(inst_id, dir, pos.get('tf','1H'))
+                if deteri:
+                    status = "🚨 局勢惡化"
+                    action += f"\n{deteri}"
+                    push = True
+                else:
+                    push = False
+            else:
+                pos['tp2_hit'] = True
+                pos['sl'] = tp1   # SL 立即鎖至 TP1，剩餘倉位零風險
+                sl = tp1
+                status = "🔵 止盈2達標"
+                action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈2 {format_price(tp2)}，"
+                          f"現價 {format_price(current_price)}｜<b>建議再平倉30%</b>，止損已鎖至TP1（{format_price(tp1)}）")
+                push = True
         elif effective_high >= tp1:
             if pos.get('tp1_hit'):
                 # 追蹤止損：TP1 後每次監控都把 SL 往上拉緊鎖利
@@ -764,10 +799,30 @@ def analyze_position(pos):
                       f"現價 {format_price(current_price)}｜<b>建議全數平倉</b>")
             push = True
         elif effective_low <= tp2:
-            status = "🔵 止盈2達標"
-            action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈2 {format_price(tp2)}，"
-                      f"現價 {format_price(current_price)}｜<b>建議再平倉30%</b>，止損下移至止盈1（{format_price(tp1)}）")
-            push = True
+            if pos.get('tp2_hit'):
+                # TP2 已完成，追蹤止損繼續鎖利剩餘 20%（空頭）
+                trail_dist = pos.get('trail_dist', entry * 0.015)
+                new_trail_sl = current_price + trail_dist
+                if new_trail_sl < sl:
+                    pos['sl'] = new_trail_sl
+                    sl = new_trail_sl
+                status = "🔵 TP2已完成"
+                action = f"剩餘20%持倉中，等待TP3 <code>{format_price(tp3)}</code>，追蹤止損 {format_price(sl)}，現價 {format_price(current_price)}"
+                deteri = check_market_deterioration(inst_id, dir, pos.get('tf','4H'))
+                if deteri:
+                    status = "🚨 局勢惡化"
+                    action += f"\n{deteri}"
+                    push = True
+                else:
+                    push = False
+            else:
+                pos['tp2_hit'] = True
+                pos['sl'] = tp1   # SL 立即鎖至 TP1，剩餘倉位零風險
+                sl = tp1
+                status = "🔵 止盈2達標"
+                action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈2 {format_price(tp2)}，"
+                          f"現價 {format_price(current_price)}｜<b>建議再平倉30%</b>，止損已鎖至TP1（{format_price(tp1)}）")
+                push = True
         elif effective_low <= tp1:
             if pos.get('tp1_hit'):
                 # 追蹤止損：TP1 後每次監控都把 SL 往下拉緊鎖利（空頭）
@@ -1050,6 +1105,7 @@ def run_position_monitor():
         "✅ 已觸及進場點":     ("確認成交，開始監控TP/SL", "🎯"),
         "🚫 掛單已取消":       ("止損已破，掛單自動取消",  "🚫"),
         "⏰ 掛單逾時取消":     ("逾時未成交，自動取消",   "⏰"),
+        "🔵 TP2已完成":        ("繼續持有等TP3",  "⏳"),
         "🔴 止損觸發":         ("現價出場止損",   "🚪"),
         "🛡️ 回調至保本止損":   ("出場保本",       "🛡️"),
         "🟣 全部止盈":         ("全數出場",       "🎊"),
