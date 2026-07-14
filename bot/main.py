@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ==================== 🔑 1. Telegram 設定 ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-SCHEDULE_HOURS = [6, 8, 10, 12, 14, 18, 22]
+SCAN_INTERVAL_MINUTES = 15
 
 BASE_URL = "https://www.okx.com"
 
@@ -2116,7 +2116,7 @@ def handle_telegram_updates():
     print("🤖 幣圈分析師【勝率精選 5 幣版 + 主力動向確認 + 持倉監控版】雷達正在開機...")
     offset = None
     la_tz = pytz.timezone('America/Los_Angeles')
-    last_reported_hour = -1
+    last_auto_scan_time = 0
     last_monitor_time  = 0
     last_stats_date    = None  # 每日勝率播報去重
 
@@ -2125,13 +2125,13 @@ def handle_telegram_updates():
             now_la   = datetime.datetime.now(la_tz)
             now_ts   = time.time()
 
-            # A. 定時播報（整點）
-            if now_la.hour in SCHEDULE_HOURS and now_la.minute == 0 and now_la.hour != last_reported_hour:
-                print(f"🔔 觸發加州整點定時播報：{now_la.hour}:00")
-                t = threading.Thread(target=scan_worker_thread, args=("設定節點定時速報", TELEGRAM_CHAT_ID, True))
+            # A. 定時播報（每 15 分鐘）
+            if now_ts - last_auto_scan_time >= SCAN_INTERVAL_MINUTES * 60:
+                print(f"🔔 觸發定時掃描：{now_la.strftime('%H:%M')}")
+                t = threading.Thread(target=scan_worker_thread, args=("定時自動速報", TELEGRAM_CHAT_ID, True))
                 t.daemon = True
                 t.start()
-                last_reported_hour = now_la.hour
+                last_auto_scan_time = now_ts
 
             # B2. 每日勝率播報（00:00 PT）
             if now_la.hour == 0 and now_la.minute < 2 and last_stats_date != now_la.date():
