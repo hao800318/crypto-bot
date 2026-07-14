@@ -1861,8 +1861,11 @@ def handle_telegram_updates():
                 t.daemon = True
                 t.start()
 
-            # B. 持倉監控（每 30 分鐘執行一次，用絕對時間防止重啟重複觸發）
-            if now_ts - last_monitor_time >= 1800:
+            # B. 持倉監控（有 TP1/TP2 命中的倉位縮短至 15 分鐘，其餘 30 分鐘）
+            with active_positions_lock:
+                has_tp_hit = any(p.get('tp1_hit') or p.get('tp2_hit') for p in active_positions)
+            monitor_interval = 900 if has_tp_hit else 1800
+            if now_ts - last_monitor_time >= monitor_interval:
                 print(f"🔍 觸發持倉監控：{now_la.strftime('%H:%M')}")
                 t = threading.Thread(target=run_position_monitor)
                 t.daemon = True
