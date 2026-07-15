@@ -273,7 +273,7 @@ def score_to_leverage(win_rate, max_leverage):
 
 _TF_BAR   = {"15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}   # OKX bar param
 _TF_LABEL = {"15m": "15M", "1h": "1H", "4h": "4H", "1d": "1D"}   # display label
-_TF_HTF   = {"15m": "1H",  "1h": "4H", "4h": "1D"}                # 高一級時框
+_TF_HTF   = {"15m": "1H",  "1h": "4H", "4h": "1D", "1d": "1W"}    # 高一級時框
 
 def get_higher_tf_ema89_slope(asset, current_bar):
     """取高一級時間框架的 EMA89 斜率：15M→1H，1H→4H，4H→1D。回傳正數=上行，負數=下行，None=取得失敗。"""
@@ -341,7 +341,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
 
             # ── 交叉偵測：依時框調整回望窗口 ──
             # 15m=12根(3h) | 1h=10根(10h) | 4h=5根(20h)
-            cross_window = 12 if tf == "15m" else (10 if tf == "1h" else 5)
+            cross_window = 12 if tf == "15m" else (10 if tf == "1h" else (5 if tf == "4h" else 3))
             is_cross_up   = False
             is_cross_down = False
             cross_vol     = None   # 交叉當根的成交量
@@ -368,6 +368,13 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
                 return None
             if direction == "空" and c_last['MA8'] >= c_last['EMA89']:
                 return None
+
+            # ── K棒確認：前一根收盤也需站穩 MA8 方向（過濾假突破）──
+            prev = df.iloc[-2]
+            if direction == "多" and prev['close'] <= prev['MA8']:
+                return None   # 上一根收在 MA8 以下 → 未站穩，捨棄
+            if direction == "空" and prev['close'] >= prev['MA8']:
+                return None   # 上一根收在 MA8 以上 → 未站穩，捨棄
 
             current_price = c_last['close']
             current_rsi   = c_last['RSI']
@@ -457,9 +464,12 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             elif tf == "1h":
                 order_type = "短線單"
                 tf_tag = f"1H短線{tf_note}"
-            else:
+            elif tf == "4h":
                 order_type = "長線單"
                 tf_tag = f"4H長線{tf_note}"
+            else:
+                order_type = "日線單"
+                tf_tag = f"1D日線{tf_note}"
 
             # ── 錨定進場點 ──
             if tf in ("15m", "1h"):
@@ -467,11 +477,16 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
                 anchor_label = f"MA8={format_price(current_ma8)}"
                 atr_mult = 1.2 if tf == "15m" else 1.5
                 tp_mults = (1.0, 2.0, 3.5) if tf == "15m" else (1.5, 3.0, 5.0)
-            else:
+            elif tf == "4h":
                 anchor_entry = current_ema89
                 anchor_label = f"EMA89={format_price(current_ema89)}"
                 atr_mult = 2.0
                 tp_mults = (2.0, 4.0, 7.0)
+            else:  # 1d
+                anchor_entry = current_ema89
+                anchor_label = f"EMA89={format_price(current_ema89)}"
+                atr_mult = 3.0
+                tp_mults = (3.0, 6.0, 10.0)
 
             entry_price = anchor_entry
 
@@ -852,7 +867,7 @@ def run_strategy_scan():
     print(f"   BTC趨勢: {btc_trend} | 市場費率均值: {market_fr*100:.4f}%")
 
     all_signals = []
-    tasks = [(asset, tf) for asset in all_assets for tf in ["15m", "1h", "4h"]]
+    tasks = [(asset, tf) for asset in all_assets for tf in ["15m", "1h", "4h", "1d"]]
     total = len(tasks)
     completed = 0
     lock = threading.Lock()
@@ -2794,7 +2809,7 @@ def handle_telegram_updates():
             # A. 固定整點/半點掃描（08:00–00:00 PT，每小時 :00 和 :30 觸發一次）
             _h, _m = now_la.hour, now_la.minute
             _in_scan_window = 8 <= _h <= 23          # 08:00–23:59 PT
-            _is_slot = _m in (0, 15, 30, 45)           # 每 15 分鐘一槽
+            _is_slot = _m in (0, 10, 20, 30, 40, 50)   # 每 10 分鐘一槽
             _cur_slot = (_h, _m)
             if _is_slot and _cur_slot != last_scan_slot:
                 last_scan_slot = _cur_slot
