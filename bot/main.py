@@ -1388,32 +1388,18 @@ def analyze_position(pos):
                 pos['sl'] = entry  # 立即把 SL 移至進場點（保本止損）
                 sl = entry
                 push = True
-        elif dist_to_sl_pct < 0.5:
-            if pos.get('tp1_hit'):
-                # TP1 後 SL 已移至成本，接近保本止損才提醒
-                status = "⚠️ 即將觸及保本止損"
-                action = f"⚠️ 距保本止損（{format_price(sl)}）僅 {dist_to_sl_pct:.2f}%，現價 {format_price(current_price)}｜<b>考慮主動出場鎖利</b>"
-                push = True
-            elif current_price <= entry or dist_to_sl_pct < 0.15:
-                # 真正危險：虧損中且接近 SL，或距 SL 僅剩 0.15%（緊急）
-                status = "⚠️ 接近止損"
-                action = f"⚠️ 距止損僅 {dist_to_sl_pct:.2f}%，現價 {format_price(current_price)}｜<b>建議收緊止損或現價平倉</b>"
-                push = True
-            else:
-                # 獲利中但止損偏緊（短時框 ATR 止損本來就窄）→ 靜默，不推送
-                status = "🔄 持倉中"
-                action = f"持倉正常（獲利中），現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.2f}%"
-                push = False
         else:
+            # 未觸及 SL/TP：信任策略止損，靜默監控
+            # 只在「局勢明顯惡化」時才推送，正常浮盈浮虧不打擾
             status = "🔄 持倉中"
-            action = f"持倉正常，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%"
+            action = f"持倉中，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%"
             deteri = check_market_deterioration(inst_id, dir, pos.get('tf','1H'))
             if deteri:
                 status = "🚨 局勢惡化"
-                action = f"持倉正常，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%\n{deteri}"
+                action = f"現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%\n{deteri}"
                 push = True
             else:
-                push = False   # 鯨魚警報單獨不推送
+                push = False
     else:  # 空
         dist_to_sl_pct = (sl - current_price) / entry * 100
         # 止損：用 K 線高點
@@ -1494,32 +1480,18 @@ def analyze_position(pos):
                 pos['sl'] = entry  # 立即把 SL 移至進場點（保本止損）
                 sl = entry
                 push = True
-        elif dist_to_sl_pct < 0.5:
-            if pos.get('tp1_hit'):
-                # TP1 後 SL 已移至成本，接近保本止損才提醒
-                status = "⚠️ 即將觸及保本止損"
-                action = f"⚠️ 距保本止損（{format_price(sl)}）僅 {dist_to_sl_pct:.2f}%，現價 {format_price(current_price)}｜<b>考慮主動出場鎖利</b>"
-                push = True
-            elif current_price >= entry or dist_to_sl_pct < 0.15:
-                # 真正危險：空頭虧損中（現價 >= 進場點）且接近 SL，或距 SL 僅剩 0.15%
-                status = "⚠️ 接近止損"
-                action = f"⚠️ 距止損僅 {dist_to_sl_pct:.2f}%，現價 {format_price(current_price)}｜<b>建議收緊止損或現價平倉</b>"
-                push = True
-            else:
-                # 空頭獲利中但止損偏緊（短時框 ATR 止損本來就窄）→ 靜默
-                status = "🔄 持倉中"
-                action = f"持倉正常（獲利中），現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.2f}%"
-                push = False
         else:
+            # 未觸及 SL/TP：信任策略止損，靜默監控
+            # 只在「局勢明顯惡化」時才推送，正常浮盈浮虧不打擾
             status = "🔄 持倉中"
-            action = f"持倉正常，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%"
+            action = f"持倉中，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%"
             deteri = check_market_deterioration(inst_id, dir, pos.get('tf','4H'))
             if deteri:
                 status = "🚨 局勢惡化"
-                action = f"持倉正常，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%\n{deteri}"
+                action = f"現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%\n{deteri}"
                 push = True
             else:
-                push = False   # 鯨魚警報單獨不推送
+                push = False
 
     full_action = action
     if whale_warn:
