@@ -870,15 +870,22 @@ def run_strategy_scan():
     # ── 品質門檻：勝率不足 MIN_WIN_RATE 的訊號不推播 ──
     all_signals = [s for s in all_signals if s['win_rate'] >= MIN_WIN_RATE]
 
-    # ── 排除已有持倉或自選監控的幣種 ──
+    # ── 排除衝突訊號 ──
+    # active_positions：同幣種 + 同方向 才排除（反向可推播）
     with active_positions_lock:
-        busy_assets = {p['asset'] for p in active_positions}
+        busy_pairs = {(p['asset'], p['dir']) for p in active_positions}
+    # watch_list：無方向資訊，幣種層級排除
     with watch_list_lock:
-        busy_assets |= {w['asset'] for w in watch_list}
-    if busy_assets:
-        before = len(all_signals)
-        all_signals = [s for s in all_signals if s['asset'] not in busy_assets]
-        print(f"🚫 已持倉/掛單排除：{busy_assets}，過濾掉 {before - len(all_signals)} 組")
+        watch_assets = {w['asset'] for w in watch_list}
+    before = len(all_signals)
+    all_signals = [
+        s for s in all_signals
+        if (s['asset'], s['dir']) not in busy_pairs   # 非同向持倉
+        and s['asset'] not in watch_assets             # 非自選監控
+    ]
+    removed = before - len(all_signals)
+    if removed:
+        print(f"🚫 衝突排除：過濾掉 {removed} 組（同向持倉或自選監控幣種）")
 
     # ── 冷卻過濾：同一幣種 4 小時內不重複推播 ──
     now_ts_scan = time.time()
