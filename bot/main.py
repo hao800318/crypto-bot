@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 # ==================== 🔑 1. Telegram 設定 ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-SCAN_INTERVAL_MINUTES = 15
+SCAN_INTERVAL_MINUTES = 30
 
 BASE_URL = "https://www.okx.com"
 
@@ -869,6 +869,16 @@ def run_strategy_scan():
 
     # ── 品質門檻：勝率不足 MIN_WIN_RATE 的訊號不推播 ──
     all_signals = [s for s in all_signals if s['win_rate'] >= MIN_WIN_RATE]
+
+    # ── 排除已有持倉或自選監控的幣種 ──
+    with active_positions_lock:
+        busy_assets = {p['asset'] for p in active_positions}
+    with watch_list_lock:
+        busy_assets |= {w['asset'] for w in watch_list}
+    if busy_assets:
+        before = len(all_signals)
+        all_signals = [s for s in all_signals if s['asset'] not in busy_assets]
+        print(f"🚫 已持倉/掛單排除：{busy_assets}，過濾掉 {before - len(all_signals)} 組")
 
     # ── 冷卻過濾：同一幣種 4 小時內不重複推播 ──
     now_ts_scan = time.time()
