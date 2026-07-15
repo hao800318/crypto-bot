@@ -887,23 +887,10 @@ def run_strategy_scan():
     if removed:
         print(f"🚫 衝突排除：過濾掉 {removed} 組（同向持倉或自選監控幣種）")
 
-    # ── 當日去重：同幣種今天已推播過就跳過，不補位 ──
-    today_pt = datetime.datetime.now(_LA_TZ).strftime('%Y-%m-%d')
-    filtered = []
-    with signal_sent_lock:
-        for s in all_signals:
-            if signal_sent_cache.get(s['asset']) != today_pt:
-                filtered.append(s)
+    # 取勝率最高前 2，跳過不補位
+    top_signals = all_signals[:2]
 
-    top_signals = filtered[:2]   # 每次最多推播 2 個
-
-    # 記錄本次推播的幣種（存 PT 日期字串）
-    if top_signals:
-        with signal_sent_lock:
-            for s in top_signals:
-                signal_sent_cache[s['asset']] = today_pt
-
-    print(f"📊 掃描結果：原始 {len(all_signals)} 組 → 當日去重後 {len(filtered)} 組 → 精選 {len(top_signals)} 名")
+    print(f"📊 掃描結果：候選 {len(all_signals)} 組 → 精選 {len(top_signals)} 名（持倉/掛單即時排除）")
     return top_signals
 
 # ==================== 📊 5. 持倉監控系統 ====================
@@ -973,9 +960,6 @@ last_scan_cache: dict = {}
 last_scan_lock  = threading.Lock()
 near_miss_cache: dict = {}
 near_miss_lock  = threading.Lock()
-signal_sent_cache: dict = {}          # key=asset, value=PT date string；當日不重複推播
-signal_sent_lock  = threading.Lock()
-_LA_TZ = pytz.timezone('America/Los_Angeles')
 MIN_WIN_RATE = 72                     # 低於此勝率的訊號不推播
 WATCH_FILE = os.path.join(_DATA_DIR, "watch_list.json")
 
