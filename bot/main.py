@@ -2327,6 +2327,14 @@ def send_holding_summary(chat_id):
             status, action = "❓ 無法取得現價", "—"
         if status in _TERMINAL:
             to_remove.append(pos)
+            # 與 run_position_monitor 相同邏輯：記錄交易結果
+            _OUTCOME_MAP = {
+                "🟣 全部止盈":        "win_tp3",
+                "🛡️ 回調至保本止損":  "breakeven",
+                "🔴 止損觸發":        "loss",
+            }
+            if status in _OUTCOME_MAP and pos.get('filled', False):
+                record_trade_outcome(pos, _OUTCOME_MAP[status])
             d_tag = "🟩多" if pos['dir'] == "多" else "🟥空"
             icon  = "🚫" if "取消" in status else ("🔴" if "止損" in status else "🟣")
             note  = (
