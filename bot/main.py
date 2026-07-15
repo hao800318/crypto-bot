@@ -271,9 +271,9 @@ def score_to_leverage(win_rate, max_leverage):
     lev = max(1, round(max_leverage * ratio))
     return f"{lev}x"
 
-_TF_BAR   = {"15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}   # OKX bar param
-_TF_LABEL = {"15m": "15M", "1h": "1H", "4h": "4H", "1d": "1D"}   # display label
-_TF_HTF   = {"15m": "1H",  "1h": "4H", "4h": "1D", "1d": "1W"}    # 高一級時框
+_TF_BAR   = {"15m": "15m", "30m": "30m", "1h": "1H", "4h": "4H", "1d": "1D"}   # OKX bar param
+_TF_LABEL = {"15m": "15M", "30m": "30M", "1h": "1H", "4h": "4H", "1d": "1D"}   # display label
+_TF_HTF   = {"15m": "1H",  "30m": "1H", "1h": "4H", "4h": "1D", "1d": "1W"}    # 高一級時框
 
 def get_higher_tf_ema89_slope(asset, current_bar):
     """取高一級時間框架的 EMA89 斜率：15M→1H，1H→4H，4H→1D。回傳正數=上行，負數=下行，None=取得失敗。"""
@@ -341,7 +341,10 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
 
             # ── 交叉偵測：依時框調整回望窗口 ──
             # 15m=12根(3h) | 1h=10根(10h) | 4h=5根(20h)
-            cross_window = 12 if tf == "15m" else (10 if tf == "1h" else (5 if tf == "4h" else 3))
+            cross_window = (12 if tf == "15m" else
+                            10 if tf == "30m" else
+                            10 if tf == "1h"  else
+                             5 if tf == "4h"  else 3)
             is_cross_up   = False
             is_cross_down = False
             cross_vol     = None   # 交叉當根的成交量
@@ -461,6 +464,9 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             if tf == "15m":
                 order_type = "超短線單"
                 tf_tag = f"15M超短線{tf_note}"
+            elif tf == "30m":
+                order_type = "半時線單"
+                tf_tag = f"30M半時{tf_note}"
             elif tf == "1h":
                 order_type = "短線單"
                 tf_tag = f"1H短線{tf_note}"
@@ -472,11 +478,21 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
                 tf_tag = f"1D日線{tf_note}"
 
             # ── 錨定進場點 ──
-            if tf in ("15m", "1h"):
+            if tf == "15m":
                 anchor_entry = current_ma8
                 anchor_label = f"MA8={format_price(current_ma8)}"
-                atr_mult = 1.2 if tf == "15m" else 1.5
-                tp_mults = (1.0, 2.0, 3.5) if tf == "15m" else (1.5, 3.0, 5.0)
+                atr_mult = 1.2
+                tp_mults = (1.0, 2.0, 3.5)
+            elif tf == "30m":
+                anchor_entry = current_ma8
+                anchor_label = f"MA8={format_price(current_ma8)}"
+                atr_mult = 1.3
+                tp_mults = (1.2, 2.5, 4.0)
+            elif tf == "1h":
+                anchor_entry = current_ma8
+                anchor_label = f"MA8={format_price(current_ma8)}"
+                atr_mult = 1.5
+                tp_mults = (1.5, 3.0, 5.0)
             elif tf == "4h":
                 anchor_entry = current_ema89
                 anchor_label = f"EMA89={format_price(current_ema89)}"
@@ -840,7 +856,7 @@ def fetch_near_miss_candidate(asset, tf, btc_trend="neutral", market_fr=0.0):
 def run_near_miss_scan():
     """掃描全市場接近通過訊號（交叉存在但被某過濾器擋下），回傳最多 5 筆"""
     all_assets, _ = get_all_okx_swap_assets()
-    tasks    = [(a, tf) for a in all_assets for tf in ("15m", "1h", "4h", "1d")]
+    tasks    = [(a, tf) for a in all_assets for tf in ("15m", "30m", "1h", "4h", "1d")]
     results  = []
     lock     = threading.Lock()
 
@@ -867,7 +883,7 @@ def run_strategy_scan():
     print(f"   BTC趨勢: {btc_trend} | 市場費率均值: {market_fr*100:.4f}%")
 
     all_signals = []
-    tasks = [(asset, tf) for asset in all_assets for tf in ["15m", "1h", "4h", "1d"]]
+    tasks = [(asset, tf) for asset in all_assets for tf in ["15m", "30m", "1h", "4h", "1d"]]
     total = len(tasks)
     completed = 0
     lock = threading.Lock()
@@ -896,7 +912,7 @@ def run_strategy_scan():
                 pass
 
     elapsed = time.time() - scan_start
-    print(f"\n✨ 全網掃描完畢！耗時：{elapsed:.1f} 秒（共 {len(all_assets)} 支幣種 × 4 時框）")
+    print(f"\n✨ 全網掃描完畢！耗時：{elapsed:.1f} 秒（共 {len(all_assets)} 支幣種 × 5 時框）")
 
     all_signals.sort(key=lambda x: x['score'], reverse=True)
 
@@ -1146,6 +1162,8 @@ def analyze_position(pos):
     _tf_str = pos.get('tf', '1H')
     if "15M" in _tf_str:
         bar = "15m"
+    elif "30M" in _tf_str:
+        bar = "30m"
     elif "1H" in _tf_str:
         bar = "1H"
     elif "1D" in _tf_str:
@@ -1192,6 +1210,8 @@ def analyze_position(pos):
             tf = pos.get('tf', '4H')
             if '15M' in tf:
                 timeout_sec = 3600       # 15M：1小時
+            elif '30M' in tf:
+                timeout_sec = 5400       # 30M：1.5小時
             elif '1H' in tf:
                 timeout_sec = 7200       # 1H：2小時
             elif '1D' in tf:
@@ -1548,6 +1568,8 @@ def run_position_monitor():
             _pos_tf = pos.get('tf', '1H')
             if '15M' in _pos_tf:
                 expiry_h = 2    # 15M：2小時
+            elif '30M' in _pos_tf:
+                expiry_h = 3    # 30M：3小時
             elif '1H' in _pos_tf:
                 expiry_h = 4    # 1H：4小時
             elif '1D' in _pos_tf:
@@ -1583,6 +1605,8 @@ def run_position_monitor():
         _filled_tf = pos.get('tf', '1H')
         if '15M' in _filled_tf:
             _filled_max_h = 24
+        elif '30M' in _filled_tf:
+            _filled_max_h = 36
         elif '1H' in _filled_tf:
             _filled_max_h = 48
         elif '1D' in _filled_tf:
@@ -2344,7 +2368,7 @@ def handle_open_command(text, chat_id):
         "text": f"🔍 正在分析 {symbol} 當前指標，請稍候..."})
 
     best = None
-    for tf in ('15m', '1h', '4h', '1d'):
+    for tf in ('15m', '30m', '1h', '4h', '1d'):
         st = fetch_coin_status(inst_id, tf)
         if st and (best is None or st['passed'] > best['passed']):
             best = st
@@ -2671,7 +2695,7 @@ def check_watched_coin(asset, chat_id, force_update=False):
 
         # ── 先試完整訊號 ──
         full_sig = None
-        for tf in ('15m', '1h', '4h', '1d'):
+        for tf in ('15m', '30m', '1h', '4h', '1d'):
             s = fetch_candle_sync(inst_id, tf, max_leverage=20)
             if s:
                 full_sig = s
@@ -2707,14 +2731,14 @@ def check_watched_coin(asset, chat_id, force_update=False):
 
         # ── 無完整訊號 → 先試近期交叉狀態，再退回趨勢狀態 ──
         best = None
-        for tf in ('15m', '1h', '4h', '1d'):
+        for tf in ('15m', '30m', '1h', '4h', '1d'):
             st = fetch_coin_status(inst_id, tf)
             if st and (best is None or st['passed'] > best['passed']):
                 best = st
 
         # 若 fetch_coin_status 也找不到（交叉時間太久遠），用趨勢延續偵測
         if not best:
-            for tf in ('15m', '1h', '4h', '1d'):
+            for tf in ('15m', '30m', '1h', '4h', '1d'):
                 st = fetch_trend_state(inst_id, tf)
                 if st and (best is None or st['passed'] > best['passed']):
                     best = st
