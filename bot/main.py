@@ -2778,7 +2778,7 @@ def handle_telegram_updates():
     print("🤖 幣圈分析師【勝率精選 5 幣版 + 主力動向確認 + 持倉監控版】雷達正在開機...")
     offset = None
     la_tz = pytz.timezone('America/Los_Angeles')
-    last_auto_scan_time      = 0
+    last_scan_slot           = None  # (hour, minute) 上次觸發的整點/半點
     last_monitor_time        = 0
     last_watchlist_check_time_local = 0
     last_stats_date          = None  # 每日勝率播報去重
@@ -2795,11 +2795,13 @@ def handle_telegram_updates():
                 t.start()
                 last_watchlist_check_time_local = now_ts
 
-            # A. 定時播報（每 15 分鐘，僅限加州時間 08:00–00:00）
-            _scan_hour = now_la.hour  # 0–23
-            _in_scan_window = 8 <= _scan_hour <= 23
-            if now_ts - last_auto_scan_time >= SCAN_INTERVAL_MINUTES * 60:
-                last_auto_scan_time = now_ts   # 更新計時器，避免離開靜默期後立即連發
+            # A. 固定整點/半點掃描（08:00–00:00 PT，每小時 :00 和 :30 觸發一次）
+            _h, _m = now_la.hour, now_la.minute
+            _in_scan_window = 8 <= _h <= 23          # 08:00–23:59 PT
+            _is_slot = _m in (0, 30)                  # 整點或半點
+            _cur_slot = (_h, _m)
+            if _is_slot and _cur_slot != last_scan_slot:
+                last_scan_slot = _cur_slot
                 if _in_scan_window:
                     print(f"🔔 觸發定時掃描：{now_la.strftime('%H:%M')} PT")
                     t = threading.Thread(target=scan_worker_thread, args=("定時自動速報", TELEGRAM_CHAT_ID, True, True))
