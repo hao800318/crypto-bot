@@ -867,8 +867,9 @@ def run_strategy_scan():
 
     all_signals.sort(key=lambda x: x['score'], reverse=True)
 
-    # ── 品質門檻：勝率不足 MIN_WIN_RATE 的訊號不推播 ──
-    all_signals = [s for s in all_signals if s['win_rate'] >= MIN_WIN_RATE]
+    # ── 品質門檻：勝率不足 MIN_WIN_RATE 或趨勢強度不足 MIN_ADX 的訊號不推播 ──
+    all_signals = [s for s in all_signals
+                   if s['win_rate'] >= MIN_WIN_RATE and s['adx'] >= MIN_ADX]
 
     # ── 先鎖定全榜前 2，再從這 2 個裡排除衝突；不補位 ──
     candidates = all_signals[:2]   # 只看第 1、第 2 名
@@ -956,6 +957,7 @@ last_scan_lock  = threading.Lock()
 near_miss_cache: dict = {}
 near_miss_lock  = threading.Lock()
 MIN_WIN_RATE = 72                     # 低於此勝率的訊號不推播
+MIN_ADX      = 50                     # 只推播強勢趨勢（ADX ≥ 50）
 WATCH_FILE = os.path.join(_DATA_DIR, "watch_list.json")
 
 def load_watch_list():
@@ -2771,7 +2773,7 @@ def handle_telegram_updates():
             # A. 固定整點/半點掃描（08:00–00:00 PT，每小時 :00 和 :30 觸發一次）
             _h, _m = now_la.hour, now_la.minute
             _in_scan_window = 8 <= _h <= 23          # 08:00–23:59 PT
-            _is_slot = _m in (0, 30)                  # 整點或半點
+            _is_slot = _m in (0, 15, 30, 45)           # 每 15 分鐘一槽
             _cur_slot = (_h, _m)
             if _is_slot and _cur_slot != last_scan_slot:
                 last_scan_slot = _cur_slot
