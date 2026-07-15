@@ -2657,23 +2657,19 @@ def check_watched_coin(asset, chat_id, force_update=False):
         with watch_list_lock:
             entry = next((w for w in watch_list if w['asset'] == asset), None)
             prev_passed    = entry.get('last_passed', -1)    if entry else -1
-            last_notified  = entry.get('last_notified', 0)   if entry else 0
-
-        heartbeat_due  = (now_ts - last_notified) >= 30 * 60   # 30 分鐘心跳
         improved       = best['passed'] > prev_passed
-        should_notify  = force_update or improved or heartbeat_due
+        should_notify  = force_update or improved   # 趨勢未變化不推播
 
         if not should_notify:
-            print(f"👁 {asset}：passed={best['passed']}（同上次），距上次通知 {int((now_ts-last_notified)//60)} 分鐘，跳過推送")
+            print(f"👁 {asset}：passed={best['passed']}（同上次），趨勢無變化，跳過推送")
             return
 
         d   = "🟩多" if best['dir'] == "多" else "🟥空"
         bar = "■" * best['passed'] + "□" * (4 - best['passed'])
         f   = best['filters']
         reason = ""
-        if improved:        reason = "📈 條件進步！"
-        elif heartbeat_due: reason = "🔔 30 分鐘更新"
-        elif force_update:  reason = "🔍 即時查詢"
+        if improved:      reason = "📈 條件進步！"
+        elif force_update: reason = "🔍 即時查詢"
 
         # 趨勢來源標籤
         is_trend_mode = not best.get('crossed', False) and not best.get('recent_cross', False)
