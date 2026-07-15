@@ -482,8 +482,17 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
                 tp1 = entry_price + current_atr * tp_mults[0]
                 tp2 = entry_price + current_atr * tp_mults[1]
                 tp3 = entry_price + current_atr * tp_mults[2]
+                gap_pct = (current_price - entry_price) / entry_price * 100  # 正=現價在進場點上方
                 if current_rsi > 65:
                     entry_type = f"⚠️ {tf_tag}RSI過熱({current_rsi:.1f})，掛限價等回踩 {anchor_label}"
+                elif current_price < entry_price:
+                    # 現價已低於進場點（MA8）→ 若未開單可市價進入
+                    entry_type = (f"🔴 {tf_tag}現價 {format_price(current_price)} 已低於進場點 {anchor_label}，"
+                                  f"偏離 {abs(gap_pct):.2f}%｜<b>若未開單，可考慮市價進場</b>")
+                elif gap_pct <= 0.5:
+                    # 現價緊貼進場點（≤0.5%）→ 建議市價或快速限價
+                    entry_type = (f"⚡ {tf_tag}現價緊貼進場點 {anchor_label}（差 {gap_pct:.2f}%），"
+                                  f"建議<b>市價進場</b>或快速掛限價 {format_price(entry_price)}")
                 else:
                     entry_type = f"📌 {tf_tag}掛限價 {anchor_label}，ATR止損={format_price(sl_price)}"
             else:
@@ -491,8 +500,17 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
                 tp1 = entry_price - current_atr * tp_mults[0]
                 tp2 = entry_price - current_atr * tp_mults[1]
                 tp3 = entry_price - current_atr * tp_mults[2]
+                gap_pct = (entry_price - current_price) / entry_price * 100  # 正=現價在進場點下方
                 if current_rsi < 35:
                     entry_type = f"⚠️ {tf_tag}RSI超賣({current_rsi:.1f})，掛限價等反彈至 {anchor_label}"
+                elif current_price > entry_price:
+                    # 現價已高於進場點（MA8）→ 若未開單可市價進入
+                    entry_type = (f"🔴 {tf_tag}現價 {format_price(current_price)} 已高於進場點 {anchor_label}，"
+                                  f"偏離 {abs(gap_pct):.2f}%｜<b>若未開單，可考慮市價進場</b>")
+                elif gap_pct <= 0.5:
+                    # 現價緊貼進場點（≤0.5%）→ 建議市價或快速限價
+                    entry_type = (f"⚡ {tf_tag}現價緊貼進場點 {anchor_label}（差 {gap_pct:.2f}%），"
+                                  f"建議<b>市價進場</b>或快速掛限價 {format_price(entry_price)}")
                 else:
                     entry_type = f"📌 {tf_tag}掛限價 {anchor_label}，ATR止損={format_price(sl_price)}"
 
