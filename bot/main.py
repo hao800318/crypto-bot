@@ -189,7 +189,16 @@ def check_market_deterioration(inst_id, direction, tf):
 
     # ── 2. ADX 跌破 20（持倉期間趨勢消失）──
     try:
-        bar = "1H" if "1H" in tf else "4H"
+        if "15M" in tf:
+            bar = "15m"
+        elif "30M" in tf:
+            bar = "30m"
+        elif "1D" in tf:
+            bar = "1D"
+        elif "4H" in tf:
+            bar = "4H"
+        else:
+            bar = "1H"
         url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar}&limit=60"
         res = requests.get(url, timeout=3).json()
         if res.get('code') == '0' and len(res['data']) >= 30:
@@ -356,6 +365,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             is_cross_up   = False
             is_cross_down = False
             cross_vol     = None   # 交叉當根的成交量
+            _cross_i      = None   # 交叉發生在距最新根幾根前
 
             for _i in range(1, min(cross_window + 1, len(df) - 1)):
                 _curr = df.iloc[-_i]
@@ -363,10 +373,12 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
                 if _prev['MA8'] <= _prev['EMA89'] and _curr['MA8'] > _curr['EMA89']:
                     is_cross_up = True
                     cross_vol   = _curr['vol']
+                    _cross_i    = _i
                     break
                 elif _prev['MA8'] >= _prev['EMA89'] and _curr['MA8'] < _curr['EMA89']:
                     is_cross_down = True
                     cross_vol     = _curr['vol']
+                    _cross_i      = _i
                     break
 
             if not (is_cross_up or is_cross_down):
@@ -380,12 +392,15 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             if direction == "空" and c_last['MA8'] >= c_last['EMA89']:
                 return None
 
-            # ── K棒確認：前一根收盤也需站穩 MA8 方向（過濾假突破）──
-            prev = df.iloc[-2]
-            if direction == "多" and prev['close'] <= prev['MA8']:
-                return None   # 上一根收在 MA8 以下 → 未站穩，捨棄
-            if direction == "空" and prev['close'] >= prev['MA8']:
-                return None   # 上一根收在 MA8 以上 → 未站穩，捨棄
+            # ── K棒確認：交叉後需有至少一根後續K棒站穩 MA8 方向 ──
+            # 若交叉在最新根（_cross_i=1），df.iloc[-2] 是交叉前的棒，
+            # 不能用來確認 → 跳過（當根方向已由上方 MA8>EMA89 確認）
+            if _cross_i is not None and _cross_i >= 2:
+                _check = df.iloc[-2]   # 交叉後的第一根已收盤棒
+                if direction == "多" and _check['close'] <= _check['MA8']:
+                    return None   # 收在 MA8 以下 → 未站穩，捨棄
+                if direction == "空" and _check['close'] >= _check['MA8']:
+                    return None   # 收在 MA8 以上 → 未站穩，捨棄
 
             current_price = c_last['close']
             current_rsi   = c_last['RSI']
@@ -828,18 +843,32 @@ def fetch_near_miss_candidate(asset, tf, btc_trend="neutral", market_fr=0.0):
             current_atr  = c_last['ATR14']
             current_ma8  = c_last['MA8']
             current_ema89= c_last['EMA89']
-            if tf in ("15m", "1h"):
+            if tf == "15m":
                 anchor_entry = current_ma8
                 anchor_label = f"MA8={format_price(current_ma8)}"
-                atr_mult  = 1.2 if tf == "15m" else 1.5
-                tp_mults  = (1.0, 2.0, 3.5) if tf == "15m" else (1.5, 3.0, 5.0)
-                tf_label  = _TF_LABEL.get(tf, "1H")
-            else:
+                atr_mult  = 1.2
+                tp_mults  = (1.0, 2.0, 3.5)
+            elif tf == "30m":
+                anchor_entry = current_ma8
+                anchor_label = f"MA8={format_price(current_ma8)}"
+                atr_mult  = 1.3
+                tp_mults  = (1.2, 2.5, 4.0)
+            elif tf == "1h":
+                anchor_entry = current_ma8
+                anchor_label = f"MA8={format_price(current_ma8)}"
+                atr_mult  = 1.5
+                tp_mults  = (1.5, 3.0, 5.0)
+            elif tf == "4h":
                 anchor_entry = current_ema89
                 anchor_label = f"EMA89={format_price(current_ema89)}"
                 atr_mult  = 2.0
                 tp_mults  = (2.0, 4.0, 7.0)
-                tf_label  = "4H"
+            else:  # 1d
+                anchor_entry = current_ema89
+                anchor_label = f"EMA89={format_price(current_ema89)}"
+                atr_mult  = 3.0
+                tp_mults  = (3.0, 6.0, 10.0)
+            tf_label = _TF_LABEL.get(tf, tf.upper())
             atr_dist = current_atr * atr_mult
             if direction == "多":
                 sl_price = max(anchor_entry - atr_dist, anchor_entry * 0.96)
