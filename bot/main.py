@@ -52,28 +52,36 @@ def get_market_sentiment(asset):
     獲取 OKX 主力資金費率 + 多空持倉比（主力動向指標）
     - funding_rate > 0：多方付費，市場偏多；< 0：空方付費，市場偏空
     - ls_ratio > 1：多方持倉多於空方；< 1：空方較多
+    兩個 API 並行發出，節省約 200ms。
     """
-    funding_rate = 0.0
-    ls_ratio = 1.0
+    _res = {'fr': 0.0, 'ls': 1.0}
 
-    try:
-        fr_url = f"{BASE_URL}/api/v5/public/funding-rate?instId={asset}"
-        fr_res = requests.get(fr_url, timeout=2.0).json()
-        if fr_res.get('code') == '0' and fr_res.get('data'):
-            funding_rate = float(fr_res['data'][0]['fundingRate'])
-    except:
-        pass
+    def _fetch_fr():
+        try:
+            fr_url = f"{BASE_URL}/api/v5/public/funding-rate?instId={asset}"
+            fr_res = requests.get(fr_url, timeout=2.0).json()
+            if fr_res.get('code') == '0' and fr_res.get('data'):
+                _res['fr'] = float(fr_res['data'][0]['fundingRate'])
+        except:
+            pass
 
-    try:
-        ccy = asset.split('-')[0]   # ETH-USDT-SWAP → ETH；ETH → ETH
-        ls_url = f"{BASE_URL}/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={ccy}&period=5m"
-        ls_res = requests.get(ls_url, timeout=2.0).json()
-        if ls_res.get('code') == '0' and ls_res.get('data'):
-            ls_ratio = float(ls_res['data'][0][1])
-    except:
-        pass
+    def _fetch_ls():
+        try:
+            ccy = asset.split('-')[0]   # ETH-USDT-SWAP → ETH；ETH → ETH
+            ls_url = (f"{BASE_URL}/api/v5/rubik/stat/contracts/"
+                      f"long-short-account-ratio?ccy={ccy}&period=5m")
+            ls_res = requests.get(ls_url, timeout=2.0).json()
+            if ls_res.get('code') == '0' and ls_res.get('data'):
+                _res['ls'] = float(ls_res['data'][0][1])
+        except:
+            pass
 
-    return funding_rate, ls_ratio
+    _t1 = threading.Thread(target=_fetch_fr, daemon=True)
+    _t2 = threading.Thread(target=_fetch_ls, daemon=True)
+    _t1.start(); _t2.start()
+    _t1.join(timeout=3.0); _t2.join(timeout=3.0)
+
+    return _res['fr'], _res['ls']
 
 def build_sentiment_note(direction, funding_rate, ls_ratio):
     """根據主力動向生成說明文字與評分加減"""
@@ -415,10 +423,6 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             # ── RSI 勝率基礎評分 ──
             base_score = (100 - abs(current_rsi - 56)) if direction == "多" else (100 - abs(current_rsi - 44))
 
-            # ── 主力動向確認 ──
-            funding_rate, ls_ratio = get_market_sentiment(asset)
-            sentiment_note, sentiment_bonus = build_sentiment_note(direction, funding_rate, ls_ratio)
-
             # ③ 成交量加分（軟性：量大加分，量小扣分）
             if cross_vol > avg_vol_20 * 1.5:
                 vol_bonus = 8    # 放量突破
@@ -429,12 +433,26 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             else:
                 vol_bonus = 0    # 已在前面硬擋，不會到這裡
 
-            # ④ 多時框對齊（15M看1H，1H看4H，4H看1D）
+            # ── 主力動向 + HTF 對齊：並行發出，節省 ~200-400ms ──
+            htf_bar   = _TF_HTF.get(tf, "1D")
+            htf_label = _TF_LABEL.get(htf_bar.lower(), htf_bar)
+            with ThreadPoolExecutor(max_workers=2) as _iex:
+                _f_sent  = _iex.submit(get_market_sentiment, asset)
+                _f_align = _iex.submit(get_higher_tf_alignment, asset, direction, htf_bar)
+            try:
+                funding_rate, ls_ratio = _f_sent.result(timeout=5)
+            except Exception:
+                funding_rate, ls_ratio = 0.0, 1.0
+            try:
+                aligned = _f_align.result(timeout=5)
+            except Exception:
+                aligned = True  # 取得失敗時不懲罰
+
+            sentiment_note, sentiment_bonus = build_sentiment_note(direction, funding_rate, ls_ratio)
+
+            # ④ 多時框對齊結果
             tf_bonus = 0
             tf_note  = ""
-            htf_bar  = _TF_HTF.get(tf, "1D")
-            htf_label = _TF_LABEL.get(htf_bar.lower(), htf_bar)
-            aligned = get_higher_tf_alignment(asset, direction, higher_bar=htf_bar)
             if aligned:
                 tf_bonus = 20
                 tf_note  = f" ✅{htf_bar}對齊"
