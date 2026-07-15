@@ -1126,10 +1126,13 @@ def analyze_position(pos):
         )
         if filled_by_candle:
             pos['filled'] = True
-            how = "K線低點" if dir == "多" else "K線高點"
-            print(f"✅ {pos['asset']} {dir}單已由{how}觸碰進場點 {format_price(entry)}，開始監控 TP/SL")
-            action = (f"🎯 {how} {format_price(fill_eff_low if dir == '多' else fill_eff_high)} "
-                      f"已觸及進場點 {format_price(entry)}，現價 {format_price(current_price)}\n"
+            if dir == "多":
+                extreme_str = f"（K線最低達 <code>{format_price(fill_eff_low)}</code>）"
+            else:
+                extreme_str = f"（K線最高達 <code>{format_price(fill_eff_high)}</code>）"
+            print(f"✅ {pos['asset']} {dir}單：K線已穿越進場點 {format_price(entry)}，開始監控 TP/SL")
+            action = (f"🎯 K線已穿越進場點 <code>{format_price(entry)}</code>{extreme_str}\n"
+                      f"現價 <code>{format_price(current_price)}</code>\n"
                       f"<b>限價單應已成交，開始監控 TP/SL</b>")
             return "✅ 已觸及進場點", action, True  # 推送進場確認，下次監控再做 TP/SL
         else:
