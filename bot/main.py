@@ -1052,8 +1052,8 @@ last_scan_cache: dict = {}
 last_scan_lock  = threading.Lock()
 near_miss_cache: dict = {}
 near_miss_lock  = threading.Lock()
-MIN_WIN_RATE = 95                     # 低於此勝率的訊號不推播
-MIN_ADX      = 50                     # 只推播強勢趨勢（ADX ≥ 50）
+MIN_WIN_RATE = 90                     # 低於此勝率的訊號不推播
+MIN_ADX      = 40                     # 只推播強勢趨勢（ADX ≥ 40）
 WATCH_FILE = os.path.join(_DATA_DIR, "watch_list.json")
 
 def load_watch_list():
