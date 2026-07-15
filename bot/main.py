@@ -1143,7 +1143,15 @@ def analyze_position(pos):
     tp2   = pos['tp2']
     tp3   = pos['tp3']
 
-    bar = "1H" if "1H" in pos.get('tf', '1H') else "4H"
+    _tf_str = pos.get('tf', '1H')
+    if "15M" in _tf_str:
+        bar = "15m"
+    elif "1H" in _tf_str:
+        bar = "1H"
+    elif "1D" in _tf_str:
+        bar = "1D"
+    else:
+        bar = "4H"
 
     # ── 先確認限價單是否已被成交 ──
     # 填單判定：只看「建倉後」開始的 K 棒，不使用 margin 往前延伸，
@@ -1182,7 +1190,14 @@ def analyze_position(pos):
 
             # 2. 等待逾時（1H→2H、4H/手動→8H）→ 自動取消
             tf = pos.get('tf', '4H')
-            timeout_sec = 7200 if '1H' in tf else 28800  # 2H or 8H
+            if '15M' in tf:
+                timeout_sec = 3600       # 15M：1小時
+            elif '1H' in tf:
+                timeout_sec = 7200       # 1H：2小時
+            elif '1D' in tf:
+                timeout_sec = 259200     # 1D：72小時（3天）
+            else:
+                timeout_sec = 28800      # 4H：8小時
             pending_sec = time.time() - pos.get('reported_at', time.time())
             if pending_sec > timeout_sec:
                 hours = int(pending_sec / 3600)
@@ -1530,7 +1545,15 @@ def run_position_monitor():
 
         # 未成交掛單過期（1H訊號4小時、4H訊號12小時）→ 強制清除並通知
         if not pos.get('filled', False):
-            expiry_h = 4 if '1H' in pos.get('tf', '1H') else 12
+            _pos_tf = pos.get('tf', '1H')
+            if '15M' in _pos_tf:
+                expiry_h = 2    # 15M：2小時
+            elif '1H' in _pos_tf:
+                expiry_h = 4    # 1H：4小時
+            elif '1D' in _pos_tf:
+                expiry_h = 96   # 1D：4天
+            else:
+                expiry_h = 12   # 4H：12小時
             if age_hours > expiry_h:
                 inst_id = pos['asset'] + '-USDT-SWAP'
                 current_price = get_current_price(inst_id)
