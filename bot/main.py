@@ -597,6 +597,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
                 "adx":            round(current_adx, 1),
                 "vol_confirmed":  cross_vol > avg_vol_20,
                 "tf_note":        tf_note,
+                "entry_fr":       round(funding_rate * 100, 4),  # 進場時資金費率（%）
             }
     except:
         pass
@@ -1035,16 +1036,29 @@ def save_stats(records):
 def record_trade_outcome(pos, outcome):
     """記錄交易結果；outcome: win_tp3/win_tp2/breakeven/loss"""
     records = load_stats()
+    # 取進場時記錄的資金費率（若無則取當前費率）
+    entry_fr = pos.get('entry_fr', None)
+    if entry_fr is None:
+        try:
+            inst_id = pos['asset'] + "-USDT-SWAP"
+            fr_res = requests.get(
+                f"{BASE_URL}/api/v5/public/funding-rate?instId={inst_id}",
+                timeout=3
+            ).json()
+            entry_fr = float(fr_res['data'][0]['fundingRate'])
+        except Exception:
+            entry_fr = 0.0
     records.append({
-        "asset":     pos['asset'],
-        "dir":       pos['dir'],
-        "tf":        pos.get('tf', '—'),
-        "entry":     pos.get('entry'),
-        "outcome":   outcome,
+        "asset":    pos['asset'],
+        "dir":      pos['dir'],
+        "tf":       pos.get('tf', '—'),
+        "entry":    pos.get('entry'),
+        "entry_fr": round(entry_fr * 100, 4),   # 百分比，保留4位
+        "outcome":  outcome,
         "timestamp": time.time(),
     })
     save_stats(records)
-    print(f"📊 記錄交易結果：{pos['asset']} {pos['dir']} → {outcome}")
+    print(f"📊 記錄交易結果：{pos['asset']} {pos['dir']} → {outcome}  費率{entry_fr*100:.4f}%")
 
 # 最近一次掃描結果快取（key = asset 如 "ETH"，value = signal dict）
 # 供 /open 指令查詢，不自動加入持倉監控
@@ -1384,8 +1398,9 @@ def analyze_position(pos):
                 status = "🟢 止盈1達標"
                 action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈1 {format_price(tp1)}，"
                           f"現價 {format_price(current_price)}｜止損已自動上移至進場成本（<code>{format_price(entry)}</code>）")
-                pos['trail_dist'] = entry - sl  # 保存 ATR 距離供追蹤止損使用
-                pos['sl'] = entry  # 立即把 SL 移至進場點（保本止損）
+                pos['tp1_hit']    = True          # 與 sl 同步設定，確保重啟後狀態一致
+                pos['trail_dist'] = entry - sl
+                pos['sl'] = entry
                 sl = entry
                 push = True
         else:
@@ -1476,8 +1491,9 @@ def analyze_position(pos):
                 status = "🟢 止盈1達標"
                 action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈1 {format_price(tp1)}，"
                           f"現價 {format_price(current_price)}｜止損已自動下移至進場成本（<code>{format_price(entry)}</code>）")
-                pos['trail_dist'] = sl - entry  # 保存 ATR 距離供追蹤止損使用
-                pos['sl'] = entry  # 立即把 SL 移至進場點（保本止損）
+                pos['tp1_hit']    = True          # 與 sl 同步設定，確保重啟後狀態一致
+                pos['trail_dist'] = sl - entry
+                pos['sl'] = entry
                 sl = entry
                 push = True
         else:
@@ -2348,12 +2364,11 @@ def send_holding_summary(chat_id):
         else:
             active_rows.append((pos, status, action))
 
-    if to_remove:
-        with active_positions_lock:
-            for p in to_remove:
-                if p in active_positions:
-                    active_positions.remove(p)
-        save_positions(active_positions)
+    with active_positions_lock:
+        for p in to_remove:
+            if p in active_positions:
+                active_positions.remove(p)
+        save_positions(active_positions)  # 無論有無移除都存，確保 tp1_hit/sl 等狀態變更不因重啟而遺失
 
     if not active_rows:
         requests.post(text_url, json={"chat_id": chat_id,
@@ -2646,6 +2661,38 @@ def send_stats_report(chat_id):
             t = w + l + b
             pct = (w + b) / t * 100 if t else 0
             msg += f"  {a}：{w}W {b}BE {l}L  ({pct:.0f}%)\n"
+
+    # 資金費率分析
+    fr_records = [r for r in valid if r.get('entry_fr') is not None]
+    if len(fr_records) >= 3:
+        msg += "\n<b>📊 資金費率 vs 結果：</b>\n"
+        def avg_fr(lst):
+            vals = [r.get('entry_fr', 0) for r in lst if r.get('entry_fr') is not None]
+            return sum(vals) / len(vals) if vals else 0.0
+        fr_win = avg_fr([r for r in fr_records if r['outcome'] == 'win_tp3'])
+        fr_be  = avg_fr([r for r in fr_records if r['outcome'] == 'breakeven'])
+        fr_loss= avg_fr([r for r in fr_records if r['outcome'] == 'loss'])
+
+        def fr_label(v):
+            if v >  0.01: return f"+{v:.4f}%（偏多）"
+            if v < -0.01: return f"{v:.4f}%（偏空）"
+            return f"{v:+.4f}%（中性）"
+
+        if wins:      msg += f"  🟣 全止盈均費率：{fr_label(fr_win)}\n"
+        if breakevens:msg += f"  🛡️ 保本均費率：  {fr_label(fr_be)}\n"
+        if losses:    msg += f"  🔴 止損均費率：  {fr_label(fr_loss)}\n"
+
+        # 費率分區勝率
+        high_fr  = [r for r in fr_records if r.get('entry_fr', 0) >  0.03]
+        low_fr   = [r for r in fr_records if r.get('entry_fr', 0) < -0.03]
+        neut_fr  = [r for r in fr_records if -0.03 <= r.get('entry_fr', 0) <= 0.03]
+        def zone_wr(lst):
+            if not lst: return None
+            ok = sum(1 for r in lst if r['outcome'] in ('win_tp3','breakeven'))
+            return ok / len(lst) * 100
+        if high_fr:  msg += f"  費率>+0.03%（多頭過熱）：{len(high_fr)}筆  勝率{zone_wr(high_fr):.0f}%\n"
+        if neut_fr:  msg += f"  費率中性（±0.03%）：{len(neut_fr)}筆  勝率{zone_wr(neut_fr):.0f}%\n"
+        if low_fr:   msg += f"  費率<-0.03%（空頭過熱）：{len(low_fr)}筆  勝率{zone_wr(low_fr):.0f}%\n"
 
     msg += "\n<i>數據僅供參考，保持紀律為第一要務。</i>"
 
@@ -3006,6 +3053,7 @@ def handle_telegram_updates():
                                             'reported_at': now_ts_cb,
                                             'last_checked_ts': now_ts_cb,
                                             'filled': False,
+                                            'entry_fr': sig_cb.get('entry_fr'),  # 進場時資金費率
                                         }
                                         with active_positions_lock:
                                             active_positions.append(new_pos_cb)
