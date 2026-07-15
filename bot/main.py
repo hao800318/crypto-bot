@@ -2778,13 +2778,18 @@ def handle_telegram_updates():
                 t.start()
                 last_watchlist_check_time_local = now_ts
 
-            # A. 定時播報（每 15 分鐘）
+            # A. 定時播報（每 15 分鐘，僅限加州時間 08:00–00:00）
+            _scan_hour = now_la.hour  # 0–23
+            _in_scan_window = 8 <= _scan_hour <= 23
             if now_ts - last_auto_scan_time >= SCAN_INTERVAL_MINUTES * 60:
-                print(f"🔔 觸發定時掃描：{now_la.strftime('%H:%M')}")
-                t = threading.Thread(target=scan_worker_thread, args=("定時自動速報", TELEGRAM_CHAT_ID, True, True))
-                t.daemon = True
-                t.start()
-                last_auto_scan_time = now_ts
+                last_auto_scan_time = now_ts   # 更新計時器，避免離開靜默期後立即連發
+                if _in_scan_window:
+                    print(f"🔔 觸發定時掃描：{now_la.strftime('%H:%M')} PT")
+                    t = threading.Thread(target=scan_worker_thread, args=("定時自動速報", TELEGRAM_CHAT_ID, True, True))
+                    t.daemon = True
+                    t.start()
+                else:
+                    print(f"🌙 靜默時段（{now_la.strftime('%H:%M')} PT），跳過自動掃描")
 
             # B2. 每日勝率播報（00:00 PT）
             if now_la.hour == 0 and now_la.minute < 2 and last_stats_date != now_la.date():
