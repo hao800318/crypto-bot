@@ -2563,7 +2563,7 @@ def handle_open_command(text, chat_id):
 
 def handle_close_command(text, chat_id):
     """
-    /close ETH     → 移除 ETH 所有持倉
+    /close ETH     → 移除 ETH 所有持倉（計算損益並記錄統計）
     /close ETH 多  → 只移除多倉
     /close all     → 清空所有持倉
     """
@@ -2576,40 +2576,89 @@ def handle_close_command(text, chat_id):
         )
         return
 
-    target  = parts[1].upper()
+    target    = parts[1].upper()
     direction = parts[2] if len(parts) >= 3 else None
 
+    # 找出要關閉的倉位
     with active_positions_lock:
-        before = len(active_positions)
         if target == "ALL":
-            active_positions.clear()
-            removed = before
+            closing = list(active_positions)
+        elif direction:
+            closing = [p for p in active_positions
+                       if p['asset'] == target and p['dir'] == direction]
         else:
-            if direction:
-                active_positions[:] = [
-                    p for p in active_positions
-                    if not (p['asset'] == target and p['dir'] == direction)
-                ]
+            closing = [p for p in active_positions if p['asset'] == target]
+
+    if not closing:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id,
+                  "text": f"❓ 找不到 {target} 的持倉記錄（可用 /holding 查看目前持倉）"}
+        )
+        return
+
+    la_tz   = pytz.timezone('America/Los_Angeles')
+    now_str = datetime.datetime.now(la_tz).strftime('%H:%M PT')
+    lines   = [f"<b>【手動平倉確認】</b>  <code>{now_str}</code>\n"]
+
+    for pos in closing:
+        asset    = pos['asset']
+        dir_tag  = "🟩多" if pos['dir'] == "多" else "🟥空"
+        entry    = pos.get('entry', 0)
+        inst_id  = asset + "-USDT-SWAP"
+
+        # 取當前價格計算損益
+        try:
+            px_res = requests.get(
+                f"{BASE_URL}/api/v5/market/ticker?instId={inst_id}", timeout=4
+            ).json()
+            current_price = float(px_res['data'][0]['last'])
+        except Exception:
+            current_price = entry  # 無法取價時視為平手
+
+        if not pos.get('filled', False):
+            # 掛單未成交 → 純撤單，不計入損益統計
+            outcome_label = "撤單"
+            outcome_icon  = "🚫"
+            pnl_str       = "未成交，不計損益"
+        else:
+            if pos['dir'] == "多":
+                pnl_pct = (current_price - entry) / entry * 100
             else:
-                active_positions[:] = [
-                    p for p in active_positions
-                    if p['asset'] != target
-                ]
-            removed = before - len(active_positions)
+                pnl_pct = (entry - current_price) / entry * 100
+
+            if pos.get('tp2_hit') or pos.get('tp1_hit') or pnl_pct > 0:
+                outcome       = "breakeven" if pnl_pct <= 0.05 else "win_tp3"
+                outcome_label = "手動止盈" if pnl_pct > 0.05 else "手動保本"
+                outcome_icon  = "🟣" if pnl_pct > 0.05 else "🛡️"
+            else:
+                outcome       = "loss"
+                outcome_label = "手動止損"
+                outcome_icon  = "🔴"
+
+            pnl_sign = "+" if pnl_pct >= 0 else ""
+            pnl_str  = f"損益 {pnl_sign}{pnl_pct:.2f}%，現價 <code>{format_price(current_price)}</code>"
+            record_trade_outcome(pos, outcome)
+
+        lines.append(
+            f"{outcome_icon} <b>{asset}</b>  {dir_tag}  {pos.get('tf','—')}\n"
+            f"   進場 <code>{format_price(entry)}</code>  → {outcome_label}\n"
+            f"   {pnl_str}\n"
+        )
+
+    # 移除倉位
+    with active_positions_lock:
+        for p in closing:
+            if p in active_positions:
+                active_positions.remove(p)
         save_positions(active_positions)
 
-    if removed == 0:
-        msg = f"❓ 找不到 {target} 的持倉記錄（可用 /holding 查看目前持倉）"
-    elif target == "ALL":
-        msg = f"✅ 已清空所有持倉監控（共移除 {removed} 筆）"
-    else:
-        dir_note = f" {direction}" if direction else ""
-        msg = f"✅ {target}{dir_note} 已移除持倉監控（移除 {removed} 筆）"
-
-    print(f"🗑️ /close {target}: 移除 {removed} 筆")
+    lines.append(f"<i>共移除 {len(closing)} 筆持倉監控</i>")
+    msg = "\n".join(lines)
+    print(f"🗑️ /close {target}: 移除 {len(closing)} 筆")
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": msg}
+        json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}
     )
 
 
