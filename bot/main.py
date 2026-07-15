@@ -1312,14 +1312,24 @@ def analyze_position(pos):
         dist_to_sl_pct = (current_price - sl) / entry * 100
         # 止損：用 K 線低點（只要低點碰過 SL 就算觸發）
         if effective_low <= sl:
-            if pos.get('tp1_hit'):
+            if pos.get('tp2_hit'):
+                # TP2 達標後 SL 已移至 TP1，現在回落至 TP1 → 鎖住 TP2 段利潤出場
                 status = "🛡️ 回調至保本止損"
-                action = (f"📉 K線低點 {format_price(effective_low)} 回調至保本止損 {format_price(sl)}，"
-                          f"現價 {format_price(current_price)}｜<b>剩餘倉位建議出場，TP1利潤已鎖定</b>")
+                action = (f"📉 K線低點 <code>{format_price(effective_low)}</code> 回落至止損位（TP1）<code>{format_price(sl)}</code>，"
+                          f"現價 <code>{format_price(current_price)}</code>\n"
+                          f"✅ TP2 段利潤已鎖定，剩餘倉位保本出場\n"
+                          f"<b>⛔ 系統已停止追蹤此倉位</b>")
+            elif pos.get('tp1_hit'):
+                # TP1 達標後 SL 已移至進場成本，現在回落至成本 → 保本出場
+                status = "🛡️ 回調至保本止損"
+                action = (f"📉 K線低點 <code>{format_price(effective_low)}</code> 回落至保本止損（進場成本）<code>{format_price(sl)}</code>，"
+                          f"現價 <code>{format_price(current_price)}</code>\n"
+                          f"✅ TP1 段利潤已鎖定，剩餘倉位零風險出場\n"
+                          f"<b>⛔ 系統已停止追蹤此倉位</b>")
             else:
                 status = "🔴 止損觸發"
-                action = (f"⛔ K線低點 {format_price(effective_low)} 已觸及止損位 {format_price(sl)}，"
-                          f"現價 {format_price(current_price)}｜<b>建議立即平倉</b>")
+                action = (f"⛔ K線低點 <code>{format_price(effective_low)}</code> 已觸及止損位 <code>{format_price(sl)}</code>，"
+                          f"現價 <code>{format_price(current_price)}</code>｜<b>建議立即平倉</b>")
             push = True
         # 止盈：用 K 線高點（只要高點碰過 TP 就算達標）
         elif effective_high >= tp3:
@@ -1408,14 +1418,24 @@ def analyze_position(pos):
         dist_to_sl_pct = (sl - current_price) / entry * 100
         # 止損：用 K 線高點
         if effective_high >= sl:
-            if pos.get('tp1_hit'):
+            if pos.get('tp2_hit'):
+                # TP2 達標後 SL 已移至 TP1，現在反彈至 TP1 → 鎖住 TP2 段利潤出場
                 status = "🛡️ 回調至保本止損"
-                action = (f"📈 K線高點 {format_price(effective_high)} 回調至保本止損 {format_price(sl)}，"
-                          f"現價 {format_price(current_price)}｜<b>剩餘倉位建議出場，TP1利潤已鎖定</b>")
+                action = (f"📈 K線高點 <code>{format_price(effective_high)}</code> 反彈至止損位（TP1）<code>{format_price(sl)}</code>，"
+                          f"現價 <code>{format_price(current_price)}</code>\n"
+                          f"✅ TP2 段利潤已鎖定，剩餘倉位保本出場\n"
+                          f"<b>⛔ 系統已停止追蹤此倉位</b>")
+            elif pos.get('tp1_hit'):
+                # TP1 達標後 SL 已移至進場成本，現在反彈至成本 → 保本出場
+                status = "🛡️ 回調至保本止損"
+                action = (f"📈 K線高點 <code>{format_price(effective_high)}</code> 反彈至保本止損（進場成本）<code>{format_price(sl)}</code>，"
+                          f"現價 <code>{format_price(current_price)}</code>\n"
+                          f"✅ TP1 段利潤已鎖定，剩餘倉位零風險出場\n"
+                          f"<b>⛔ 系統已停止追蹤此倉位</b>")
             else:
                 status = "🔴 止損觸發"
-                action = (f"⛔ K線高點 {format_price(effective_high)} 已觸及止損位 {format_price(sl)}，"
-                          f"現價 {format_price(current_price)}｜<b>建議立即平倉</b>")
+                action = (f"⛔ K線高點 <code>{format_price(effective_high)}</code> 已觸及止損位 <code>{format_price(sl)}</code>，"
+                          f"現價 <code>{format_price(current_price)}</code>｜<b>建議立即平倉</b>")
             push = True
         # 止盈：用 K 線低點
         elif effective_low <= tp3:
