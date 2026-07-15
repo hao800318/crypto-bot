@@ -866,9 +866,29 @@ def run_strategy_scan():
     print(f"\n✨ 全網掃描完畢！耗時：{elapsed:.1f} 秒（共 {len(all_assets)} 支幣種 × 3 時框）")
 
     all_signals.sort(key=lambda x: x['score'], reverse=True)
-    top_signals = all_signals[:3]
 
-    print(f"📊 掃描結果：共找到 {len(all_signals)} 組信號，精選前 {len(top_signals)} 名")
+    # ── 品質門檻：勝率不足 MIN_WIN_RATE 的訊號不推播 ──
+    all_signals = [s for s in all_signals if s['win_rate'] >= MIN_WIN_RATE]
+
+    # ── 冷卻過濾：同一幣種 4 小時內不重複推播 ──
+    now_ts_scan = time.time()
+    cooldown_sec = SIGNAL_COOLDOWN_HOURS * 3600
+    filtered = []
+    with signal_sent_lock:
+        for s in all_signals:
+            last_t = signal_sent_cache.get(s['asset'], 0)
+            if now_ts_scan - last_t >= cooldown_sec:
+                filtered.append(s)
+
+    top_signals = filtered[:2]   # 每次最多推播 2 個
+
+    # 記錄本次推播的幣種時間戳
+    if top_signals:
+        with signal_sent_lock:
+            for s in top_signals:
+                signal_sent_cache[s['asset']] = now_ts_scan
+
+    print(f"📊 掃描結果：原始 {len(all_signals)} 組 → 冷卻過濾後 {len(filtered)} 組 → 精選 {len(top_signals)} 名")
     return top_signals
 
 # ==================== 📊 5. 持倉監控系統 ====================
@@ -938,6 +958,10 @@ last_scan_cache: dict = {}
 last_scan_lock  = threading.Lock()
 near_miss_cache: dict = {}
 near_miss_lock  = threading.Lock()
+signal_sent_cache: dict = {}          # key=asset, value=timestamp；防同幣短時重複
+signal_sent_lock  = threading.Lock()
+SIGNAL_COOLDOWN_HOURS = 4             # 同幣種 4 小時內不重複推播
+MIN_WIN_RATE = 72                     # 低於此勝率的訊號不推播
 WATCH_FILE = os.path.join(_DATA_DIR, "watch_list.json")
 
 def load_watch_list():
