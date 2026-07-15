@@ -870,27 +870,22 @@ def run_strategy_scan():
     # ── 品質門檻：勝率不足 MIN_WIN_RATE 的訊號不推播 ──
     all_signals = [s for s in all_signals if s['win_rate'] >= MIN_WIN_RATE]
 
-    # ── 排除衝突訊號 ──
-    # active_positions：同幣種 + 同方向 才排除（反向可推播）
+    # ── 先鎖定全榜前 2，再從這 2 個裡排除衝突；不補位 ──
+    candidates = all_signals[:2]   # 只看第 1、第 2 名
+
     with active_positions_lock:
         busy_pairs = {(p['asset'], p['dir']) for p in active_positions}
-    # watch_list：無方向資訊，幣種層級排除
     with watch_list_lock:
         watch_assets = {w['asset'] for w in watch_list}
-    before = len(all_signals)
-    all_signals = [
-        s for s in all_signals
-        if (s['asset'], s['dir']) not in busy_pairs   # 非同向持倉
+
+    top_signals = [
+        s for s in candidates
+        if (s['asset'], s['dir']) not in busy_pairs   # 非同向持倉/掛單
         and s['asset'] not in watch_assets             # 非自選監控
     ]
-    removed = before - len(all_signals)
-    if removed:
-        print(f"🚫 衝突排除：過濾掉 {removed} 組（同向持倉或自選監控幣種）")
 
-    # 取勝率最高前 2，跳過不補位
-    top_signals = all_signals[:2]
-
-    print(f"📊 掃描結果：候選 {len(all_signals)} 組 → 精選 {len(top_signals)} 名（持倉/掛單即時排除）")
+    excluded = len(candidates) - len(top_signals)
+    print(f"📊 掃描結果：候選 {len(all_signals)} 組 → 前 2 名中排除 {excluded} 個衝突 → 推播 {len(top_signals)} 個")
     return top_signals
 
 # ==================== 📊 5. 持倉監控系統 ====================
