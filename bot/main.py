@@ -866,7 +866,7 @@ def run_near_miss_scan():
             with lock:
                 results.append(r)
 
-    with ThreadPoolExecutor(max_workers=100) as ex:
+    with ThreadPoolExecutor(max_workers=80) as ex:
         list(ex.map(lambda t: task(*t), tasks))
 
     results.sort(key=lambda x: x['filters_passed'], reverse=True)
@@ -896,7 +896,7 @@ def run_strategy_scan():
         return fetch_candle_sync(asset, tf, max_leverage=max_lev,
                                  btc_trend=btc_trend, market_fr=market_fr)
 
-    with ThreadPoolExecutor(max_workers=100) as executor:
+    with ThreadPoolExecutor(max_workers=80) as executor:
         futures = {executor.submit(scan_task, asset, tf): (asset, tf) for asset, tf in tasks}
         for future in as_completed(futures):
             with lock:
