@@ -2800,7 +2800,7 @@ def handle_telegram_updates():
             with active_positions_lock:
                 has_tp_hit   = any(p.get('tp1_hit') or p.get('tp2_hit') for p in active_positions)
                 has_unfilled = any(not p.get('filled', False) for p in active_positions)
-            monitor_interval = 300 if (has_tp_hit or has_unfilled) else 600
+            monitor_interval = 180  # 每 3 分鐘監控一次（掛單等待 / 持倉均適用）
             if now_ts - last_monitor_time >= monitor_interval:
                 print(f"🔍 觸發持倉監控：{now_la.strftime('%H:%M')}")
                 t = threading.Thread(target=run_position_monitor)
