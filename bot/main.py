@@ -142,6 +142,71 @@ def get_market_avg_funding_rate():
             pass
     return sum(rates) / len(rates) if rates else 0.0
 
+def find_market_structure_levels(df, entry, direction, atr, n=2):
+    """
+    從 K 線的擺動高低點（Swing High / Swing Low）推導 SL 和 TP 水位。
+
+    邏輯：
+      多頭 → SL = entry 下方最近支撐位（跌破代表趨勢失效）
+             TP1/2/3 = entry 上方由近到遠的壓力位
+      空頭 → 對稱反向
+
+    n : 左右各幾根 K 需更高/更低才算成立的擺動點（預設 2，即 2+1+2 確認）
+    ATR 倍數作為備援：找不到足夠水位時以 ATR 補全，確保函數永遠回傳有效數值。
+
+    回傳 (sl, tp1, tp2, tp3)
+    """
+    lows_arr  = df['low'].values
+    highs_arr = df['high'].values
+    swing_lows, swing_highs = [], []
+
+    for i in range(n, len(df) - n):
+        # 擺動低點：左右各 n 根的最低值
+        if lows_arr[i] == min(lows_arr[i-n:i+n+1]):
+            swing_lows.append(float(lows_arr[i]))
+        # 擺動高點：左右各 n 根的最高值
+        if highs_arr[i] == max(highs_arr[i-n:i+n+1]):
+            swing_highs.append(float(highs_arr[i]))
+
+    # 合併距離 < 0.4% 的相鄰水位（防止同一區域重複計算）
+    def cluster(levels, tol=0.004):
+        if not levels:
+            return []
+        result = [sorted(levels)[0]]
+        for lvl in sorted(levels)[1:]:
+            if (lvl - result[-1]) / result[-1] < tol:
+                result[-1] = (result[-1] + lvl) / 2  # 取平均作為代表水位
+            else:
+                result.append(lvl)
+        return result
+
+    supports    = cluster(swing_lows)
+    resistances = cluster(swing_highs)
+
+    if direction == "多":
+        # SL：entry 下方（需有一定距離，≥ 0.1% 避免貼身）最近支撐
+        below = [s for s in supports if s < entry * 0.999]
+        sl    = max(below) if below else entry - atr * 2.0
+
+        # TP：entry 上方壓力由近到遠
+        above = sorted(r for r in resistances if r > entry * 1.001)
+        tp1   = above[0] if len(above) >= 1 else entry + atr * 1.5
+        tp2   = above[1] if len(above) >= 2 else tp1  + atr * 1.5
+        tp3   = above[2] if len(above) >= 3 else tp2  + atr * 2.0
+    else:
+        # SL：entry 上方最近壓力
+        above = [r for r in resistances if r > entry * 1.001]
+        sl    = min(above) if above else entry + atr * 2.0
+
+        # TP：entry 下方支撐由近到遠
+        below = sorted((s for s in supports if s < entry * 0.999), reverse=True)
+        tp1   = below[0] if len(below) >= 1 else entry - atr * 1.5
+        tp2   = below[1] if len(below) >= 2 else tp1  - atr * 1.5
+        tp3   = below[2] if len(below) >= 3 else tp2  - atr * 2.0
+
+    return sl, tp1, tp2, tp3
+
+
 def get_candle_range_since(inst_id, since_ts, bar="1H", no_margin=False):
     """取得 since_ts 以來所有 K 線的最高價和最低價。
     用於偵測監控間隔中曾觸碰的價格極值，防止漏掉 TP/SL/填單事件。
@@ -679,30 +744,12 @@ def fetch_trend_state(inst_id, tf):
         )
         passed = sum([adx_ok, vol_ok, slope_ok, no_div])
 
-        # ── 進場 / 止損 / 止盈（全部由策略指標推導，不用固定百分比）──
-        #
-        # 止損邏輯：
-        #   EMA89 是 MA8/EMA89 交叉策略的信號失效點（多頭收盤跌破 EMA89 = 趨勢不成立）
-        #   在 EMA89 外加 0.5×ATR 緩衝，避免一根 wick 誤觸但收盤不破的假止損
-        #
-        # 止盈邏輯（R 倍數框架）：
-        #   risk = 進場點(MA8) 到止損的距離 → 反映本次交易的真實風險
-        #   TP1 = entry + 1.5R  TP2 = entry + 2.5R  TP3 = entry + 4.0R
-        #   全部從進場點出發，保證 R:R 比例固定，且自動適應當前波動度
-        if direction == "多":
-            entry   = ma8
-            sl      = ema89 - atr * 0.5          # EMA89 下方 0.5 ATR 緩衝
-            risk    = entry - sl                  # 每單位風險距離（正值）
-            tp1     = entry + risk * 1.5
-            tp2     = entry + risk * 2.5
-            tp3     = entry + risk * 4.0
-        else:
-            entry   = ma8
-            sl      = ema89 + atr * 0.5          # EMA89 上方 0.5 ATR 緩衝
-            risk    = sl - entry                  # 每單位風險距離（正值）
-            tp1     = entry - risk * 1.5
-            tp2     = entry - risk * 2.5
-            tp3     = entry - risk * 4.0
+        # ── 進場 / 止損 / 止盈：從 K 線擺動結構推導，非固定百分比 ──
+        # SL  = entry 下方（多）/ 上方（空）最近擺動點（支撐/壓力），跌破代表訊號失效
+        # TP1 = entry 方向第一個壓力/支撐擺動點
+        # TP2/TP3 = 再往後的歷史水位，找不到時以 ATR 補全
+        entry = ma8
+        sl, tp1, tp2, tp3 = find_market_structure_levels(df, entry, direction, atr)
 
         # 趨勢延續：MA8 > EMA89 已多根，價格是否回踩 MA8 附近（再入場機會）
         pullback_pct = abs(price - ma8) / ma8 * 100
@@ -2900,22 +2947,10 @@ def fetch_coin_status(inst_id, tf):
         slope_ok   = (direction == "多" and slope > 0) or (direction == "空" and slope < 0)
         no_div     = not ((direction == "多" and c['close'] > price_5ago and c['RSI'] < rsi_5ago) or
                           (direction == "空" and c['close'] < price_5ago and c['RSI'] > rsi_5ago))
-        atr = c['ATR14']
-        # 與主掃描一致：進場=MA8，止損=EMA89±0.5ATR，TP 用 R 倍數從進場推算
-        if direction == "多":
-            entry_p = c['MA8']
-            sl      = c['EMA89'] - atr * 0.5
-            risk    = entry_p - sl
-            tp1     = entry_p + risk * 1.5
-            tp2     = entry_p + risk * 2.5
-            tp3     = entry_p + risk * 4.0
-        else:
-            entry_p = c['MA8']
-            sl      = c['EMA89'] + atr * 0.5
-            risk    = sl - entry_p
-            tp1     = entry_p - risk * 1.5
-            tp2     = entry_p - risk * 2.5
-            tp3     = entry_p - risk * 4.0
+        atr     = c['ATR14']
+        entry_p = c['MA8']
+        # 與主掃描一致：從 K 線擺動結構推導 SL/TP
+        sl, tp1, tp2, tp3 = find_market_structure_levels(df, entry_p, direction, atr)
         passed = sum([adx_ok, vol_ok, slope_ok, no_div])
         return {
             'asset': inst_id.split('-')[0], 'dir': direction,
