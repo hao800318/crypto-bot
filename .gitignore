@@ -47,3 +47,6 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# 對話截圖（Replit 自動附加，不需要上傳到 GitHub）
+attached_assets/
