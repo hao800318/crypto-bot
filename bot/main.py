@@ -1124,7 +1124,9 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
             "adx":            round(adx, 1),
             "rsi":            round(rsi, 1),
             "entry_type":     entry_desc,
-            "signal_price":   price,
+            # 空單：signal_price 略高於 entry → 突破空模式（等低點跌至 entry 填單）
+            # 多單：signal_price 略低於 entry → 突破多模式（等高點升至 entry 填單）
+            "signal_price":   price * 1.0002 if direction == "空" else price * 0.9998,
             "signal_type":    "range",
             "range_sup":      [sup_lo, sup_hi],
             "range_res":      [res_lo, res_hi],
@@ -1330,7 +1332,9 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             "adx":            round(adx, 1),
             "rsi":            round(rsi, 1),
             "entry_type":     entry_desc,
-            "signal_price":   price,
+            # 空單：signal_price 略高於 entry → 突破空模式（等低點跌至 entry 填單）
+            # 多單：signal_price 略低於 entry → 突破多模式（等高點升至 entry 填單）
+            "signal_price":   price * 1.0002 if direction == "空" else price * 0.9998,
             "signal_type":    "divergence",
             "div_desc":       div_desc,
             "sentiment_note": sentiment_note_d,
