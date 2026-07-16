@@ -680,18 +680,25 @@ def fetch_trend_state(inst_id, tf):
         passed = sum([adx_ok, vol_ok, slope_ok, no_div])
 
         # 進場/止損點位
+        # SL 最低距離保護：防止 EMA89 離 MA8 極近（剛交叉）時 SL 過緊被正常波動掃掉
+        # 各時框最低保護距離（佔進場點百分比）：15m=0.5%、1H=0.8%、4H=1.5%、1D=2.5%
+        # bar_param 已由 _TF_BAR 轉換為大寫（"1H", "4H" 等），用它查表
+        _sl_min_pct = {"15m": 0.005, "30m": 0.006, "1H": 0.008,
+                       "4H": 0.015, "1D": 0.025}.get(bar_param, 0.008)
         if direction == "多":
-            entry = ma8
-            sl    = min(ema89, ma8 - atr * 1.5)
-            tp1   = price + atr * 1.5
-            tp2   = price + atr * 2.5
-            tp3   = price + atr * 4.0
+            entry   = ma8
+            sl_raw  = min(ema89, ma8 - atr * 1.5)
+            sl      = min(sl_raw, entry * (1 - _sl_min_pct))   # 確保至少有 _sl_min_pct 距離
+            tp1     = price + atr * 1.5
+            tp2     = price + atr * 2.5
+            tp3     = price + atr * 4.0
         else:
-            entry = ma8
-            sl    = max(ema89, ma8 + atr * 1.5)
-            tp1   = price - atr * 1.5
-            tp2   = price - atr * 2.5
-            tp3   = price - atr * 4.0
+            entry   = ma8
+            sl_raw  = max(ema89, ma8 + atr * 1.5)
+            sl      = max(sl_raw, entry * (1 + _sl_min_pct))   # 確保至少有 _sl_min_pct 距離
+            tp1     = price - atr * 1.5
+            tp2     = price - atr * 2.5
+            tp3     = price - atr * 4.0
 
         # 趨勢延續：MA8 > EMA89 已多根，價格是否回踩 MA8 附近（再入場機會）
         pullback_pct = abs(price - ma8) / ma8 * 100
@@ -1361,9 +1368,12 @@ def analyze_position(pos):
     elif oi_change > 5:
         whale_warn += f"\n📈 OI 上升 {oi_change:.1f}%，主力持續加倉，<b>可繼續持倉並同步上移止損鎖利</b>"
 
-    # TP 確認緩衝：要求超過 TP 0.05% 才算達標，避免 1-pip wick 誤觸
+    # TP 確認緩衝：要求超過 TP 0.03% 才算達標，避免 1-pip wick 誤觸
+    # 0.03% 足以擋掉最小假 wick（原始 ZKP 案例：wick 只超 TP 0.022%）
+    # 比舊值 0.05% 寬鬆：讓 wick 超 TP 0.03-0.05% 的真實觸碰正常觸發 TP1，
+    # 防止 TP1 被錯過後 SL 仍在原位導致不必要虧損。
     # SL 不加緩衝（止損要快，只要 wick 碰到就觸發）
-    TP_CONFIRM = 1.0005   # 多頭 TP：effective_high >= tp * TP_CONFIRM
+    TP_CONFIRM = 1.0003   # 多頭 TP：effective_high >= tp * TP_CONFIRM
                           # 空頭 TP：effective_low  <= tp / TP_CONFIRM
 
     # ── 持倉狀態判定（用 K 線高低點而非現價，防止監控間隔中的事件被漏掉）──
