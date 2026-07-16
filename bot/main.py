@@ -111,7 +111,7 @@ def build_sentiment_note(direction, funding_rate, ls_ratio):
 
 # ==================== ⚙️ 4. 市場環境指標（掃描前各取一次）====================
 def get_btc_trend():
-    """BTC 1H MA8 vs EMA89，判斷大盤方向"""
+    """BTC 1H MA8 vs EMA89，判斷大盤方向（保留供持倉監控等非掃描路徑使用）"""
     try:
         url = f"{BASE_URL}/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=1H&limit=100"
         res = requests.get(url, timeout=4).json()
@@ -126,6 +126,43 @@ def get_btc_trend():
     except:
         pass
     return "neutral"
+
+
+def _fetch_one_trend(coin: str) -> str:
+    """取單一幣種 1H MA8/EMA89 趨勢，回傳 'bull' / 'bear' / 'neutral'"""
+    try:
+        url = f"{BASE_URL}/api/v5/market/candles?instId={coin}-USDT-SWAP&bar=1H&limit=100"
+        res = requests.get(url, timeout=4).json()
+        if res.get('code') == '0' and len(res['data']) >= 90:
+            closes = [float(r[4]) for r in reversed(res['data'])]
+            s = pd.Series(closes)
+            ma8  = s.rolling(8).mean().iloc[-1]
+            k    = 2 / 90
+            ema  = closes[0]
+            for c in closes[1:]:
+                ema = c * k + ema * (1 - k)
+            return "bull" if ma8 > ema else "bear"
+    except:
+        pass
+    return "neutral"
+
+
+def get_ecosystem_ref_trends() -> dict[str, str]:
+    """
+    並行取回所有生態鏈參考幣的 1H 趨勢，供掃描器按幣種查表使用。
+    回傳範例：{"BTC": "bull", "ETH": "bear", "SOL": "bull", "BNB": "bull", "AVAX": "neutral", ...}
+    """
+    ref_coins = {"BTC", "ETH", "SOL", "BNB", "AVAX", "SUI", "NEAR", "TON"}
+    with ThreadPoolExecutor(max_workers=len(ref_coins)) as ex:
+        futures = {ex.submit(_fetch_one_trend, coin): coin for coin in ref_coins}
+        results = {}
+        for f in as_completed(futures):
+            coin = futures[f]
+            try:
+                results[coin] = f.result(timeout=6)
+            except Exception:
+                results[coin] = "neutral"
+    return results
 
 def get_market_avg_funding_rate():
     """前10大幣種資金費率均值，>0.05%代表市場多頭過熱"""
@@ -382,6 +419,50 @@ _TF_BAR   = {"15m": "15m", "30m": "30m", "1h": "1H", "4h": "4H", "1d": "1D"}   #
 _TF_LABEL = {"15m": "15M", "30m": "30M", "1h": "1H", "4h": "4H", "1d": "1D"}   # display label
 _TF_HTF   = {"15m": "1H",  "30m": "1H", "1h": "4H", "4h": "1D", "1d": "1W"}    # 高一級時框
 
+# 幣種 → 生態鏈參考幣對照表
+# 邏輯：代幣跟著所屬鏈走，鏈本身跟著 BTC（大盤）走，不認識的幣預設參考 BTC
+_CHAIN_REF: dict[str, str] = {
+    # ── 大盤基準 ──
+    "BTC": "BTC",
+    # ── ETH 生態 ──
+    "ETH": "BTC",
+    "UNI": "ETH", "AAVE": "ETH", "LINK": "ETH", "MKR": "ETH",
+    "COMP": "ETH", "SNX": "ETH", "CRV": "ETH", "BAL": "ETH",
+    "1INCH": "ETH", "SUSHI": "ETH", "YFI": "ETH", "LDO": "ETH",
+    "RPL": "ETH", "ENS": "ETH", "ARB": "ETH", "OP": "ETH",
+    "BLUR": "ETH", "PENDLE": "ETH", "EIGEN": "ETH", "ENA": "ETH",
+    "GRT": "ETH", "IMX": "ETH", "MANTA": "ETH", "STRK": "ETH",
+    "DYDX": "ETH", "MAGIC": "ETH", "RDNT": "ETH", "GMX": "ETH",
+    "WLD": "ETH", "PYUSD": "ETH",
+    # ── SOL 生態 ──
+    "SOL": "BTC",
+    "RAY": "SOL", "BONK": "SOL", "WIF": "SOL", "JUP": "SOL",
+    "PYTH": "SOL", "RNDR": "SOL", "RENDER": "SOL", "POPCAT": "SOL",
+    "JITO": "SOL", "DRIFT": "SOL", "MOODENG": "SOL", "PNUT": "SOL",
+    "MEW": "SOL", "BOME": "SOL", "SLND": "SOL", "FIDA": "SOL",
+    # ── BNB 生態 ──
+    "BNB": "BTC",
+    "CAKE": "BNB", "TWT": "BNB", "ID": "BNB", "HIGH": "BNB",
+    # ── AVAX 生態 ──
+    "AVAX": "BTC",
+    "JOE": "AVAX", "QI": "AVAX",
+    # ── SUI 生態 ──
+    "SUI": "BTC",
+    "NAVX": "SUI", "BUCK": "SUI",
+    # ── NEAR 生態 ──
+    "NEAR": "BTC",
+    "REF": "NEAR",
+    # ── TON 生態 ──
+    "TON": "BTC",
+    "NOT": "TON", "DOGS": "TON",
+    # ── 其他主鏈（直接參考 BTC）──
+    "XRP": "BTC", "ADA": "BTC", "DOT": "BTC", "ATOM": "BTC",
+    "MATIC": "BTC", "POL": "BTC", "FTM": "BTC", "ALGO": "BTC",
+    "ICP": "BTC", "FIL": "BTC", "APT": "BTC", "TRX": "BTC",
+    "HBAR": "BTC", "XLM": "BTC", "VET": "BTC", "EOS": "BTC",
+    "THETA": "BTC", "EGLD": "BTC", "FLOW": "BTC", "KSM": "BTC",
+}
+
 def get_higher_tf_ema89_slope(asset, current_bar):
     """取高一級時間框架的 EMA89 斜率：15M→1H，1H→4H，4H→1D。回傳正數=上行，負數=下行，None=取得失敗。"""
     htf_bar = _TF_HTF.get(current_bar.lower(), "1D") if current_bar.endswith("m") else \
@@ -405,7 +486,7 @@ def get_higher_tf_ema89_slope(asset, current_bar):
         return None
 
 
-def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr=0.0):
+def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0):
     bar_param = _TF_BAR.get(tf, "1H")
     url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={bar_param}&limit=100"
     try:
@@ -571,22 +652,25 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             # HTF 對齊確認 → 固定加分（已成為進場前提，不再是「可選加分項」）
             tf_note  = f" ✅{htf_bar}(ADX={htf_adx:.0f})"
 
-            # ⑤ BTC 作為風險指標（軟性評分，不硬擋——個幣主力策略優先）
-            #   BTC 逆向 = 市場整體風險偏高，降低分數；
-            #   BTC 同向 = 市場風險低，小幅加分；
-            #   個幣若有獨立主力推動，BTC 逆向仍可成立，因此不一刀切封掉。
+            # ⑤ 生態鏈參考幣作為風險指標（軟性評分，不硬擋——個幣主力策略優先）
+            #   查 _CHAIN_REF 找到此幣所屬的鏈（如 AAVE→ETH，RAY→SOL，未知→BTC）
+            #   參考鏈逆向 = 生態系統整體偏弱，扣分；同向 = 小幅加分
+            symbol   = asset.split('-')[0]
+            ref_coin = _CHAIN_REF.get(symbol, "BTC")
+            _rt      = (ref_trends or {}).get(ref_coin, "neutral")
+
             btc_bonus = 0
             btc_risk_note = ""
-            if btc_trend == "bear" and direction == "多":
-                btc_bonus    = -12
-                btc_risk_note = " ⚠️BTC偏空"
-            elif btc_trend == "bull" and direction == "空":
-                btc_bonus    = -12
-                btc_risk_note = " ⚠️BTC偏多"
-            elif btc_trend == "bull" and direction == "多":
-                btc_bonus    = +5
-            elif btc_trend == "bear" and direction == "空":
-                btc_bonus    = +5
+            if _rt == "bear" and direction == "多":
+                btc_bonus     = -12
+                btc_risk_note = f" ⚠️{ref_coin}偏空"
+            elif _rt == "bull" and direction == "空":
+                btc_bonus     = -12
+                btc_risk_note = f" ⚠️{ref_coin}偏多"
+            elif _rt == "bull" and direction == "多":
+                btc_bonus     = +5
+            elif _rt == "bear" and direction == "空":
+                btc_bonus     = +5
 
             # ⑥ 全市場資金費率過熱（軟性扣分，保留彈性）
             fr_bonus = 0
@@ -999,9 +1083,12 @@ def run_strategy_scan():
 
     # 市場環境指標（只取一次，傳給所有 worker）
     print("📡 獲取市場環境指標...")
-    btc_trend = get_btc_trend()
-    market_fr = get_market_avg_funding_rate()
-    print(f"   BTC趨勢: {btc_trend} | 市場費率均值: {market_fr*100:.4f}%")
+    with ThreadPoolExecutor(max_workers=2) as _env_ex:
+        _f_ref = _env_ex.submit(get_ecosystem_ref_trends)
+        _f_fr  = _env_ex.submit(get_market_avg_funding_rate)
+    ref_trends = _f_ref.result()
+    market_fr  = _f_fr.result()
+    print(f"   生態鏈趨勢: { {k: v for k, v in ref_trends.items()} } | 市場費率均值: {market_fr*100:.4f}%")
 
     all_signals = []
     tasks = [(asset, tf) for asset in all_assets for tf in ["15m", "30m", "1h", "4h", "1d"]]
@@ -1015,7 +1102,7 @@ def run_strategy_scan():
     def scan_task(asset, tf):
         max_lev = leverage_map.get(asset, 20)
         return fetch_candle_sync(asset, tf, max_leverage=max_lev,
-                                 btc_trend=btc_trend, market_fr=market_fr)
+                                 ref_trends=ref_trends, market_fr=market_fr)
 
     with ThreadPoolExecutor(max_workers=80) as executor:
         futures = {executor.submit(scan_task, asset, tf): (asset, tf) for asset, tf in tasks}
