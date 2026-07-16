@@ -450,7 +450,8 @@ def score_to_win_rate(score):
 
 def score_to_leverage(win_rate, max_leverage, signal_type='trend'):
     """依TA分取最大槓桿的比例，結果不超過交易所上限。
-    策略風險越高，比例上限越低：趨勢 100%，區間 50%，背離 35%。"""
+    底線 40%（BTC 100x = 40x）全幣種統一適用。
+    策略風險越高，上限越低：趨勢 100%，區間 60%，背離 50%。"""
     if win_rate >= 90:
         ratio = 1.00
     elif win_rate >= 85:
@@ -458,14 +459,14 @@ def score_to_leverage(win_rate, max_leverage, signal_type='trend'):
     elif win_rate >= 78:
         ratio = 0.60
     elif win_rate >= 68:
-        ratio = 0.40
+        ratio = 0.50
     else:
-        ratio = 0.20
-    # 策略風險壓制：區間/背離比趨勢單風險更高，槓桿上限更低
+        ratio = 0.40   # 底線 40%，全幣種適用
+    # 策略風險壓制（上限均 ≥ 40%，不低於底線）
     if signal_type == 'range':
-        ratio = min(ratio, 0.50)        # 區間單：最高 50% 交易所上限
+        ratio = min(ratio, 0.60)        # 區間單：最高 60% 交易所上限
     elif signal_type == 'divergence':
-        ratio = min(ratio, 0.35)        # 背離單：最高 35% 交易所上限（逆勢策略）
+        ratio = min(ratio, 0.50)        # 背離單：最高 50% 交易所上限（逆勢策略）
     lev = max(1, round(max_leverage * ratio))
     return f"{lev}x"
 
