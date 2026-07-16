@@ -244,6 +244,54 @@ def find_market_structure_levels(df, entry, direction, atr, n=2):
     return sl, tp1, tp2, tp3
 
 
+def find_range_bounds(df, n=2, tol=0.005, min_touches=2):
+    """
+    識別橫盤區間的支撐帶和壓力帶。
+    邏輯：偵測擺動高低點 → 聚類 → 計算收盤價觸及次數 → 需 min_touches 次才算確認。
+    回傳 (support_lo, support_hi, resist_lo, resist_hi) 或 (None, None, None, None)
+    """
+    lows   = df['low'].values
+    highs  = df['high'].values
+    closes = df['close'].values.astype(float)
+
+    swing_lows, swing_highs = [], []
+    for i in range(n, len(df) - n):
+        if lows[i] == min(lows[i - n:i + n + 1]):
+            swing_lows.append(float(lows[i]))
+        if highs[i] == max(highs[i - n:i + n + 1]):
+            swing_highs.append(float(highs[i]))
+
+    def cluster_and_count(levels):
+        if not levels:
+            return []
+        grouped = []
+        for lvl in sorted(levels):
+            if grouped and (lvl - grouped[-1]) / grouped[-1] < tol:
+                grouped[-1] = (grouped[-1] + lvl) / 2
+            else:
+                grouped.append(lvl)
+        result = []
+        for lvl in grouped:
+            touches = sum(1 for c in closes if abs(c - lvl) / lvl <= 0.005)
+            result.append((lvl, touches))
+        return result
+
+    sup_levels = [(lvl, cnt) for lvl, cnt in cluster_and_count(swing_lows)  if cnt >= min_touches]
+    res_levels = [(lvl, cnt) for lvl, cnt in cluster_and_count(swing_highs) if cnt >= min_touches]
+
+    price = float(closes[-1])
+    sup_below = [lvl for lvl, _ in sup_levels if lvl < price * 0.999]
+    res_above = [lvl for lvl, _ in res_levels if lvl > price * 1.001]
+
+    if not sup_below or not res_above:
+        return None, None, None, None
+
+    sup = max(sup_below)
+    res = min(res_above)
+
+    return sup * 0.997, sup * 1.003, res * 0.997, res * 1.003
+
+
 def get_candle_range_since(inst_id, since_ts, bar="1H", no_margin=False):
     """取得 since_ts 以來所有 K 線的最高價和最低價。
     用於偵測監控間隔中曾觸碰的價格極值，防止漏掉 TP/SL/填單事件。
@@ -897,6 +945,180 @@ def fetch_trend_state(inst_id, tf):
         return None
 
 
+def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0):
+    """
+    盤整區間反彈策略（ADX 15-28）。
+    觸及確認支撐帶 + RSI ≤ 45 + 下影線 → 做多；
+    觸及確認壓力帶 + RSI ≥ 55 + 上影線 → 做空。
+    SL/TP 以區間兩端為自然目標，不用 ATR 倍數。
+    """
+    bar_param = _TF_BAR.get(tf, "1H")
+    url = (f"{BASE_URL}/api/v5/market/candles"
+           f"?instId={asset}&bar={bar_param}&limit=100")
+    try:
+        res = requests.get(url, timeout=2.0).json()
+        if res.get('code') != '0' or len(res.get('data', [])) < 50:
+            return None
+
+        df = pd.DataFrame(res['data'],
+                          columns=['ts','open','high','low','close',
+                                   'vol','volCcy','volCcyQuote','state'])
+        for col in ['open','high','low','close','vol']:
+            df[col] = df[col].astype(float)
+        df = df.iloc[::-1].reset_index(drop=True)
+
+        # 計算指標
+        df['MA8']   = df['close'].rolling(8).mean()
+        df['EMA89'] = df['close'].ewm(span=89, adjust=False).mean()
+        delta = df['close'].diff()
+        gain  = delta.where(delta > 0, 0).rolling(14).mean()
+        loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        df['RSI'] = 100 - (100 / (1 + gain / (loss + 1e-10)))
+        df['H_L']  = df['high'] - df['low']
+        df['H_PC'] = (df['high'] - df['close'].shift(1)).abs()
+        df['L_PC'] = (df['low']  - df['close'].shift(1)).abs()
+        df['TR']   = df[['H_L','H_PC','L_PC']].max(axis=1)
+        df['ATR']  = df['TR'].rolling(14).mean()
+        pdm = df['high'].diff().clip(lower=0)
+        mdm = (-df['low'].diff()).clip(lower=0)
+        mask = pdm >= mdm
+        _pdm = pdm.where(mask, 0)
+        _mdm = mdm.where(~mask, 0)
+        atr_s = df['ATR'] + 1e-10
+        plus_di  = 100 * _pdm.rolling(14).mean() / atr_s
+        minus_di = 100 * _mdm.rolling(14).mean() / atr_s
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
+        df['ADX'] = dx.rolling(14).mean()
+
+        c      = df.iloc[-1]
+        c_prev = df.iloc[-2]   # 最後一根已完全收盤的 K 棒
+
+        price   = float(c['close'])
+        adx     = float(c['ADX'])
+        rsi     = float(c['RSI'])
+        atr     = float(c['ATR'])
+        avg_vol = float(df['vol'].iloc[-22:-2].mean())
+
+        # ① ADX 必須在盤整範圍（15-28）；太亂 < 15 不做，趨勢 > 28 改走趨勢策略
+        if adx < 15 or adx > 28:
+            return None
+
+        # ② 識別區間邊界（需多次觸及確認）
+        sup_lo, sup_hi, res_lo, res_hi = find_range_bounds(df)
+        if sup_lo is None:
+            return None
+
+        # ③ 區間寬度需有意義：至少 2×ATR，避免極窄震盪帶
+        if (res_lo - sup_hi) < atr * 2:
+            return None
+
+        # ④ 偵測前一根 K 棒的影線（已收盤，確認拒絕）
+        o_prev = float(c_prev['open'])
+        cl_prev = float(c_prev['close'])
+        h_prev = float(c_prev['high'])
+        l_prev = float(c_prev['low'])
+        body      = abs(cl_prev - o_prev)
+        upper_wk  = h_prev - max(cl_prev, o_prev)
+        lower_wk  = min(cl_prev, o_prev) - l_prev
+        min_body  = atr * 0.05  # 避免 body=0 除零
+
+        direction = None
+
+        # 做多條件：現價在支撐帶附近 + RSI ≤ 45 + 前一棒下影線 ≥ 1.2× 實體
+        near_sup = sup_lo <= price <= sup_hi * 1.008
+        if near_sup and rsi <= 45 and lower_wk >= max(body, min_body) * 1.2:
+            direction = "多"
+
+        # 做空條件：現價在壓力帶附近 + RSI ≥ 55 + 前一棒上影線 ≥ 1.2× 實體
+        near_res = res_lo * 0.992 <= price <= res_hi
+        if near_res and rsi >= 55 and upper_wk >= max(body, min_body) * 1.2 and direction is None:
+            direction = "空"
+
+        if direction is None:
+            return None
+
+        # ⑤ 成交量確認：反彈應量縮，放量 > 1.8× 均量代表可能突破，跳過
+        if float(c['vol']) > avg_vol * 1.8:
+            return None
+
+        # ⑥ 確認邊界未被有效突破（收盤未站穩區間外）
+        if direction == "多" and price < sup_lo * 0.997:
+            return None
+        if direction == "空" and price > res_hi * 1.003:
+            return None
+
+        # SL / TP（以區間兩端為自然目標）
+        midpoint = (sup_hi + res_lo) / 2
+        if direction == "多":
+            sl_price = sup_lo * 0.997
+            tp1      = midpoint
+            tp2      = res_lo
+            tp3      = res_hi
+        else:
+            sl_price = res_hi * 1.003
+            tp1      = midpoint
+            tp2      = sup_hi
+            tp3      = sup_lo
+
+        # 區間策略評分（與趨勢策略評分完全獨立）
+        if direction == "多":
+            rsi_score  = max(0, 45 - rsi) * 2          # RSI 越低越理想（最高 ~90分）
+        else:
+            rsi_score  = max(0, rsi - 55) * 2
+
+        wick_ratio = (lower_wk if direction == "多" else upper_wk) / max(body, min_body)
+        wick_score = min(20, wick_ratio * 8)            # 影線越長越確認拒絕
+
+        width_score = min(15, ((res_lo - sup_hi) / atr) * 3)  # 區間越寬 TP 空間越大
+
+        raw = rsi_score + wick_score + width_score
+
+        # 映射成技術分百分比（區間策略上限 80，保留與趨勢策略的差距）
+        win_rate = min(80, max(0, int(raw * 0.8)))
+        if win_rate < 60:
+            return None
+
+        leverage = score_to_leverage(win_rate, max_leverage)
+        tf_label = _TF_LABEL.get(tf, tf.upper())
+        dir_tag  = "支撐做多" if direction == "多" else "壓力做空"
+        tf_tag   = f"{tf_label}區間{dir_tag}"
+
+        if direction == "多":
+            entry_desc = (f"⚡ {tf_tag}  現價 {format_price(price)} 觸及支撐帶"
+                          f"[{format_price(sup_lo)}–{format_price(sup_hi)}]，"
+                          f"影線拒絕 RSI {rsi:.0f}，"
+                          f"止損 {format_price(sl_price)}，TP {format_price(tp1)} / {format_price(tp2)}")
+        else:
+            entry_desc = (f"⚡ {tf_tag}  現價 {format_price(price)} 觸及壓力帶"
+                          f"[{format_price(res_lo)}–{format_price(res_hi)}]，"
+                          f"影線拒絕 RSI {rsi:.0f}，"
+                          f"止損 {format_price(sl_price)}，TP {format_price(tp1)} / {format_price(tp2)}")
+
+        return {
+            "asset":        asset.split('-')[0],
+            "dir":          direction,
+            "leverage":     leverage,
+            "win_rate":     win_rate,
+            "tf":           tf_tag,
+            "order_type":   "區間反彈單",
+            "score":        raw,
+            "entry":        price,
+            "sl":           sl_price,
+            "tp1":          tp1,
+            "tp2":          tp2,
+            "tp3":          tp3,
+            "adx":          round(adx, 1),
+            "rsi":          round(rsi, 1),
+            "entry_type":   entry_desc,
+            "signal_price": price,
+            "signal_type":  "range",   # 區分趨勢單 / 區間單
+            "range_sup":    [sup_lo, sup_hi],
+            "range_res":    [res_lo, res_hi],
+        }
+    except Exception:
+        return None
+
+
 def fetch_near_miss_candidate(asset, tf, btc_trend="neutral", market_fr=0.0):
     """同 fetch_candle_sync 但追蹤各過濾器結果，回傳接近通過的訊號資訊"""
     bar_param = _TF_BAR.get(tf, "1H")
@@ -1098,7 +1320,8 @@ def run_strategy_scan():
     market_fr  = _f_fr.result()
     print(f"   生態鏈趨勢: { {k: v for k, v in ref_trends.items()} } | 市場費率均值: {market_fr*100:.4f}%")
 
-    all_signals = []
+    trend_signals = []
+    range_signals = []
     tasks = [(asset, tf) for asset in all_assets for tf in ["15m", "30m", "1h", "4h", "1d"]]
     total = len(tasks)
     completed = 0
@@ -1109,8 +1332,16 @@ def run_strategy_scan():
 
     def scan_task(asset, tf):
         max_lev = leverage_map.get(asset, 20)
-        return fetch_candle_sync(asset, tf, max_leverage=max_lev,
-                                 ref_trends=ref_trends, market_fr=market_fr)
+        results = []
+        t = fetch_candle_sync(asset, tf, max_leverage=max_lev,
+                              ref_trends=ref_trends, market_fr=market_fr)
+        if t:
+            results.append(('trend', t))
+        r = fetch_range_signal(asset, tf, max_leverage=max_lev,
+                               ref_trends=ref_trends, market_fr=market_fr)
+        if r:
+            results.append(('range', r))
+        return results
 
     with ThreadPoolExecutor(max_workers=80) as executor:
         futures = {executor.submit(scan_task, asset, tf): (asset, tf) for asset, tf in tasks}
@@ -1120,38 +1351,56 @@ def run_strategy_scan():
                 if completed % 100 == 0 or completed == total:
                     print(f"\r🔍 並行掃描進度：[{completed}/{total}]...", end="", flush=True)
             try:
-                res = future.result()
-                if res:
+                for sig_type, sig in (future.result() or []):
                     with lock:
-                        all_signals.append(res)
+                        if sig_type == 'trend':
+                            trend_signals.append(sig)
+                        else:
+                            range_signals.append(sig)
             except Exception:
                 pass
 
     elapsed = time.time() - scan_start
     print(f"\n✨ 全網掃描完畢！耗時：{elapsed:.1f} 秒（共 {len(all_assets)} 支幣種 × 5 時框）")
 
-    all_signals.sort(key=lambda x: x['score'], reverse=True)
+    # ── 趨勢訊號品質門檻（維持原有嚴格條件）──
+    trend_signals.sort(key=lambda x: x['score'], reverse=True)
+    trend_signals = [s for s in trend_signals
+                     if s['win_rate'] >= MIN_WIN_RATE and s['adx'] >= MIN_ADX]
 
-    # ── 品質門檻：勝率不足 MIN_WIN_RATE 或趨勢強度不足 MIN_ADX 的訊號不推播 ──
-    all_signals = [s for s in all_signals
-                   if s['win_rate'] >= MIN_WIN_RATE and s['adx'] >= MIN_ADX]
+    # ── 區間訊號品質門檻（ADX 15-28，技術分 ≥ 60）──
+    range_signals.sort(key=lambda x: x['score'], reverse=True)
+    range_signals = [s for s in range_signals if s['win_rate'] >= 60]
 
-    # ── 先鎖定全榜前 2，再從這 2 個裡排除衝突；不補位 ──
-    candidates = all_signals[:2]   # 只看第 1、第 2 名
+    print(f"   趨勢候選 {len(trend_signals)} 組 | 區間候選 {len(range_signals)} 組")
+
+    # ── 組合：趨勢前 2 + 區間前 1（最多 3 個訊號）──
+    # 趨勢訊號優先；相同幣種/方向只取一個；區間與趨勢可並存
+    combined = trend_signals[:2] + range_signals[:1]
 
     with active_positions_lock:
         busy_pairs = {(p['asset'], p['dir']) for p in active_positions}
     with watch_list_lock:
         watch_assets = {w['asset'] for w in watch_list}
 
+    # 去重：同幣種同方向只保留第一個（趨勢優先，已排在前面）
+    seen = set()
+    deduped = []
+    for s in combined:
+        key = (s['asset'], s['dir'])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(s)
+
     top_signals = [
-        s for s in candidates
-        if (s['asset'], s['dir']) not in busy_pairs   # 非同向持倉/掛單
-        and s['asset'] not in watch_assets             # 非自選監控
+        s for s in deduped
+        if (s['asset'], s['dir']) not in busy_pairs
+        and s['asset'] not in watch_assets
     ]
 
-    excluded = len(candidates) - len(top_signals)
-    print(f"📊 掃描結果：候選 {len(all_signals)} 組 → 前 2 名中排除 {excluded} 個衝突 → 推播 {len(top_signals)} 個")
+    excluded = len(deduped) - len(top_signals)
+    print(f"📊 掃描結果：趨勢 {len(trend_signals[:2])} + 區間 {len(range_signals[:1])} → "
+          f"排除衝突 {excluded} 個 → 推播 {len(top_signals)} 個")
     return top_signals
 
 # ==================== 📊 5. 持倉監控系統 ====================
