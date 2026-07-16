@@ -679,26 +679,30 @@ def fetch_trend_state(inst_id, tf):
         )
         passed = sum([adx_ok, vol_ok, slope_ok, no_div])
 
-        # 進場/止損點位
-        # SL 最低距離保護：防止 EMA89 離 MA8 極近（剛交叉）時 SL 過緊被正常波動掃掉
-        # 各時框最低保護距離（佔進場點百分比）：15m=0.5%、1H=0.8%、4H=1.5%、1D=2.5%
-        # bar_param 已由 _TF_BAR 轉換為大寫（"1H", "4H" 等），用它查表
-        _sl_min_pct = {"15m": 0.005, "30m": 0.006, "1H": 0.008,
-                       "4H": 0.015, "1D": 0.025}.get(bar_param, 0.008)
+        # ── 進場 / 止損 / 止盈（全部由策略指標推導，不用固定百分比）──
+        #
+        # 止損邏輯：
+        #   EMA89 是 MA8/EMA89 交叉策略的信號失效點（多頭收盤跌破 EMA89 = 趨勢不成立）
+        #   在 EMA89 外加 0.5×ATR 緩衝，避免一根 wick 誤觸但收盤不破的假止損
+        #
+        # 止盈邏輯（R 倍數框架）：
+        #   risk = 進場點(MA8) 到止損的距離 → 反映本次交易的真實風險
+        #   TP1 = entry + 1.5R  TP2 = entry + 2.5R  TP3 = entry + 4.0R
+        #   全部從進場點出發，保證 R:R 比例固定，且自動適應當前波動度
         if direction == "多":
             entry   = ma8
-            sl_raw  = min(ema89, ma8 - atr * 1.5)
-            sl      = min(sl_raw, entry * (1 - _sl_min_pct))   # 確保至少有 _sl_min_pct 距離
-            tp1     = price + atr * 1.5
-            tp2     = price + atr * 2.5
-            tp3     = price + atr * 4.0
+            sl      = ema89 - atr * 0.5          # EMA89 下方 0.5 ATR 緩衝
+            risk    = entry - sl                  # 每單位風險距離（正值）
+            tp1     = entry + risk * 1.5
+            tp2     = entry + risk * 2.5
+            tp3     = entry + risk * 4.0
         else:
             entry   = ma8
-            sl_raw  = max(ema89, ma8 + atr * 1.5)
-            sl      = max(sl_raw, entry * (1 + _sl_min_pct))   # 確保至少有 _sl_min_pct 距離
-            tp1     = price - atr * 1.5
-            tp2     = price - atr * 2.5
-            tp3     = price - atr * 4.0
+            sl      = ema89 + atr * 0.5          # EMA89 上方 0.5 ATR 緩衝
+            risk    = sl - entry                  # 每單位風險距離（正值）
+            tp1     = entry - risk * 1.5
+            tp2     = entry - risk * 2.5
+            tp3     = entry - risk * 4.0
 
         # 趨勢延續：MA8 > EMA89 已多根，價格是否回踩 MA8 附近（再入場機會）
         pullback_pct = abs(price - ma8) / ma8 * 100
@@ -2070,8 +2074,11 @@ def send_coin_analysis(asset_input, chat_id):
         if score >= 7:
             lines.append("🚀 <b>強烈多頭共識（四框一致向上）</b>")
             lines.append(f"  適合做多，1H限價掛 <b>{format_price(s1['ma8'])}</b>（MA8）")
-            sl = s1['ma8'] - s1['atr'] * 1.5
-            lines.append(f"  止損：<b>{format_price(sl)}</b>  TP參考：<b>{format_price(s1['ma8'] * 1.03)}</b> / <b>{format_price(s1['ma8'] * 1.06)}</b>")
+            _sl  = s1['ema89'] - s1['atr'] * 0.5
+            _r   = s1['ma8'] - _sl
+            _tp1 = s1['ma8'] + _r * 1.5
+            _tp2 = s1['ma8'] + _r * 2.5
+            lines.append(f"  止損：<b>{format_price(_sl)}</b>  TP1：<b>{format_price(_tp1)}</b> / TP2：<b>{format_price(_tp2)}</b>")
             lines.append(f"  轉空觀察：等1D MA8跌破EMA89 <b>{format_price(s1d['ema89'])}</b>")
 
         elif score >= 4:
@@ -2122,8 +2129,11 @@ def send_coin_analysis(asset_input, chat_id):
         else:  # score <= -7
             lines.append("📉 <b>強烈空頭共識（四框一致向下）</b>")
             lines.append(f"  適合做空，1H限價掛 <b>{format_price(s1['ma8'])}</b>（MA8）")
-            sl = s1['ma8'] + s1['atr'] * 1.5
-            lines.append(f"  止損：<b>{format_price(sl)}</b>  TP參考：<b>{format_price(s1['ma8'] * 0.97)}</b> / <b>{format_price(s1['ma8'] * 0.94)}</b>")
+            _sl  = s1['ema89'] + s1['atr'] * 0.5
+            _r   = _sl - s1['ma8']
+            _tp1 = s1['ma8'] - _r * 1.5
+            _tp2 = s1['ma8'] - _r * 2.5
+            lines.append(f"  止損：<b>{format_price(_sl)}</b>  TP1：<b>{format_price(_tp1)}</b> / TP2：<b>{format_price(_tp2)}</b>")
             lines.append(f"  轉多觀察：等1D MA8突破EMA89 <b>{format_price(s1d['ema89'])}</b>")
 
         return lines
@@ -2890,21 +2900,22 @@ def fetch_coin_status(inst_id, tf):
         slope_ok   = (direction == "多" and slope > 0) or (direction == "空" and slope < 0)
         no_div     = not ((direction == "多" and c['close'] > price_5ago and c['RSI'] < rsi_5ago) or
                           (direction == "空" and c['close'] < price_5ago and c['RSI'] > rsi_5ago))
-        if tf == "1h":
-            anchor = c['MA8'];   atr_m = 1.5; tp_m = (1.5, 3.0, 5.0)
-        else:
-            anchor = c['EMA89']; atr_m = 2.0; tp_m = (2.0, 4.0, 7.0)
         atr = c['ATR14']
+        # 與主掃描一致：進場=MA8，止損=EMA89±0.5ATR，TP 用 R 倍數從進場推算
         if direction == "多":
-            sl  = max(anchor - atr * atr_m, anchor * 0.96)
-            tp1 = anchor + atr * tp_m[0]
-            tp2 = anchor + atr * tp_m[1]
-            tp3 = anchor + atr * tp_m[2]
+            entry_p = c['MA8']
+            sl      = c['EMA89'] - atr * 0.5
+            risk    = entry_p - sl
+            tp1     = entry_p + risk * 1.5
+            tp2     = entry_p + risk * 2.5
+            tp3     = entry_p + risk * 4.0
         else:
-            sl  = min(anchor + atr * atr_m, anchor * 1.04)
-            tp1 = anchor - atr * tp_m[0]
-            tp2 = anchor - atr * tp_m[1]
-            tp3 = anchor - atr * tp_m[2]
+            entry_p = c['MA8']
+            sl      = c['EMA89'] + atr * 0.5
+            risk    = sl - entry_p
+            tp1     = entry_p - risk * 1.5
+            tp2     = entry_p - risk * 2.5
+            tp3     = entry_p - risk * 4.0
         passed = sum([adx_ok, vol_ok, slope_ok, no_div])
         return {
             'asset': inst_id.split('-')[0], 'dir': direction,
