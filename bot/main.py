@@ -162,7 +162,9 @@ def get_candle_range_since(inst_id, since_ts, bar="1H", no_margin=False):
                 df = df[df['ts'] >= since_ts]
             else:
                 # 包含 since_ts 之前 1 根 K 線（防止 TP/SL 事件在兩次監控間被漏掉）
-                margin = 900 if bar == "15m" else (3600 if bar == "1H" else 14400)
+                # margin = 各 bar 對應的一個週期長度（確保回看不超過一根 K 線）
+                _bar_secs = {"15m": 900, "30m": 1800, "1H": 3600, "4H": 14400, "1D": 86400}
+                margin = _bar_secs.get(bar, 3600)
                 df = df[df['ts'] >= since_ts - margin]
             if not df.empty:
                 return float(df['high'].max()), float(df['low'].min())
@@ -1245,7 +1247,9 @@ def analyze_position(pos):
             (dir == "空" and fill_eff_high >= entry)
         )
         if filled_by_candle:
-            pos['filled'] = True
+            pos['filled']          = True
+            pos['fill_ts']         = time.time()   # 記錄成交時間，供 TP/SL K 線範圍保護使用
+            pos['last_checked_ts'] = time.time()   # 防止下次監控 fallback 到 reported_at（進場前）
             if dir == "多":
                 extreme_str = f"（K線最低達 <code>{format_price(fill_eff_low)}</code>）"
             else:
@@ -1301,7 +1305,14 @@ def analyze_position(pos):
 
     # ── 已成交：取上次監控後的 K 線高低點（含 margin，防止 TP/SL 事件在監控間隔中被漏掉）──
     since_ts = pos.get('last_checked_ts', pos.get('reported_at', time.time() - 3600))
-    rng_high, rng_low = get_candle_range_since(inst_id, since_ts, bar)
+    fill_ts  = pos.get('fill_ts', 0)
+    # 在成交後的第一個 bar 週期內（fill_ts ~ fill_ts+bar_dur），強制使用 no_margin=True：
+    # 避免「進場那根 K 線」在成交前的 wick 被納入 TP/SL 判定，導致剛進場就誤觸 TP。
+    _bar_secs = {"15m": 900, "30m": 1800, "1H": 3600, "4H": 14400, "1D": 86400}
+    _bar_dur  = _bar_secs.get(bar, 3600)
+    _post_fill_guard = fill_ts > 0 and since_ts < fill_ts + _bar_dur
+    rng_high, rng_low = get_candle_range_since(inst_id, since_ts, bar,
+                                               no_margin=_post_fill_guard)
     effective_high = max(rng_high, current_price) if rng_high else current_price
     effective_low  = min(rng_low,  current_price) if rng_low  else current_price
     pos['last_checked_ts'] = time.time()
