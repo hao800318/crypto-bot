@@ -448,8 +448,9 @@ def score_to_win_rate(score):
     """將內部評分（0-130）映射為 50%–98% 勝率顯示"""
     return min(98, max(50, int(50 + (score / 130) * 48)))
 
-def score_to_leverage(win_rate, max_leverage):
-    """依勝率取最大槓桿的比例，結果不超過交易所上限"""
+def score_to_leverage(win_rate, max_leverage, signal_type='trend'):
+    """依TA分取最大槓桿的比例，結果不超過交易所上限。
+    策略風險越高，比例上限越低：趨勢 100%，區間 50%，背離 35%。"""
     if win_rate >= 90:
         ratio = 1.00
     elif win_rate >= 85:
@@ -460,6 +461,11 @@ def score_to_leverage(win_rate, max_leverage):
         ratio = 0.40
     else:
         ratio = 0.20
+    # 策略風險壓制：區間/背離比趨勢單風險更高，槓桿上限更低
+    if signal_type == 'range':
+        ratio = min(ratio, 0.50)        # 區間單：最高 50% 交易所上限
+    elif signal_type == 'divergence':
+        ratio = min(ratio, 0.35)        # 背離單：最高 35% 交易所上限（逆勢策略）
     lev = max(1, round(max_leverage * ratio))
     return f"{lev}x"
 
@@ -1078,7 +1084,7 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
         if win_rate < 60:
             return None
 
-        leverage = score_to_leverage(win_rate, max_leverage)
+        leverage = score_to_leverage(win_rate, max_leverage, signal_type='range')
         tf_label = _TF_LABEL.get(tf, tf.upper())
         dir_tag  = "支撐做多" if direction == "多" else "壓力做空"
         tf_tag   = f"{tf_label}區間{dir_tag}"
@@ -1291,7 +1297,7 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         if win_rate < 62:
             return None
 
-        leverage = score_to_leverage(win_rate, max_leverage)
+        leverage = score_to_leverage(win_rate, max_leverage, signal_type='divergence')
         tf_label = _TF_LABEL.get(tf, tf.upper())
         dir_tag  = "頂背離做空" if direction == "空" else "底背離做多"
         tf_tag   = f"{tf_label}{dir_tag}"
