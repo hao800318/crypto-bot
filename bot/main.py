@@ -1810,25 +1810,36 @@ def evaluate_pending_order(pos):
     hard_reasons = []
     soft_reasons = []
 
-    # ── 硬性撤單條件（任一成立 → 立即自動撤單）──
-    if st['dir'] != direction:
+    sig_type = pos.get('signal_type', 'trend')
+
+    # ── 硬性撤單條件 ──
+    # 趨勢訊號：MA方向必須一致，否則趨勢已反轉
+    # 區間/背離訊號：MA方向與訊號方向本就可能不一致，不能以此撤單
+    if sig_type == 'trend' and st['dir'] != direction:
         hard_reasons.append(f"MA8/EMA89方向已反轉（訊號{direction}，現{st['dir']}）")
 
     if st['adx'] < 15:
         hard_reasons.append(f"ADX={st['adx']:.1f} 趨勢已完全消失")
 
+    # 區間訊號：ADX 爆升超過35代表已突破區間，掛單失效
+    if sig_type == 'range' and st['adx'] > 35:
+        hard_reasons.append(f"ADX={st['adx']:.1f} 區間已被突破，不再適合區間反彈進場")
+
     # ── 軟性警訊（累積 ≥2 個 → 自動撤單）──
-    if 15 <= st['adx'] < 20:
-        soft_reasons.append(f"ADX={st['adx']:.1f} 趨勢偏弱")
+    # 僅趨勢訊號受 EMA89 斜率和量能影響；區間/背離訊號跳過
+    if sig_type == 'trend':
+        if 15 <= st['adx'] < 20:
+            soft_reasons.append(f"ADX={st['adx']:.1f} 趨勢偏弱")
 
-    if not st['filters']['slope_ok']:
-        soft_reasons.append("EMA89斜率不利")
+        if not st['filters']['slope_ok']:
+            soft_reasons.append("EMA89斜率不利")
 
-    if not st['filters']['no_div']:
+        if not st['filters']['vol_ok']:
+            soft_reasons.append(f"成交量萎縮至均量{st['vol_pct']}%")
+
+    # RSI背離：趨勢訊號視為警訊；背離訊號這本是觸發原因，無需檢查；區間訊號亦跳過
+    if sig_type == 'trend' and not st['filters']['no_div']:
         soft_reasons.append("RSI背離出現")
-
-    if not st['filters']['vol_ok']:
-        soft_reasons.append(f"成交量萎縮至均量{st['vol_pct']}%")
 
     try:
         btc_trend = get_btc_trend()
@@ -1961,11 +1972,13 @@ def analyze_position(pos):
             # 3. 正常等待中 → 自動評估訊號健康度，決定繼續等待或自動撤單
             eval_summary, eval_detail, auto_cancel = evaluate_pending_order(pos)
             gap_pct = abs(current_price - entry) / entry * 100
-            # gap_dir 顯示「價格需往哪個方向走才能到達進場點」
+            # gap_dir 顯示「價格需往哪個方向走才能到達成交條件」
+            # 依 fill 模式判斷，而非現價 vs entry 位置
+            _sp = pos.get('signal_price', entry)
             if dir == "多":
-                gap_dir = "↑" if current_price < entry else "↓"   # 突破多等漲 ↑，回調多等跌 ↓
+                gap_dir = "↑" if entry > _sp else "↓"   # 突破多（breakout）等漲 ↑，回調多等跌 ↓
             else:
-                gap_dir = "↓" if current_price > entry else "↑"   # 突破空等跌 ↓，回調空等漲 ↑
+                gap_dir = "↓" if entry < _sp else "↑"   # 突破空（breakout）等跌 ↓，回調空等漲 ↑
             gap_str = f"現價 <code>{format_price(current_price)}</code>，距進場點還差 {gap_pct:.2f}%{gap_dir}"
             if auto_cancel:
                 note = (f"🤖 市場條件失效，<b>系統自動撤單</b>\n"
@@ -2380,7 +2393,11 @@ def run_position_monitor():
                 gap = ""
                 if current_price:
                     gap_pct = abs(current_price - pos['entry']) / pos['entry'] * 100
-                    arrow = "↑" if (pos['dir'] == "空") else "↓"
+                    _sp_exp = pos.get('signal_price', pos['entry'])
+                    if pos['dir'] == "多":
+                        arrow = "↑" if pos['entry'] > _sp_exp else "↓"
+                    else:
+                        arrow = "↓" if pos['entry'] < _sp_exp else "↑"
                     gap = f"距進場點還差 {gap_pct:.2f}%{arrow}"
                 dir_tag = "🟢 <b>做多</b>" if pos['dir'] == "多" else "🔴 <b>做空</b>"
                 cancel_msg = (
