@@ -3149,7 +3149,9 @@ def send_holding_summary(chat_id):
             msg += f"{conclusion}\n"
         msg += "─────────────────────────\n"
 
-    msg += "<i>📌 /open ETH  確認開倉並加入監控\n🗑️ /close ETH  平倉後解除監控\n⚡ 警報僅在 TP/SL/市場惡化時推送</i>"
+    tracked = list(by_asset.keys())
+    _eg = tracked[0] if tracked else "ETH"
+    msg += f"<i>📌 /open {_eg}  確認開倉並加入監控\n🗑️ /close {_eg}  平倉後解除監控\n⚡ 警報僅在 TP/SL/市場惡化時推送</i>"
     # C. 快捷按鈕
     holding_markup = {"inline_keyboard": [[
         {"text": "🔄 重新掃描", "callback_data": "cmd_scan"},
@@ -3821,14 +3823,27 @@ def handle_telegram_updates():
                                             sig_cb = nm_cb
                                     if sig_cb and sig_cb.get('dir') == dir_cb:
                                         now_ts_cb = time.time()
+                                        _raw_entry = sig_cb['entry']
+                                        _sig_type  = sig_cb.get('signal_type', 'trend')
+                                        # 區間訊號：訊號在支撐/壓力帶觸發，價格立即反彈（或拒絕）
+                                        # → 使用「突破模式」fill（high≥entry 或 low≤entry）
+                                        #   避免「回調模式」讓正確反彈方向的倉位永遠無法確認成交
+                                        if _sig_type == 'range':
+                                            if dir_cb == "多":
+                                                _sp = _raw_entry * 0.997  # entry > signal_price → 突破多
+                                            else:
+                                                _sp = _raw_entry * 1.003  # entry < signal_price → 突破空
+                                        else:
+                                            _sp = sig_cb.get('price', _raw_entry)
                                         new_pos_cb = {
                                             'asset': sig_cb['asset'], 'dir': sig_cb['dir'],
-                                            'tf': sig_cb['tf'], 'entry': sig_cb['entry'],
+                                            'tf': sig_cb['tf'], 'entry': _raw_entry,
                                             'sl': sig_cb['sl'],
                                             'orig_sl': sig_cb['sl'],  # 原始止損，trail_dist 基準
                                             'tp1': sig_cb['tp1'],
                                             'tp2': sig_cb['tp2'], 'tp3': sig_cb['tp3'],
-                                            'signal_price':   sig_cb.get('price', sig_cb['entry']),
+                                            'signal_price':   _sp,
+                                            'signal_type':    _sig_type,
                                             'reported_at': now_ts_cb,
                                             'last_checked_ts': now_ts_cb,
                                             'filled': False,
