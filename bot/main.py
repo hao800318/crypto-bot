@@ -571,11 +571,22 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             # HTF 對齊確認 → 固定加分（已成為進場前提，不再是「可選加分項」）
             tf_note  = f" ✅{htf_bar}(ADX={htf_adx:.0f})"
 
-            # ⑤ BTC 大趨勢方向（硬擋：BTC 熊市不做多、BTC 牛市不做空）
+            # ⑤ BTC 作為風險指標（軟性評分，不硬擋——個幣主力策略優先）
+            #   BTC 逆向 = 市場整體風險偏高，降低分數；
+            #   BTC 同向 = 市場風險低，小幅加分；
+            #   個幣若有獨立主力推動，BTC 逆向仍可成立，因此不一刀切封掉。
+            btc_bonus = 0
+            btc_risk_note = ""
             if btc_trend == "bear" and direction == "多":
-                return None   # BTC 熊市不追多，逆大盤風險過高
-            if btc_trend == "bull" and direction == "空":
-                return None   # BTC 牛市不追空，逆大盤風險過高
+                btc_bonus    = -12
+                btc_risk_note = " ⚠️BTC偏空"
+            elif btc_trend == "bull" and direction == "空":
+                btc_bonus    = -12
+                btc_risk_note = " ⚠️BTC偏多"
+            elif btc_trend == "bull" and direction == "多":
+                btc_bonus    = +5
+            elif btc_trend == "bear" and direction == "空":
+                btc_bonus    = +5
 
             # ⑥ 全市場資金費率過熱（軟性扣分，保留彈性）
             fr_bonus = 0
@@ -586,7 +597,10 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
 
             sentiment_note, sentiment_bonus = build_sentiment_note(direction, funding_rate, ls_ratio)
 
-            score = base_score + sentiment_bonus + vol_bonus + fr_bonus
+            # 把 BTC 風險提示附加到時框標籤，讓訊號訊息直接可見
+            tf_note = tf_note + btc_risk_note
+
+            score = base_score + sentiment_bonus + vol_bonus + btc_bonus + fr_bonus
 
             win_rate = score_to_win_rate(score)
             leverage = score_to_leverage(win_rate, max_leverage)
