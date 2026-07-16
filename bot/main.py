@@ -1094,26 +1094,38 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
                           f"影線拒絕 RSI {rsi:.0f}，"
                           f"止損 {format_price(sl_price)}，TP {format_price(tp1)} / {format_price(tp2)}")
 
+        # 主力動向（輕量取得，用於推播顯示完整度）
+        try:
+            funding_rate_r, ls_ratio_r = get_market_sentiment(asset)
+        except Exception:
+            funding_rate_r, ls_ratio_r = 0.0, 1.0
+        sentiment_note_r, _ = build_sentiment_note(direction, funding_rate_r, ls_ratio_r)
+
         return {
-            "asset":        asset.split('-')[0],
-            "dir":          direction,
-            "leverage":     leverage,
-            "win_rate":     win_rate,
-            "tf":           tf_tag,
-            "order_type":   "區間反彈單",
-            "score":        raw,
-            "entry":        price,
-            "sl":           sl_price,
-            "tp1":          tp1,
-            "tp2":          tp2,
-            "tp3":          tp3,
-            "adx":          round(adx, 1),
-            "rsi":          round(rsi, 1),
-            "entry_type":   entry_desc,
-            "signal_price": price,
-            "signal_type":  "range",   # 區分趨勢單 / 區間單
-            "range_sup":    [sup_lo, sup_hi],
-            "range_res":    [res_lo, res_hi],
+            "asset":          asset.split('-')[0],
+            "dir":            direction,
+            "leverage":       leverage,
+            "win_rate":       win_rate,
+            "tf":             tf_tag,
+            "order_type":     "區間反彈單",
+            "score":          raw,
+            "entry":          price,
+            "sl":             sl_price,
+            "tp1":            tp1,
+            "tp2":            tp2,
+            "tp3":            tp3,
+            "adx":            round(adx, 1),
+            "rsi":            round(rsi, 1),
+            "entry_type":     entry_desc,
+            "signal_price":   price,
+            "signal_type":    "range",
+            "range_sup":      [sup_lo, sup_hi],
+            "range_res":      [res_lo, res_hi],
+            "sentiment_note": sentiment_note_r,
+            "ls_ratio":       ls_ratio_r,
+            "entry_fr":       round(funding_rate_r * 100, 4),
+            "vol_confirmed":  True,   # 已確認量縮（非放量突破）
+            "tf_note":        f"支撐[{format_price(sup_lo)}–{format_price(sup_hi)}]→壓力[{format_price(res_lo)}–{format_price(res_hi)}]",
         }
     except Exception:
         return None
@@ -1250,7 +1262,7 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             return None
 
         # ⑥ SL/TP 使用 K 線結構水位
-        sl_price, tp1, tp2, tp3 = find_market_structure_levels(df, direction, price, atr)
+        sl_price, tp1, tp2, tp3 = find_market_structure_levels(df, price, direction, atr)
 
         # ── 評分 ──
         # RSI 背離幅度（越大越確信）
@@ -1288,25 +1300,37 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
                       f"現價 {format_price(price)}  RSI {rsi:.0f}  ADX {adx:.0f}  "
                       f"止損 {format_price(sl_price)}  TP {format_price(tp1)} / {format_price(tp2)}")
 
+        # 主力動向（用於推播顯示完整度）
+        try:
+            funding_rate_d, ls_ratio_d = get_market_sentiment(asset)
+        except Exception:
+            funding_rate_d, ls_ratio_d = 0.0, 1.0
+        sentiment_note_d, _ = build_sentiment_note(direction, funding_rate_d, ls_ratio_d)
+
         return {
-            "asset":        asset.split('-')[0],
-            "dir":          direction,
-            "leverage":     leverage,
-            "win_rate":     win_rate,
-            "tf":           tf_tag,
-            "order_type":   "背離轉折單",
-            "score":        raw,
-            "entry":        price,
-            "sl":           sl_price,
-            "tp1":          tp1,
-            "tp2":          tp2,
-            "tp3":          tp3,
-            "adx":          round(adx, 1),
-            "rsi":          round(rsi, 1),
-            "entry_type":   entry_desc,
-            "signal_price": price,
-            "signal_type":  "divergence",
-            "div_desc":     div_desc,
+            "asset":          asset.split('-')[0],
+            "dir":            direction,
+            "leverage":       leverage,
+            "win_rate":       win_rate,
+            "tf":             tf_tag,
+            "order_type":     "背離轉折單",
+            "score":          raw,
+            "entry":          price,
+            "sl":             sl_price,
+            "tp1":            tp1,
+            "tp2":            tp2,
+            "tp3":            tp3,
+            "adx":            round(adx, 1),
+            "rsi":            round(rsi, 1),
+            "entry_type":     entry_desc,
+            "signal_price":   price,
+            "signal_type":    "divergence",
+            "div_desc":       div_desc,
+            "sentiment_note": sentiment_note_d,
+            "ls_ratio":       ls_ratio_d,
+            "entry_fr":       round(funding_rate_d * 100, 4),
+            "vol_confirmed":  True,
+            "tf_note":        div_desc,   # 背離描述作為 tf_note 備用
         }
     except Exception:
         return None
@@ -2915,9 +2939,21 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         html_message += (f"{medal} <b>{item['asset']}</b>  {dir_display}  "
                          f"⚡<b>{item['leverage']}</b>  {item['tf']}  "
                          f"<b>{win_rate}%</b> {stars}\n")
-        # ── 趨勢 + 主力 ──
-        tf_note_display = item.get('tf_note', '')
-        html_message += f"趨勢 {adx_bar} <b>{adx_level}</b>  {tf_note_display}  ｜  {sentiment_short}\n"
+        # ── 策略標籤 + 脈絡資訊（依訊號類型顯示不同內容）──
+        sig_type = item.get('signal_type', 'trend')
+        if sig_type == 'range':
+            ctx_label = "區間"
+            sup = item.get('range_sup', [0, 0])
+            res = item.get('range_res', [0, 0])
+            ctx_extra = (f"支撐[{format_price(sup[0])}–{format_price(sup[1])}]"
+                         f"→壓力[{format_price(res[0])}–{format_price(res[1])}]")
+        elif sig_type == 'divergence':
+            ctx_label = "背離"
+            ctx_extra = item.get('div_desc', '')
+        else:
+            ctx_label = "趨勢"
+            ctx_extra = item.get('tf_note', '')
+        html_message += f"{ctx_label} {adx_bar} <b>{adx_level}</b>  {ctx_extra}  ｜  {sentiment_short}\n"
         # ── 分隔 ──
         html_message += "┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         # ── 進場 / 止損 / TP（等寬對齊，CJK=2格 ASCII=1格，統一補至6格） ──
