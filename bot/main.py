@@ -314,26 +314,49 @@ def check_market_deterioration(inst_id, direction, tf):
     return None
 
 def get_higher_tf_alignment(asset, direction, higher_bar="4H"):
-    """檢查更高時框 MA8 vs EMA89 是否與訊號方向對齊
-       higher_bar: '4H'（給1H訊號用）或 '1D'（給4H訊號用）
+    """
+    檢查更高時框的趨勢狀態。
+    回傳 (aligned: bool, htf_adx: float)：
+      aligned  → HTF MA8/EMA89 方向是否與訊號方向一致
+      htf_adx  → HTF ADX 值（<25 = 大週期盤整，小週期交叉幾乎全是噪音）
+
+    若 API 失敗則回傳 (True, 30) 不懲罰，但不視作強確認。
     """
     try:
-        limit = 100 if higher_bar != "1D" else 100
-        url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={higher_bar}&limit={limit}"
+        url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={higher_bar}&limit=120"
         res = requests.get(url, timeout=3.0).json()
-        if res.get('code') == '0' and len(res['data']) >= 30:
-            df = pd.DataFrame(res['data'], columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
-            df['close'] = df['close'].astype(float)
+        if res.get('code') == '0' and len(res['data']) >= 50:
+            df = pd.DataFrame(res['data'],
+                              columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
+            for col in ['open','high','low','close']:
+                df[col] = df[col].astype(float)
             df = df.iloc[::-1].reset_index(drop=True)
             df['MA8']   = df['close'].rolling(8).mean()
             df['EMA89'] = df['close'].ewm(span=89, adjust=False).mean()
-            last = df.iloc[-1]
+
+            # ── ADX（14 週期）──
+            plus_dm  = df['high'].diff().clip(lower=0)
+            minus_dm = (-df['low'].diff()).clip(lower=0)
+            mask     = plus_dm >= minus_dm
+            pdm      = plus_dm.where(mask, 0)
+            mdm      = minus_dm.where(~mask, 0)
+            h_l      = df['high'] - df['low']
+            h_pc     = (df['high'] - df['close'].shift(1)).abs()
+            l_pc     = (df['low']  - df['close'].shift(1)).abs()
+            atr_h    = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1).rolling(14).mean() + 1e-10
+            plus_di  = 100 * pdm.rolling(14).mean() / atr_h
+            minus_di = 100 * mdm.rolling(14).mean() / atr_h
+            dx       = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
+            df['ADX'] = dx.rolling(14).mean()
+
+            last    = df.iloc[-1]
             aligned = (direction == "多" and last['MA8'] > last['EMA89']) or \
                       (direction == "空" and last['MA8'] < last['EMA89'])
-            return aligned
+            htf_adx = float(last['ADX']) if pd.notna(last['ADX']) else 0.0
+            return aligned, htf_adx
     except:
         pass
-    return True  # 無法取得時不懲罰
+    return True, 30.0  # API 失敗時：不懲罰，但標記為一般強度
 
 # ==================== ⚙️ 5. 同步 K 線與勝率量化評分核心 ====================
 def score_to_win_rate(score):
@@ -526,37 +549,44 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
             except Exception:
                 funding_rate, ls_ratio = 0.0, 1.0
             try:
-                aligned = _f_align.result(timeout=5)
+                aligned, htf_adx = _f_align.result(timeout=5)
             except Exception:
-                aligned = True  # 取得失敗時不懲罰
+                aligned, htf_adx = True, 30.0  # 取得失敗時不懲罰
 
-            sentiment_note, sentiment_bonus = build_sentiment_note(direction, funding_rate, ls_ratio)
+            # ──────────────────────────────────────────────────
+            # ④ 大週期趨勢硬性門檻（順趨勢做單核心邏輯）
+            #
+            # 規則 A：HTF 方向必須與訊號同向
+            #   若 4H（或 1D）MA8/EMA89 方向相反 → 訊號是在賭反轉點，直接丟棄。
+            #   例：4H 空頭 + 1H 多叉 = 1H 死貓彈，不做。
+            #
+            # 規則 B：HTF ADX 必須 ≥ 25（大週期有方向性）
+            #   若 HTF ADX < 25 → 大週期盤整，小週期任何交叉都是假突破，直接丟棄。
+            # ──────────────────────────────────────────────────
+            if not aligned:
+                return None   # 逆 HTF 趨勢，硬擋
+            if htf_adx < 25:
+                return None   # HTF 盤整期，交叉訊號可信度極低，硬擋
 
-            # ④ 多時框對齊結果
-            tf_bonus = 0
-            tf_note  = ""
-            if aligned:
-                tf_bonus = 20
-                tf_note  = f" ✅{htf_bar}對齊"
-            else:
-                tf_bonus = 0
-                tf_note  = f" ⚠️{htf_bar}逆向"
+            # HTF 對齊確認 → 固定加分（已成為進場前提，不再是「可選加分項」）
+            tf_note  = f" ✅{htf_bar}(ADX={htf_adx:.0f})"
 
-            # ⑤ BTC 方向過濾
-            btc_bonus = 0
+            # ⑤ BTC 大趨勢方向（硬擋：BTC 熊市不做多、BTC 牛市不做空）
             if btc_trend == "bear" and direction == "多":
-                btc_bonus = -15
-            elif btc_trend == "bull" and direction == "空":
-                btc_bonus = -15
+                return None   # BTC 熊市不追多，逆大盤風險過高
+            if btc_trend == "bull" and direction == "空":
+                return None   # BTC 牛市不追空，逆大盤風險過高
 
-            # ⑥ 全市場資金費率過熱
+            # ⑥ 全市場資金費率過熱（軟性扣分，保留彈性）
             fr_bonus = 0
             if market_fr > 0.0005 and direction == "多":
                 fr_bonus = -10   # 多頭過熱
             elif market_fr < -0.0003 and direction == "空":
                 fr_bonus = -10   # 空頭過熱
 
-            score = base_score + sentiment_bonus + vol_bonus + tf_bonus + btc_bonus + fr_bonus
+            sentiment_note, sentiment_bonus = build_sentiment_note(direction, funding_rate, ls_ratio)
+
+            score = base_score + sentiment_bonus + vol_bonus + fr_bonus
 
             win_rate = score_to_win_rate(score)
             leverage = score_to_leverage(win_rate, max_leverage)
@@ -577,73 +607,42 @@ def fetch_candle_sync(asset, tf, max_leverage=20, btc_trend="neutral", market_fr
                 order_type = "日線單"
                 tf_tag = f"1D日線{tf_note}"
 
-            # ── 錨定進場點 ──
-            if tf == "15m":
-                anchor_entry = current_ma8
-                anchor_label = f"MA8={format_price(current_ma8)}"
-                atr_mult = 1.2
-                tp_mults = (1.0, 2.0, 3.5)
-            elif tf == "30m":
-                anchor_entry = current_ma8
-                anchor_label = f"MA8={format_price(current_ma8)}"
-                atr_mult = 1.3
-                tp_mults = (1.2, 2.5, 4.0)
-            elif tf == "1h":
-                anchor_entry = current_ma8
-                anchor_label = f"MA8={format_price(current_ma8)}"
-                atr_mult = 1.5
-                tp_mults = (1.5, 3.0, 5.0)
-            elif tf == "4h":
-                anchor_entry = current_ema89
-                anchor_label = f"EMA89={format_price(current_ema89)}"
-                atr_mult = 2.0
-                tp_mults = (2.0, 4.0, 7.0)
-            else:  # 1d
-                anchor_entry = current_ema89
-                anchor_label = f"EMA89={format_price(current_ema89)}"
-                atr_mult = 3.0
-                tp_mults = (3.0, 6.0, 10.0)
+            # ── 進場錨定點（所有時框統一用 MA8，交叉當下的訊號線）──
+            entry_price  = current_ma8
+            anchor_label = f"MA8={format_price(current_ma8)}"
 
-            entry_price = anchor_entry
+            # ⑦ SL / TP：從 K 線擺動結構推導，不用固定倍數百分比
+            #   SL  = entry 方向後方最近支撐/壓力（跌破代表訊號失效）
+            #   TP1/2/3 = entry 方向前方歷史壓力/支撐，由近到遠
+            #   找不到足夠水位時以 ATR 補全，保證永遠回傳有效數值
+            sl_price, tp1, tp2, tp3 = find_market_structure_levels(
+                df, entry_price, direction, current_atr)
 
-            # ⑦ ATR 動態止損 + 止盈（全部用 ATR 倍數，波動大時目標自動拉寬）
-            atr_sl_dist = current_atr * atr_mult
+            # ── 進場建議文字（依現價與進場點的偏離程度給出建議）──
             if direction == "多":
-                sl_price = max(entry_price - atr_sl_dist, entry_price * 0.96)
-                tp1 = entry_price + current_atr * tp_mults[0]
-                tp2 = entry_price + current_atr * tp_mults[1]
-                tp3 = entry_price + current_atr * tp_mults[2]
-                gap_pct = (current_price - entry_price) / entry_price * 100  # 正=現價在進場點上方
+                gap_pct = (current_price - entry_price) / entry_price * 100
                 if current_rsi > 65:
-                    entry_type = f"⚠️ {tf_tag}RSI過熱({current_rsi:.1f})，掛限價等回踩 {anchor_label}"
+                    entry_type = f"⚠️ {tf_tag}RSI過熱({current_rsi:.1f})，宜等回踩支撐後再掛限價 {anchor_label}"
                 elif current_price < entry_price:
-                    # 現價已低於進場點（MA8）→ 若未開單可市價進入
-                    entry_type = (f"🔴 {tf_tag}現價 {format_price(current_price)} 已低於進場點 {anchor_label}，"
-                                  f"偏離 {abs(gap_pct):.2f}%｜<b>若未開單，可考慮市價進場</b>")
+                    entry_type = (f"🔴 {tf_tag}現價 {format_price(current_price)} 低於 {anchor_label}，"
+                                  f"偏離 {abs(gap_pct):.2f}%｜確認大週期趨勢仍多，可市價進場")
                 elif gap_pct <= 0.5:
-                    # 現價緊貼進場點（≤0.5%）→ 建議市價或快速限價
-                    entry_type = (f"⚡ {tf_tag}現價緊貼進場點 {anchor_label}（差 {gap_pct:.2f}%），"
+                    entry_type = (f"⚡ {tf_tag}現價緊貼 {anchor_label}（差 {gap_pct:.2f}%），"
                                   f"建議<b>市價進場</b>或快速掛限價 {format_price(entry_price)}")
                 else:
-                    entry_type = f"📌 {tf_tag}掛限價 {anchor_label}，ATR止損={format_price(sl_price)}"
+                    entry_type = f"📌 {tf_tag}掛限價 {anchor_label}，止損={format_price(sl_price)}"
             else:
-                sl_price = min(entry_price + atr_sl_dist, entry_price * 1.04)
-                tp1 = entry_price - current_atr * tp_mults[0]
-                tp2 = entry_price - current_atr * tp_mults[1]
-                tp3 = entry_price - current_atr * tp_mults[2]
-                gap_pct = (entry_price - current_price) / entry_price * 100  # 正=現價在進場點下方
+                gap_pct = (entry_price - current_price) / entry_price * 100
                 if current_rsi < 35:
-                    entry_type = f"⚠️ {tf_tag}RSI超賣({current_rsi:.1f})，掛限價等反彈至 {anchor_label}"
+                    entry_type = f"⚠️ {tf_tag}RSI超賣({current_rsi:.1f})，宜等反彈至壓力後再掛限價 {anchor_label}"
                 elif current_price > entry_price:
-                    # 現價已高於進場點（MA8）→ 若未開單可市價進入
-                    entry_type = (f"🔴 {tf_tag}現價 {format_price(current_price)} 已高於進場點 {anchor_label}，"
-                                  f"偏離 {abs(gap_pct):.2f}%｜<b>若未開單，可考慮市價進場</b>")
+                    entry_type = (f"🔴 {tf_tag}現價 {format_price(current_price)} 高於 {anchor_label}，"
+                                  f"偏離 {abs(gap_pct):.2f}%｜確認大週期趨勢仍空，可市價進場")
                 elif gap_pct <= 0.5:
-                    # 現價緊貼進場點（≤0.5%）→ 建議市價或快速限價
-                    entry_type = (f"⚡ {tf_tag}現價緊貼進場點 {anchor_label}（差 {gap_pct:.2f}%），"
+                    entry_type = (f"⚡ {tf_tag}現價緊貼 {anchor_label}（差 {gap_pct:.2f}%），"
                                   f"建議<b>市價進場</b>或快速掛限價 {format_price(entry_price)}")
                 else:
-                    entry_type = f"📌 {tf_tag}掛限價 {anchor_label}，ATR止損={format_price(sl_price)}"
+                    entry_type = f"📌 {tf_tag}掛限價 {anchor_label}，止損={format_price(sl_price)}"
 
             return {
                 "asset":          asset.split('-')[0],
