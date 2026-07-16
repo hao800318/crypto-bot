@@ -1240,20 +1240,42 @@ def analyze_position(pos):
     if not pos.get('filled', False):
         reported_at   = pos.get('reported_at', time.time())
         fill_high, fill_low = get_candle_range_since(inst_id, reported_at, bar, no_margin=True)
-        fill_eff_high = max(fill_high, current_price) if fill_high else current_price
-        fill_eff_low  = min(fill_low,  current_price) if fill_low  else current_price
-        filled_by_candle = (
-            (dir == "多" and fill_eff_low  <= entry) or
-            (dir == "空" and fill_eff_high >= entry)
-        )
+        # 不把 current_price 納入 fill_eff：僅用 K 棒極值做填單判斷
+        # 避免「現價本身就已在進場點另一側」時瞬間誤判已成交
+        fill_eff_high = fill_high  # 純 K 棒最高點
+        fill_eff_low  = fill_low   # 純 K 棒最低點
+
+        # 填單方向判斷：依「訊號時現價 vs 進場點」區分突破 / 回調類型
+        #   多頭突破（進場 > signal_price）→ 等價格「漲」到進場：high ≥ entry
+        #   多頭回調（進場 ≤ signal_price）→ 等價格「跌」到進場：low  ≤ entry
+        #   空頭突破（進場 < signal_price）→ 等價格「跌」到進場：low  ≤ entry
+        #   空頭回調（進場 ≥ signal_price）→ 等價格「漲」到進場：high ≥ entry
+        signal_price = pos.get('signal_price', entry)  # 無記錄時 fallback = entry（視為回調）
+        if dir == "多":
+            if entry > signal_price:   # 突破多：等高點達到進場
+                filled_by_candle = fill_eff_high is not None and fill_eff_high >= entry
+            else:                      # 回調多：等低點跌到進場
+                filled_by_candle = fill_eff_low  is not None and fill_eff_low  <= entry
+        else:  # 空
+            if entry < signal_price:   # 突破空：等低點跌到進場
+                filled_by_candle = fill_eff_low  is not None and fill_eff_low  <= entry
+            else:                      # 回調空：等高點漲到進場
+                filled_by_candle = fill_eff_high is not None and fill_eff_high >= entry
         if filled_by_candle:
             pos['filled']          = True
             pos['fill_ts']         = time.time()   # 記錄成交時間，供 TP/SL K 線範圍保護使用
             pos['last_checked_ts'] = time.time()   # 防止下次監控 fallback 到 reported_at（進場前）
+            # 進場確認訊息：突破多/空頭顯示突破的高/低點，回調多/空頭顯示回落的低/高點
             if dir == "多":
-                extreme_str = f"（K線最低達 <code>{format_price(fill_eff_low)}</code>）"
+                if entry > signal_price:   # 突破進場 → 顯示高點
+                    extreme_str = f"（K線最高達 <code>{format_price(fill_eff_high)}</code>）"
+                else:                      # 回調進場 → 顯示低點
+                    extreme_str = f"（K線最低達 <code>{format_price(fill_eff_low)}</code>）"
             else:
-                extreme_str = f"（K線最高達 <code>{format_price(fill_eff_high)}</code>）"
+                if entry < signal_price:   # 突破進場 → 顯示低點
+                    extreme_str = f"（K線最低達 <code>{format_price(fill_eff_low)}</code>）"
+                else:                      # 回調進場 → 顯示高點
+                    extreme_str = f"（K線最高達 <code>{format_price(fill_eff_high)}</code>）"
             print(f"✅ {pos['asset']} {dir}單：K線已穿越進場點 {format_price(entry)}，開始監控 TP/SL")
             action = (f"🎯 K線已穿越進場點 <code>{format_price(entry)}</code>{extreme_str}\n"
                       f"現價 <code>{format_price(current_price)}</code>\n"
@@ -1262,9 +1284,12 @@ def analyze_position(pos):
         else:
             # ── 掛單尚未成交 ──
             # 1. 止損點已被突破 → 訊號作廢，自動取消
+            # SL breach 使用 current_price（進場前現價直接穿越止損即作廢）
+            sl_eff_low  = min(fill_eff_low,  current_price) if fill_eff_low  is not None else current_price
+            sl_eff_high = max(fill_eff_high, current_price) if fill_eff_high is not None else current_price
             sl_breached = (
-                (dir == "多" and fill_eff_low  <= sl) or
-                (dir == "空" and fill_eff_high >= sl)
+                (dir == "多" and sl_eff_low  <= sl) or
+                (dir == "空" and sl_eff_high >= sl)
             )
             if sl_breached:
                 note = (f"⛔ 現價 {format_price(current_price)} 已突破止損位 {format_price(sl)}，"
@@ -2577,6 +2602,7 @@ def handle_open_command(text, chat_id):
         'tp1':             tp1,
         'tp2':             tp2,
         'tp3':             tp3,
+        'signal_price':    best.get('price', entry),  # 訊號產生時的市價，用於填單方向判斷
         'reported_at':     now_ts,
         'last_checked_ts': now_ts,
         'filled':          False,
@@ -3132,6 +3158,7 @@ def handle_telegram_updates():
                                             'tf': sig_cb['tf'], 'entry': sig_cb['entry'],
                                             'sl': sig_cb['sl'], 'tp1': sig_cb['tp1'],
                                             'tp2': sig_cb['tp2'], 'tp3': sig_cb['tp3'],
+                                            'signal_price':   sig_cb.get('price', sig_cb['entry']),
                                             'reported_at': now_ts_cb,
                                             'last_checked_ts': now_ts_cb,
                                             'filled': False,
