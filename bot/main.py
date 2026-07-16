@@ -1119,6 +1119,199 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
         return None
 
 
+def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0):
+    """
+    量價背離轉折訊號（ADX 20-40，趨勢末段捕捉反轉）。
+
+    頂背離（做空）：近期出現更高高點，但 RSI 創低 + 量縮 + 前一棒上影線
+    底背離（做多）：近期出現更低低點，但 RSI 創高 + 量縮 + 前一棒下影線
+
+    進場時機比 MA 交叉早 3-8 根，止損以最近結構高/低點為準。
+    """
+    bar_param = _TF_BAR.get(tf, "1H")
+    url = (f"{BASE_URL}/api/v5/market/candles"
+           f"?instId={asset}&bar={bar_param}&limit=100")
+    try:
+        res = requests.get(url, timeout=2.0).json()
+        if res.get('code') != '0' or len(res.get('data', [])) < 60:
+            return None
+
+        df = pd.DataFrame(res['data'],
+                          columns=['ts','open','high','low','close',
+                                   'vol','volCcy','volCcyQuote','state'])
+        for col in ['open','high','low','close','vol']:
+            df[col] = df[col].astype(float)
+        df = df.iloc[::-1].reset_index(drop=True)
+
+        # 指標計算
+        df['EMA89'] = df['close'].ewm(span=89, adjust=False).mean()
+        df['MA8']   = df['close'].rolling(8).mean()
+        delta = df['close'].diff()
+        gain  = delta.where(delta > 0, 0).rolling(14).mean()
+        loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        df['RSI'] = 100 - (100 / (1 + gain / (loss + 1e-10)))
+        df['H_L']  = df['high'] - df['low']
+        df['H_PC'] = (df['high'] - df['close'].shift(1)).abs()
+        df['L_PC'] = (df['low']  - df['close'].shift(1)).abs()
+        df['TR']   = df[['H_L','H_PC','L_PC']].max(axis=1)
+        df['ATR']  = df['TR'].rolling(14).mean()
+        pdm = df['high'].diff().clip(lower=0)
+        mdm = (-df['low'].diff()).clip(lower=0)
+        mask = pdm >= mdm
+        _pdm = pdm.where(mask, 0)
+        _mdm = mdm.where(~mask, 0)
+        atr_s = df['ATR'] + 1e-10
+        plus_di  = 100 * _pdm.rolling(14).mean() / atr_s
+        minus_di = 100 * _mdm.rolling(14).mean() / atr_s
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
+        df['ADX'] = dx.rolling(14).mean()
+
+        c      = df.iloc[-1]
+        c_prev = df.iloc[-2]   # 最後一根已收盤 K 棒
+
+        price   = float(c['close'])
+        adx     = float(c['ADX'])
+        rsi     = float(c['RSI'])
+        atr     = float(c['ATR'])
+        ema89   = float(c['EMA89'])
+        avg_vol = float(df['vol'].iloc[-22:-2].mean())
+
+        # ① ADX 20-40：趨勢末段；太弱（盤整）由區間策略處理，太強（趨勢中）由趨勢策略處理
+        if adx < 20 or adx > 40:
+            return None
+
+        # ② 找最近兩個擺動高點 / 兩個擺動低點（在最近 40 根裡，n=2 側翼確認）
+        n = 2
+        lookback_start = max(0, len(df) - 42)
+        highs_arr = df['high'].values
+        lows_arr  = df['low'].values
+        rsis_arr  = df['RSI'].values
+        vols_arr  = df['vol'].values
+
+        swing_highs_list = []   # [(idx, price, rsi, vol)]
+        swing_lows_list  = []
+        for i in range(lookback_start + n, len(df) - n - 1):
+            if highs_arr[i] == max(highs_arr[i-n:i+n+1]):
+                swing_highs_list.append((i, float(highs_arr[i]),
+                                         float(rsis_arr[i]), float(vols_arr[i])))
+            if lows_arr[i] == min(lows_arr[i-n:i+n+1]):
+                swing_lows_list.append((i, float(lows_arr[i]),
+                                        float(rsis_arr[i]), float(vols_arr[i])))
+
+        # 取最近兩個擺動點
+        sh = swing_highs_list[-2:] if len(swing_highs_list) >= 2 else []
+        sl_pts = swing_lows_list[-2:] if len(swing_lows_list) >= 2 else []
+
+        direction = None
+        div_desc  = ""
+
+        # ③-A 頂背離：新高 > 舊高，但 RSI 新高 < RSI 舊高，且量縮
+        if sh:
+            old_h, new_h = sh[0], sh[1]
+            price_higher = new_h[1] > old_h[1] * 1.002          # 價格確實更高
+            rsi_lower    = new_h[2] < old_h[2] - 2.0            # RSI 卻更低（背離至少 2pt）
+            vol_shrink   = new_h[3] < old_h[3] * 0.92           # 量縮 8% 以上
+            if price_higher and rsi_lower and vol_shrink:
+                direction = "空"
+                div_desc  = (f"頂背離：前高 {old_h[1]:.4g}(RSI {old_h[2]:.0f}) → "
+                             f"新高 {new_h[1]:.4g}(RSI {new_h[2]:.0f})，量縮 {(1-new_h[3]/old_h[3])*100:.0f}%")
+
+        # ③-B 底背離：新低 < 舊低，但 RSI 新低 > RSI 舊低，且量縮
+        if sl_pts and direction is None:
+            old_l, new_l = sl_pts[0], sl_pts[1]
+            price_lower  = new_l[1] < old_l[1] * 0.998
+            rsi_higher   = new_l[2] > old_l[2] + 2.0
+            vol_shrink   = new_l[3] < old_l[3] * 0.92
+            if price_lower and rsi_higher and vol_shrink:
+                direction = "多"
+                div_desc  = (f"底背離：前低 {old_l[1]:.4g}(RSI {old_l[2]:.0f}) → "
+                             f"新低 {new_l[1]:.4g}(RSI {new_l[2]:.0f})，量縮 {(1-new_l[3]/old_l[3])*100:.0f}%")
+
+        if direction is None:
+            return None
+
+        # ④ 前一根 K 棒需有拒絕影線（確認賣/買盤確實退縮）
+        o_p  = float(c_prev['open'])
+        cl_p = float(c_prev['close'])
+        h_p  = float(c_prev['high'])
+        l_p  = float(c_prev['low'])
+        body     = abs(cl_p - o_p)
+        upper_wk = h_p - max(cl_p, o_p)
+        lower_wk = min(cl_p, o_p) - l_p
+        min_body = atr * 0.05
+
+        if direction == "空" and upper_wk < max(body, min_body) * 0.8:
+            return None   # 頂背離需有上影線
+        if direction == "多" and lower_wk < max(body, min_body) * 0.8:
+            return None   # 底背離需有下影線
+
+        # ⑤ 成交量確認：當前量不應放量（放量 = 突破，不是反轉）
+        if float(c['vol']) > avg_vol * 1.8:
+            return None
+
+        # ⑥ SL/TP 使用 K 線結構水位
+        sl_price, tp1, tp2, tp3 = find_market_structure_levels(df, direction, price, atr)
+
+        # ── 評分 ──
+        # RSI 背離幅度（越大越確信）
+        if direction == "空" and sh:
+            rsi_gap = old_h[2] - new_h[2]     # 舊高RSI - 新高RSI，越正越好
+        elif direction == "多" and sl_pts:
+            rsi_gap = new_l[2] - old_l[2]     # 新低RSI - 舊低RSI，越正越好
+        else:
+            rsi_gap = 0
+        rsi_score = min(40, rsi_gap * 2)
+
+        # 影線分數
+        wick = (upper_wk if direction == "空" else lower_wk)
+        wick_score = min(20, (wick / max(body, min_body)) * 8)
+
+        # RSI 極端位置加分（背離時 RSI 已在極端區間更可靠）
+        if direction == "空":
+            extreme_score = max(0, rsi - 60) * 0.8
+        else:
+            extreme_score = max(0, 40 - rsi) * 0.8
+
+        raw = rsi_score + wick_score + extreme_score
+
+        # 映射（背離策略上限 82）
+        win_rate = min(82, max(0, int(raw * 0.9)))
+        if win_rate < 62:
+            return None
+
+        leverage = score_to_leverage(win_rate, max_leverage)
+        tf_label = _TF_LABEL.get(tf, tf.upper())
+        dir_tag  = "頂背離做空" if direction == "空" else "底背離做多"
+        tf_tag   = f"{tf_label}{dir_tag}"
+
+        entry_desc = (f"⚡ {tf_tag}  {div_desc}  |  "
+                      f"現價 {format_price(price)}  RSI {rsi:.0f}  ADX {adx:.0f}  "
+                      f"止損 {format_price(sl_price)}  TP {format_price(tp1)} / {format_price(tp2)}")
+
+        return {
+            "asset":        asset.split('-')[0],
+            "dir":          direction,
+            "leverage":     leverage,
+            "win_rate":     win_rate,
+            "tf":           tf_tag,
+            "order_type":   "背離轉折單",
+            "score":        raw,
+            "entry":        price,
+            "sl":           sl_price,
+            "tp1":          tp1,
+            "tp2":          tp2,
+            "tp3":          tp3,
+            "adx":          round(adx, 1),
+            "rsi":          round(rsi, 1),
+            "entry_type":   entry_desc,
+            "signal_price": price,
+            "signal_type":  "divergence",
+            "div_desc":     div_desc,
+        }
+    except Exception:
+        return None
+
+
 def fetch_near_miss_candidate(asset, tf, btc_trend="neutral", market_fr=0.0):
     """同 fetch_candle_sync 但追蹤各過濾器結果，回傳接近通過的訊號資訊"""
     bar_param = _TF_BAR.get(tf, "1H")
@@ -1322,6 +1515,7 @@ def run_strategy_scan():
 
     trend_signals = []
     range_signals = []
+    div_signals   = []
     tasks = [(asset, tf) for asset in all_assets for tf in ["15m", "30m", "1h", "4h", "1d"]]
     total = len(tasks)
     completed = 0
@@ -1341,6 +1535,10 @@ def run_strategy_scan():
                                ref_trends=ref_trends, market_fr=market_fr)
         if r:
             results.append(('range', r))
+        d = fetch_divergence_signal(asset, tf, max_leverage=max_lev,
+                                    ref_trends=ref_trends, market_fr=market_fr)
+        if d:
+            results.append(('divergence', d))
         return results
 
     with ThreadPoolExecutor(max_workers=80) as executor:
@@ -1355,8 +1553,10 @@ def run_strategy_scan():
                     with lock:
                         if sig_type == 'trend':
                             trend_signals.append(sig)
-                        else:
+                        elif sig_type == 'range':
                             range_signals.append(sig)
+                        else:
+                            div_signals.append(sig)
             except Exception:
                 pass
 
@@ -1372,11 +1572,15 @@ def run_strategy_scan():
     range_signals.sort(key=lambda x: x['score'], reverse=True)
     range_signals = [s for s in range_signals if s['win_rate'] >= 60]
 
-    print(f"   趨勢候選 {len(trend_signals)} 組 | 區間候選 {len(range_signals)} 組")
+    # ── 背離訊號品質門檻（ADX 20-40，技術分 ≥ 62）──
+    div_signals.sort(key=lambda x: x['score'], reverse=True)
+    div_signals = [s for s in div_signals if s['win_rate'] >= 62]
 
-    # ── 組合：趨勢前 2 + 區間前 1（最多 3 個訊號）──
-    # 趨勢訊號優先；相同幣種/方向只取一個；區間與趨勢可並存
-    combined = trend_signals[:2] + range_signals[:1]
+    print(f"   趨勢候選 {len(trend_signals)} 組 | 區間候選 {len(range_signals)} 組 | 背離候選 {len(div_signals)} 組")
+
+    # ── 組合：趨勢前 2 + 區間前 1 + 背離前 1（最多 4 個，去重後通常 2-3 個）──
+    # 優先順序：趨勢 > 背離 > 區間（趨勢確定性最高，背離早進場，區間橫盤補位）
+    combined = trend_signals[:2] + div_signals[:1] + range_signals[:1]
 
     with active_positions_lock:
         busy_pairs = {(p['asset'], p['dir']) for p in active_positions}
