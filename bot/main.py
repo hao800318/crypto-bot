@@ -1321,6 +1321,11 @@ def analyze_position(pos):
     elif oi_change > 5:
         whale_warn += f"\n📈 OI 上升 {oi_change:.1f}%，主力持續加倉，<b>可繼續持倉並同步上移止損鎖利</b>"
 
+    # TP 確認緩衝：要求超過 TP 0.05% 才算達標，避免 1-pip wick 誤觸
+    # SL 不加緩衝（止損要快，只要 wick 碰到就觸發）
+    TP_CONFIRM = 1.0005   # 多頭 TP：effective_high >= tp * TP_CONFIRM
+                          # 空頭 TP：effective_low  <= tp / TP_CONFIRM
+
     # ── 持倉狀態判定（用 K 線高低點而非現價，防止監控間隔中的事件被漏掉）──
     if dir == "多":
         dist_to_sl_pct = (current_price - sl) / entry * 100
@@ -1345,13 +1350,13 @@ def analyze_position(pos):
                 action = (f"⛔ K線低點 <code>{format_price(effective_low)}</code> 已觸及止損位 <code>{format_price(sl)}</code>，"
                           f"現價 <code>{format_price(current_price)}</code>｜<b>建議立即平倉</b>")
             push = True
-        # 止盈：用 K 線高點（只要高點碰過 TP 就算達標）
-        elif effective_high >= tp3:
+        # 止盈：用 K 線高點 + 0.05% 確認緩衝（防止 1-pip wick 誤觸）
+        elif effective_high >= tp3 * TP_CONFIRM:
             status = "🟣 全部止盈"
             action = (f"🎯 K線高點 {format_price(effective_high)} 已達止盈3 {format_price(tp3)}，"
                       f"現價 {format_price(current_price)}")
             push = True
-        elif effective_high >= tp2:
+        elif effective_high >= tp2 * TP_CONFIRM:
             if pos.get('tp2_hit'):
                 # TP2 已完成，追蹤止損繼續鎖利剩餘 20%
                 trail_dist = pos.get('trail_dist', entry * 0.015)
@@ -1376,7 +1381,7 @@ def analyze_position(pos):
                 action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈2 {format_price(tp2)}，"
                           f"現價 {format_price(current_price)}｜<b>建議將止損上移至TP1（<code>{format_price(tp1)}</code>）</b>")
                 push = True
-        elif effective_high >= tp1:
+        elif effective_high >= tp1 * TP_CONFIRM:
             if pos.get('tp1_hit'):
                 # 追蹤止損：TP1 後每次監控都把 SL 往上拉緊鎖利
                 trail_dist = pos.get('trail_dist', entry * 0.015)
@@ -1438,13 +1443,13 @@ def analyze_position(pos):
                 action = (f"⛔ K線高點 <code>{format_price(effective_high)}</code> 已觸及止損位 <code>{format_price(sl)}</code>，"
                           f"現價 <code>{format_price(current_price)}</code>｜<b>建議立即平倉</b>")
             push = True
-        # 止盈：用 K 線低點
-        elif effective_low <= tp3:
+        # 止盈：用 K 線低點 + 0.05% 確認緩衝（防止 1-pip wick 誤觸）
+        elif effective_low <= tp3 / TP_CONFIRM:
             status = "🟣 全部止盈"
             action = (f"🎯 K線低點 {format_price(effective_low)} 已達止盈3 {format_price(tp3)}，"
                       f"現價 {format_price(current_price)}")
             push = True
-        elif effective_low <= tp2:
+        elif effective_low <= tp2 / TP_CONFIRM:
             if pos.get('tp2_hit'):
                 # TP2 已完成，追蹤止損繼續鎖利剩餘 20%（空頭）
                 trail_dist = pos.get('trail_dist', entry * 0.015)
@@ -1469,7 +1474,7 @@ def analyze_position(pos):
                 action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈2 {format_price(tp2)}，"
                           f"現價 {format_price(current_price)}｜<b>建議將止損下移至TP1（<code>{format_price(tp1)}</code>）</b>")
                 push = True
-        elif effective_low <= tp1:
+        elif effective_low <= tp1 / TP_CONFIRM:
             if pos.get('tp1_hit'):
                 # 追蹤止損：TP1 後每次監控都把 SL 往下拉緊鎖利（空頭）
                 trail_dist = pos.get('trail_dist', entry * 0.015)
@@ -1519,15 +1524,16 @@ def analyze_position(pos):
     full_action += f"\n📊 主力資料：OI變化{oi_change:+.1f}% | 多{long_pct}%:空{short_pct}% | 費率{fr*100:.4f}%"
 
     # ── 累計記錄 TP 達標旗標（只增不減，跨監控週期保留）──
+    # 必須與主鏈 TP 判斷使用相同的 TP_CONFIRM 緩衝，否則 flag 會在主鏈未觸發時就被設為 True
     if pos.get('filled'):
         if dir == "多":
-            if effective_high >= tp1: pos['tp1_hit'] = True
-            if effective_high >= tp2: pos['tp2_hit'] = True
-            if effective_high >= tp3: pos['tp3_hit'] = True
+            if effective_high >= tp1 * TP_CONFIRM: pos['tp1_hit'] = True
+            if effective_high >= tp2 * TP_CONFIRM: pos['tp2_hit'] = True
+            if effective_high >= tp3 * TP_CONFIRM: pos['tp3_hit'] = True
         else:
-            if effective_low <= tp1: pos['tp1_hit'] = True
-            if effective_low <= tp2: pos['tp2_hit'] = True
-            if effective_low <= tp3: pos['tp3_hit'] = True
+            if effective_low <= tp1 / TP_CONFIRM: pos['tp1_hit'] = True
+            if effective_low <= tp2 / TP_CONFIRM: pos['tp2_hit'] = True
+            if effective_low <= tp3 / TP_CONFIRM: pos['tp3_hit'] = True
 
     return status, full_action, push
 
