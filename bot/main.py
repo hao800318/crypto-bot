@@ -1318,7 +1318,11 @@ def analyze_position(pos):
             # 3. 正常等待中 → 自動評估訊號健康度，決定繼續等待或自動撤單
             eval_summary, eval_detail, auto_cancel = evaluate_pending_order(pos)
             gap_pct = abs(current_price - entry) / entry * 100
-            gap_dir = "↓" if dir == "多" else "↑"
+            # gap_dir 顯示「價格需往哪個方向走才能到達進場點」
+            if dir == "多":
+                gap_dir = "↑" if current_price < entry else "↓"   # 突破多等漲 ↑，回調多等跌 ↓
+            else:
+                gap_dir = "↓" if current_price > entry else "↑"   # 突破空等跌 ↓，回調空等漲 ↑
             gap_str = f"現價 <code>{format_price(current_price)}</code>，距進場點還差 {gap_pct:.2f}%{gap_dir}"
             if auto_cancel:
                 note = (f"🤖 市場條件失效，<b>系統自動撤單</b>\n"
@@ -1389,7 +1393,16 @@ def analyze_position(pos):
         # 止盈：用 K 線高點 + 0.05% 確認緩衝（防止 1-pip wick 誤觸）
         elif effective_high >= tp3 * TP_CONFIRM:
             status = "🟣 全部止盈"
-            action = (f"🎯 K線高點 {format_price(effective_high)} 已達止盈3 {format_price(tp3)}，"
+            # 補記所有未標記的 TP 旗標（防止直接跳到 TP3 時狀態不一致）
+            skipped = []
+            if not pos.get('tp1_hit'):
+                pos['tp1_hit'] = True
+                skipped.append(f"TP1 <code>{format_price(tp1)}</code>")
+            if not pos.get('tp2_hit'):
+                pos['tp2_hit'] = True
+                skipped.append(f"TP2 <code>{format_price(tp2)}</code>")
+            skip_note = f"（同時穿越 {'、'.join(skipped)}）" if skipped else ""
+            action = (f"🎯 K線高點 {format_price(effective_high)} 已達止盈3 {format_price(tp3)}{skip_note}，"
                       f"現價 {format_price(current_price)}")
             push = True
         elif effective_high >= tp2 * TP_CONFIRM:
@@ -1490,7 +1503,16 @@ def analyze_position(pos):
         # 止盈：用 K 線低點 + 0.05% 確認緩衝（防止 1-pip wick 誤觸）
         elif effective_low <= tp3 / TP_CONFIRM:
             status = "🟣 全部止盈"
-            action = (f"🎯 K線低點 {format_price(effective_low)} 已達止盈3 {format_price(tp3)}，"
+            # 補記所有未標記的 TP 旗標（防止直接跳到 TP3 時狀態不一致）
+            skipped = []
+            if not pos.get('tp1_hit'):
+                pos['tp1_hit'] = True
+                skipped.append(f"TP1 <code>{format_price(tp1)}</code>")
+            if not pos.get('tp2_hit'):
+                pos['tp2_hit'] = True
+                skipped.append(f"TP2 <code>{format_price(tp2)}</code>")
+            skip_note = f"（同時穿越 {'、'.join(skipped)}）" if skipped else ""
+            action = (f"🎯 K線低點 {format_price(effective_low)} 已達止盈3 {format_price(tp3)}{skip_note}，"
                       f"現價 {format_price(current_price)}")
             push = True
         elif effective_low <= tp2 / TP_CONFIRM:
@@ -2599,6 +2621,7 @@ def handle_open_command(text, chat_id):
         'tf':              tf_label,
         'entry':           entry,
         'sl':              sl,
+        'orig_sl':         sl,    # 原始止損，供 trail_dist 計算使用（不隨追蹤止損改變）
         'tp1':             tp1,
         'tp2':             tp2,
         'tp3':             tp3,
@@ -3156,7 +3179,9 @@ def handle_telegram_updates():
                                         new_pos_cb = {
                                             'asset': sig_cb['asset'], 'dir': sig_cb['dir'],
                                             'tf': sig_cb['tf'], 'entry': sig_cb['entry'],
-                                            'sl': sig_cb['sl'], 'tp1': sig_cb['tp1'],
+                                            'sl': sig_cb['sl'],
+                                            'orig_sl': sig_cb['sl'],  # 原始止損，trail_dist 基準
+                                            'tp1': sig_cb['tp1'],
                                             'tp2': sig_cb['tp2'], 'tp3': sig_cb['tp3'],
                                             'signal_price':   sig_cb.get('price', sig_cb['entry']),
                                             'reported_at': now_ts_cb,
