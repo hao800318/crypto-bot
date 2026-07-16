@@ -2923,11 +2923,12 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
 
     for idx, item in enumerate(valid_signals, 1):
         win_rate = item.get('win_rate', 70)
-        if win_rate >= 88:   stars = "⭐⭐⭐⭐⭐"
-        elif win_rate >= 82: stars = "⭐⭐⭐⭐"
-        elif win_rate >= 75: stars = "⭐⭐⭐"
-        elif win_rate >= 65: stars = "⭐⭐"
-        else:                stars = "⭐"
+        # 星號代表 TA 品質等級（非歷史勝率）
+        if win_rate >= 88:   stars = "★★★★★"
+        elif win_rate >= 82: stars = "★★★★"
+        elif win_rate >= 75: stars = "★★★"
+        elif win_rate >= 65: stars = "★★"
+        else:                stars = "★"
 
         adx_val = item.get('adx', 0)
         if adx_val >= 50:   adx_level, adx_bar = "強", "■■■■"
@@ -2953,9 +2954,11 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         sentiment_short = f"{dir_tag}  費率{fr_num_str}  多{long_pct}%:空{short_pct}%"
 
         # ── 標題行 ──
+        sig_type = item.get('signal_type', 'trend')
+        type_badge = {"trend": "📈趨勢", "range": "↔️區間", "divergence": "🔄背離"}.get(sig_type, "")
         html_message += (f"{medal} <b>{item['asset']}</b>  {dir_display}  "
                          f"⚡<b>{item['leverage']}</b>  {item['tf']}  "
-                         f"<b>{win_rate}%</b> {stars}\n")
+                         f"{type_badge}  TA分<b>{win_rate}</b> {stars}\n")
         # ── 策略標籤 + 脈絡資訊（依訊號類型顯示不同內容）──
         sig_type = item.get('signal_type', 'trend')
         if sig_type == 'range':
@@ -2992,7 +2995,8 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
                 html_message += "</i>\n"
         html_message += "─────────────────────────\n"
 
-    html_message += "<i>技術分 = ADX趨勢強度＋RSI進場位置＋成交量＋多時框確認＋生態鏈方向  |  此分數為TA品質評分，非歷史勝率；槓桿僅供參考</i>"
+    html_message += ("<i>TA分 = 各策略技術指標加權評分（趨勢：ADX＋RSI＋量能＋多框確認 | 區間：RSI位置＋拒絕影線＋區間寬度 | 背離：背離幅度＋影線＋超買超賣）\n"
+                    "此為即時技術品質評分，★★★★★ 代表當前指標組合最佳，非回測勝率；槓桿僅供參考，請自行控管風險</i>")
 
     # A. 追蹤快捷按鈕（每個訊號一顆，點擊等同 /open）
     buttons = [[{"text": f"✅ 追蹤 {item['asset']}{item['dir']}", "callback_data": f"open_{item['asset']}_{item['dir']}"}]
@@ -3061,7 +3065,7 @@ def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False, include
                 ]
                 reply_markup = {"inline_keyboard": buttons}
             else:
-                text = "📭 全網通掃完畢，當前盤面極其冷靜，暫無符合勝率條件之信號。"
+                text = "📭 全網通掃完畢，當前盤面極其冷靜，暫無達到技術篩選門檻的訊號（趨勢/區間/背離均未通過）。"
                 reply_markup = None
             text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {"chat_id": str(target_chat_id), "text": text, "parse_mode": "HTML"}
@@ -3610,7 +3614,7 @@ def check_watched_coin(asset, chat_id, force_update=False):
             msg = (f"🚨 <b>自選監控觸發完整訊號！</b>  {now_str}\n\n"
                    f"⚡ <b>{full_sig['asset']}</b>  "
                    f"{'🟩多' if full_sig['dir']=='多' else '🟥空'}  "
-                   f"{full_sig['tf']}  <b>{full_sig['win_rate']}%</b>\n"
+                   f"{full_sig['tf']}  TA分<b>{full_sig['win_rate']}</b>\n"
                    f"<pre>進場  {format_price(full_sig['entry'])}\n"
                    f"止損  {format_price(full_sig['sl'])}\n"
                    f"TP1   {format_price(full_sig['tp1'])}\n"
@@ -3921,7 +3925,7 @@ def handle_telegram_updates():
                         if text.startswith("/scan"):
                             print(f"⚡ 收到 /scan 指令")
                             confirm_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                            requests.post(confirm_url, json={"chat_id": chat_id, "text": "⚡ 收到指令！正在進行全網掃描 + 主力動向確認，精選最高勝率訊號，請稍候約 15 秒..."})
+                            requests.post(confirm_url, json={"chat_id": chat_id, "text": "⚡ 收到指令！正在進行全網掃描 + 主力動向確認，精選最高技術分訊號（趨勢/區間/背離），請稍候約 15 秒..."})
                             t = threading.Thread(target=scan_worker_thread, args=("手動現場突擊播報", chat_id))
                             t.daemon = True
                             t.start()
