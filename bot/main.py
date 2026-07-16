@@ -606,8 +606,24 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             if direction == "空" and current_price < price_5ago and current_rsi > rsi_5ago:
                 return None  # 底背離：價格新低但 RSI 沒跟上，空頭動能衰竭
 
-            # ── RSI 勝率基礎評分 ──
-            base_score = (100 - abs(current_rsi - 56)) if direction == "多" else (100 - abs(current_rsi - 44))
+            # ── 技術強度基礎評分（ADX 趨勢強度 + RSI 進場位置，有實際 TA 依據）──
+            #
+            # ADX 元件（0-65）：衡量趨勢有多強，已硬過濾 <20
+            if   current_adx >= 50: adx_score = 65
+            elif current_adx >= 40: adx_score = 57   # 與 MIN_ADX=40 廣播門檻對齊
+            elif current_adx >= 30: adx_score = 35
+            else:                   adx_score = 20   # 20-30 弱趨勢
+            #
+            # RSI 元件（0-40）：進場時動能健不健康（避免追高殺低）
+            if direction == "多":
+                if   45 <= current_rsi <= 65: rsi_score = 40   # 理想：有動能且未超買
+                elif 35 <= current_rsi < 45 or 65 < current_rsi <= 72: rsi_score = 25
+                else:                          rsi_score = 10   # >72 超買 / <35 動能缺乏
+            else:
+                if   35 <= current_rsi <= 55: rsi_score = 40   # 理想：有動能且未超賣
+                elif 28 <= current_rsi < 35 or 55 < current_rsi <= 65: rsi_score = 25
+                else:                          rsi_score = 10   # <28 超賣 / >65 過高
+            base_score = adx_score + rsi_score
 
             # ③ 成交量加分（軟性：量大加分，量小扣分）
             if cross_vol > avg_vol_20 * 1.5:
@@ -1027,17 +1043,9 @@ def fetch_near_miss_candidate(asset, tf, btc_trend="neutral", market_fr=0.0):
                 atr_mult  = 3.0
                 tp_mults  = (3.0, 6.0, 10.0)
             tf_label = _TF_LABEL.get(tf, tf.upper())
-            atr_dist = current_atr * atr_mult
-            if direction == "多":
-                sl_price = max(anchor_entry - atr_dist, anchor_entry * 0.96)
-                tp1 = anchor_entry + current_atr * tp_mults[0]
-                tp2 = anchor_entry + current_atr * tp_mults[1]
-                tp3 = anchor_entry + current_atr * tp_mults[2]
-            else:
-                sl_price = min(anchor_entry + atr_dist, anchor_entry * 1.04)
-                tp1 = anchor_entry - current_atr * tp_mults[0]
-                tp2 = anchor_entry - current_atr * tp_mults[1]
-                tp3 = anchor_entry - current_atr * tp_mults[2]
+            # 接近訊號也使用市場結構推導 SL/TP，確保水位落在真實支撐/壓力位
+            sl_price, tp1, tp2, tp3 = find_market_structure_levels(
+                df, anchor_entry, direction, current_atr)
             return {
                 'asset':          asset.split('-')[0],
                 'dir':            direction,
@@ -2206,7 +2214,7 @@ def send_coin_analysis(asset_input, chat_id):
     # ── 四框綜合評分（加權投票） ──
     # 權重：1W=4, 1D=3, 4H=2, 1H=1（大週期決定方向）
     def frame_vote(s, weight):
-        if s is None or s['adx'] < 18:
+        if s is None or s['adx'] < 20:   # 與主掃描一致：<20 = 盤整，不納入投票
             return 0
         return weight if s['ma_above'] else -weight
 
@@ -2221,11 +2229,7 @@ def send_coin_analysis(asset_input, chat_id):
         if score >= 7:
             lines.append("🚀 <b>強烈多頭共識（四框一致向上）</b>")
             lines.append(f"  適合做多，1H限價掛 <b>{format_price(s1['ma8'])}</b>（MA8）")
-            _sl  = s1['ema89'] - s1['atr'] * 0.5
-            _r   = s1['ma8'] - _sl
-            _tp1 = s1['ma8'] + _r * 1.5
-            _tp2 = s1['ma8'] + _r * 2.5
-            lines.append(f"  止損：<b>{format_price(_sl)}</b>  TP1：<b>{format_price(_tp1)}</b> / TP2：<b>{format_price(_tp2)}</b>")
+            lines.append(f"  止損（最近支撐）：<b>{format_price(s1['sl'])}</b>  TP1：<b>{format_price(s1['tp1'])}</b> / TP2：<b>{format_price(s1['tp2'])}</b>")
             lines.append(f"  轉空觀察：等1D MA8跌破EMA89 <b>{format_price(s1d['ema89'])}</b>")
 
         elif score >= 4:
@@ -2276,11 +2280,7 @@ def send_coin_analysis(asset_input, chat_id):
         else:  # score <= -7
             lines.append("📉 <b>強烈空頭共識（四框一致向下）</b>")
             lines.append(f"  適合做空，1H限價掛 <b>{format_price(s1['ma8'])}</b>（MA8）")
-            _sl  = s1['ema89'] + s1['atr'] * 0.5
-            _r   = _sl - s1['ma8']
-            _tp1 = s1['ma8'] - _r * 1.5
-            _tp2 = s1['ma8'] - _r * 2.5
-            lines.append(f"  止損：<b>{format_price(_sl)}</b>  TP1：<b>{format_price(_tp1)}</b> / TP2：<b>{format_price(_tp2)}</b>")
+            lines.append(f"  止損（最近壓力）：<b>{format_price(s1['sl'])}</b>  TP1：<b>{format_price(s1['tp1'])}</b> / TP2：<b>{format_price(s1['tp2'])}</b>")
             lines.append(f"  轉多觀察：等1D MA8突破EMA89 <b>{format_price(s1d['ema89'])}</b>")
 
         return lines
@@ -2336,7 +2336,7 @@ def send_coin_analysis(asset_input, chat_id):
     # 計算有多少大週期與結論同向
     bull_conclusion = score > 0
     def tf_aligned(s):
-        return s is not None and s['adx'] >= 18 and (s['ma_above'] == bull_conclusion)
+        return s is not None and s['adx'] >= 20 and (s['ma_above'] == bull_conclusion)
 
     large_tf_count = sum([
         tf_aligned(s1w),   # 1W：最穩定
@@ -2486,7 +2486,7 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
                 html_message += "</i>\n"
         html_message += "─────────────────────────\n"
 
-    html_message += "<i>勝率 = RSI＋成交量＋多時框＋主力動向＋BTC方向  |  槓桿僅供參考</i>"
+    html_message += "<i>技術分 = ADX趨勢強度＋RSI進場位置＋成交量＋多時框確認＋生態鏈方向  |  此分數為TA品質評分，非歷史勝率；槓桿僅供參考</i>"
 
     # A. 追蹤快捷按鈕（每個訊號一顆，點擊等同 /open）
     buttons = [[{"text": f"✅ 追蹤 {item['asset']}{item['dir']}", "callback_data": f"open_{item['asset']}_{item['dir']}"}]
