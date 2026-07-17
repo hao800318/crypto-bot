@@ -437,6 +437,16 @@ def get_higher_tf_alignment(asset, direction, higher_bar="4H"):
             last    = df.iloc[-1]
             aligned = (direction == "多" and last['MA8'] > last['EMA89']) or \
                       (direction == "空" and last['MA8'] < last['EMA89'])
+
+            # ── 近中性容忍（±0.5%）──
+            # MA8 與 EMA89 差距 ≤ 0.5% 時，1H 實際上是盤整轉折期，
+            # 不應視為明確反向；此時 BTC/ETH 15m 的突破訊號往往先於 1H 切換，
+            # 嚴格二元擋掉會錯過所有初段行情。
+            if not aligned:
+                gap_pct = abs(last['MA8'] - last['EMA89']) / (last['EMA89'] + 1e-10) * 100
+                if gap_pct <= 0.5:
+                    aligned = True   # 差距 ≤ 0.5%：視為中性，放行
+
             htf_adx = float(last['ADX']) if pd.notna(last['ADX']) else 0.0
             return aligned, htf_adx
     except:
@@ -1718,8 +1728,8 @@ def run_strategy_scan():
             s for raw in (trend_signals_raw, div_signals_raw, range_signals_raw)
             for s in raw
             if s['asset'] in _missing_major
-            and s['win_rate'] >= 78
-            and s['adx'] >= 30
+            and s['win_rate'] >= 70
+            and s['adx'] >= 20
         ]
         # 同幣種只保留最高分
         _seen_maj = set()
