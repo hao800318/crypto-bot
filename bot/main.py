@@ -17,6 +17,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 SCAN_INTERVAL_MINUTES = 30
 
 BASE_URL = "https://www.okx.com"
+_tick_size_map: dict = {}   # inst_id → tickSz float，由 get_all_okx_swap_assets() 填充
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("❌ 未設置 TELEGRAM_BOT_TOKEN 環境變數，請在 Secrets 中添加。")
@@ -39,6 +40,10 @@ def get_all_okx_swap_assets():
                         leverage_map[item['instId']] = int(item.get('lever', 20))
                     except:
                         leverage_map[item['instId']] = 20
+                    try:
+                        _tick_size_map[item['instId']] = float(item['tickSz'])
+                    except Exception:
+                        pass
             print(f"📡 成功獲取全網合約資產庫，共計: {len(assets)} 支幣種")
             return assets, leverage_map
     except Exception as e:
@@ -900,6 +905,11 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 else:
                     entry_type = f"📌 {tf_tag}掛限價 {anchor_label}，止損={format_price(sl_price)}"
 
+            entry_price = round_to_tick(entry_price, asset)
+            sl_price    = round_to_tick(sl_price,    asset)
+            tp1         = round_to_tick(tp1,         asset)
+            tp2         = round_to_tick(tp2,         asset)
+            tp3         = round_to_tick(tp3,         asset)
             return {
                 "asset":          asset.split('-')[0],
                 "dir":            direction,
@@ -1010,6 +1020,11 @@ def fetch_trend_state(inst_id, tf):
         pullback_pct = abs(price - ma8) / ma8 * 100
         is_pullback = (pullback_pct <= 1.5 and adx >= 20)  # 回踩 MA8 1.5% 以內
 
+        entry = round_to_tick(entry, inst_id)
+        sl    = round_to_tick(sl,    inst_id)
+        tp1   = round_to_tick(tp1,   inst_id)
+        tp2   = round_to_tick(tp2,   inst_id)
+        tp3   = round_to_tick(tp3,   inst_id)
         return {
             'asset':        inst_id.split('-')[0],
             'dir':          direction,
@@ -1605,6 +1620,11 @@ def fetch_near_miss_candidate(asset, tf, btc_trend="neutral", market_fr=0.0):
             # 接近訊號也使用市場結構推導 SL/TP，確保水位落在真實支撐/壓力位
             sl_price, tp1, tp2, tp3 = find_market_structure_levels(
                 df, anchor_entry, direction, current_atr)
+            anchor_entry = round_to_tick(anchor_entry, asset)
+            sl_price     = round_to_tick(sl_price,     asset)
+            tp1          = round_to_tick(tp1,          asset)
+            tp2          = round_to_tick(tp2,          asset)
+            tp3          = round_to_tick(tp3,          asset)
             return {
                 'asset':          asset.split('-')[0],
                 'dir':            direction,
@@ -3059,14 +3079,35 @@ def send_coin_analysis(asset_input, chat_id):
         json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}
     )
 
-def format_price(p):
+def get_tick_sz(inst_id: str) -> float:
+    """回傳 OKX 合約最小價格精度（tickSz），無資料時回傳 0"""
+    return _tick_size_map.get(inst_id, 0.0)
+
+def round_to_tick(price: float, inst_id: str) -> float:
+    """將價格捨入至 OKX 合約的最小 tick size（避免 OKX 拒單）"""
+    tick = get_tick_sz(inst_id)
+    if tick <= 0:
+        return price
+    s = f"{tick:.12f}".rstrip('0')
+    decimals = len(s.split('.')[1]) if '.' in s else 0
+    return round(round(price / tick) * tick, decimals)
+
+def format_price(p, inst_id=None):
     """
-    依價格區間自動選擇小數位數：
-    ≥ $10  → 2位  (BTC $120000.00 / ETH $3500.00 / OKB $81.26)
-    $1–10  → 3位  (XRP $2.510 / DOT $4.250)
-    < $1   → 動態 (SHIB 0.00001798 / DOGE 0.3210)
+    依 OKX tickSz 或價格區間自動選擇小數位數：
+    inst_id 有值時優先用 tickSz → BTC 1位、ETH/SOL 2位、XRP/ADA 4位等
+    無 inst_id 時 fallback 到價格區間規則（≥$10→2位，$1–10→3位，<$1→動態）
     """
-    if p == 0: return "0.00"
+    if p is None or p == 0:
+        return "0"
+    if inst_id:
+        tick = get_tick_sz(inst_id)
+        if tick > 0:
+            s = f"{tick:.12f}".rstrip('0')
+            decimals = len(s.split('.')[1]) if '.' in s else 0
+            rounded = round(round(p / tick) * tick, decimals)
+            return f"{rounded:,.{decimals}f}" if decimals > 0 else f"{int(rounded):,}"
+    # fallback（無 inst_id 或 tick 資料未載入時）
     if p >= 10: return f"{p:,.2f}"
     if p >= 1:  return f"{p:,.3f}"
     num_zeros = math.floor(-math.log10(abs(p)))
@@ -3840,7 +3881,11 @@ def fetch_coin_status(inst_id, tf):
             'crossed': crossed, 'passed': passed,
             'filters': {'adx_ok': adx_ok, 'vol_ok': vol_ok,
                         'slope_ok': slope_ok, 'no_div': no_div},
-            'entry': entry_p, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp3': tp3,
+            'entry': round_to_tick(entry_p, inst_id),
+            'sl':    round_to_tick(sl,      inst_id),
+            'tp1':   round_to_tick(tp1,     inst_id),
+            'tp2':   round_to_tick(tp2,     inst_id),
+            'tp3':   round_to_tick(tp3,     inst_id),
         }
     except Exception:
         return None
