@@ -1917,7 +1917,12 @@ def analyze_position(pos):
     # 避免舊棒高低點（訊號出現前）被誤判為已觸碰進場點。
     if not pos.get('filled', False):
         reported_at   = pos.get('reported_at', time.time())
-        fill_high, fill_low = get_candle_range_since(inst_id, reported_at, bar, no_margin=True)
+        # 對齊到「建倉當下正在開著的 K 棒」開盤時間，確保那根棒的高/低點被納入
+        # no_margin=True 只取 >= fill_since 開盤的棒，不往前多抓，避免歷史舊棒誤判
+        _fill_bar_secs = {"15m": 900, "30m": 1800, "1H": 3600, "4H": 14400, "1D": 86400}
+        _fill_cs = _fill_bar_secs.get(bar, 3600)
+        fill_since = (int(reported_at) // _fill_cs) * _fill_cs  # 建倉時 K 棒的開盤秒數
+        fill_high, fill_low = get_candle_range_since(inst_id, fill_since, bar, no_margin=True)
         # 不把 current_price 納入 fill_eff：僅用 K 棒極值做填單判斷
         # 避免「現價本身就已在進場點另一側」時瞬間誤判已成交
         fill_eff_high = fill_high  # 純 K 棒最高點
@@ -3644,7 +3649,7 @@ def fetch_coin_status(inst_id, tf):
             'crossed': crossed, 'passed': passed,
             'filters': {'adx_ok': adx_ok, 'vol_ok': vol_ok,
                         'slope_ok': slope_ok, 'no_div': no_div},
-            'entry': anchor, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp3': tp3,
+            'entry': entry_p, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp3': tp3,
         }
     except Exception:
         return None
