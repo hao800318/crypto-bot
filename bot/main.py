@@ -2277,24 +2277,23 @@ def analyze_position(pos):
                 note = f"{eval_summary}\n{gap_str}"
                 return "⏳ 等待進場", note, False
 
-    # ── 已成交：取上次監控後的 K 線高低點（含 margin，防止 TP/SL 事件在監控間隔中被漏掉）──
+    # ── 已成交：取上次監控後的 K 線高低點，捕捉 TP/SL 觸碰事件 ──
     since_ts = pos.get('last_checked_ts', pos.get('reported_at', time.time() - 3600))
     fill_ts  = pos.get('fill_ts', 0)
-    # 在成交後的第一個 bar 週期內（fill_ts ~ fill_ts+bar_dur），強制使用 no_margin=True：
-    # 避免「進場那根 K 線」在成交前的 wick 被納入 TP/SL 判定，導致剛進場就誤觸 TP。
+    # 以 1m K 線為主要 TP/SL 判定來源：精度最高，不受大時框 wick 誤差影響
+    effective_high, effective_low = get_candle_range_since(inst_id, since_ts, '1m', no_margin=True)
+    effective_high = max(effective_high, current_price) if effective_high is not None else current_price
+    effective_low  = min(effective_low,  current_price) if effective_low  is not None else current_price
+    # 原始時框補充：只納入 since_ts 之後「新開盤」的 K 棒（no_margin=True，不往前抓舊棒）
+    # 例外：成交後第一個 bar 週期內強制也用 no_margin=True，防止成交那根 K 線
+    # 在成交「前」的 wick 被誤算為 TP/SL 觸碰。
     _bar_secs = {"15m": 900, "30m": 1800, "1H": 3600, "4H": 14400, "1D": 86400}
     _bar_dur  = _bar_secs.get(bar, 3600)
-    _post_fill_guard = fill_ts > 0 and since_ts < fill_ts + _bar_dur
-    rng_high, rng_low = get_candle_range_since(inst_id, since_ts, bar,
-                                               no_margin=_post_fill_guard)
-    effective_high = max(rng_high, current_price) if rng_high else current_price
-    effective_low  = min(rng_low,  current_price) if rng_low  else current_price
-    # ── 1m K 線補充掃描：監控間隔（3-5分鐘）中比主時框更精細地捕捉 TP/SL 觸碰 ──
-    _1m_h, _1m_l = get_candle_range_since(inst_id, since_ts, '1m', no_margin=True)
-    if _1m_h is not None:
-        effective_high = max(effective_high, _1m_h)
-    if _1m_l is not None:
-        effective_low  = min(effective_low,  _1m_l)
+    _rng_h, _rng_l = get_candle_range_since(inst_id, since_ts, bar, no_margin=True)
+    if _rng_h is not None:
+        effective_high = max(effective_high, _rng_h)
+    if _rng_l is not None:
+        effective_low  = min(effective_low,  _rng_l)
     pos['last_checked_ts'] = time.time()
 
     oi_change  = get_open_interest_change(inst_id)
