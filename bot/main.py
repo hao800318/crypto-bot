@@ -2057,10 +2057,6 @@ def analyze_position(pos):
     # 填單判定：只看「建倉後」開始的 K 棒，不使用 margin 往前延伸，
     # 避免舊棒高低點（訊號出現前）被誤判為已觸碰進場點。
     if not pos.get('filled', False):
-        # ── 若進場已偵測但等待用戶確認，跳過重複偵測 ──
-        if pos.get('pending_confirm', False):
-            return "⏳ 等待確認進場中", "已通知進場確認，請點擊訊息按鈕", False
-
         reported_at   = pos.get('reported_at', time.time())
         # 對齊到「建倉當下正在開著的 K 棒」開盤時間，確保那根棒的高/低點被納入
         # no_margin=True 只取 >= fill_since 開盤的棒，不往前多抓，避免歷史舊棒誤判
@@ -2068,10 +2064,16 @@ def analyze_position(pos):
         _fill_cs = _fill_bar_secs.get(bar, 3600)
         fill_since = (int(reported_at) // _fill_cs) * _fill_cs  # 建倉時 K 棒的開盤秒數
         fill_high, fill_low = get_candle_range_since(inst_id, fill_since, bar, no_margin=True)
+        # ── 1m K 線補充填單偵測精度（監控間隔 3-5 分鐘，1m 補充中間 wick）──
+        _f1m_h, _f1m_l = get_candle_range_since(inst_id, fill_since, '1m', no_margin=True)
+        if _f1m_h is not None:
+            fill_high = max(fill_high, _f1m_h) if fill_high is not None else _f1m_h
+        if _f1m_l is not None:
+            fill_low  = min(fill_low,  _f1m_l) if fill_low  is not None else _f1m_l
         # 不把 current_price 納入 fill_eff：僅用 K 棒極值做填單判斷
         # 避免「現價本身就已在進場點另一側」時瞬間誤判已成交
-        fill_eff_high = fill_high  # 純 K 棒最高點
-        fill_eff_low  = fill_low   # 純 K 棒最低點
+        fill_eff_high = fill_high  # 純 K 棒最高點（含1m補充）
+        fill_eff_low  = fill_low   # 純 K 棒最低點（含1m補充）
 
         # 填單方向判斷：依「訊號時現價 vs 進場點」區分突破 / 回調類型
         #   多頭突破（進場 > signal_price）→ 等價格「漲」到進場：high ≥ entry
@@ -2090,8 +2092,8 @@ def analyze_position(pos):
             else:                      # 回調空：等高點漲到進場
                 filled_by_candle = fill_eff_high is not None and fill_eff_high >= entry
         if filled_by_candle:
-            pos['pending_confirm'] = True           # 等待用戶確認是否已進場，先不設 filled=True
-            pos['fill_ts']         = time.time()   # 記錄偵測時間
+            pos['filled']          = True
+            pos['fill_ts']         = time.time()   # 記錄成交時間，供 TP/SL K 線範圍保護使用
             pos['last_checked_ts'] = time.time()   # 防止下次監控 fallback 到 reported_at（進場前）
             # 進場確認訊息：突破多/空頭顯示突破的高/低點，回調多/空頭顯示回落的低/高點
             if dir == "多":
@@ -2104,11 +2106,11 @@ def analyze_position(pos):
                     extreme_str = f"（K線最低達 <code>{format_price(fill_eff_low)}</code>）"
                 else:                      # 回調進場 → 顯示高點
                     extreme_str = f"（K線最高達 <code>{format_price(fill_eff_high)}</code>）"
-            print(f"🎯 {pos['asset']} {dir}單：K線已穿越進場點 {format_price(entry)}，等待用戶確認進場")
+            print(f"✅ {pos['asset']} {dir}單：K線已穿越進場點 {format_price(entry)}，開始監控 TP/SL")
             action = (f"🎯 K線已穿越進場點 <code>{format_price(entry)}</code>{extreme_str}\n"
                       f"現價 <code>{format_price(current_price)}</code>\n"
-                      f"<b>請確認是否已進場 ↓</b>")
-            return "🎯 待確認進場", action, True  # 推送確認請求，等用戶按鈕
+                      f"<b>限價單應已成交，開始監控 TP/SL</b>")
+            return "✅ 已觸及進場點", action, True  # 推送進場確認，下次監控再做 TP/SL
         else:
             # ── 掛單尚未成交 ──
             # 1. 止損點已被突破 → 訊號作廢，自動取消
@@ -2555,8 +2557,7 @@ def run_position_monitor():
     now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
 
     alerts = []
-    pending_alerts     = []   # 掛單等待中，需要單獨帶按鈕發送
-    fill_confirm_alerts = []  # 進場偵測到，等用戶按鈕確認是否已成交
+    pending_alerts = []   # 掛單等待中，需要單獨帶按鈕發送
     to_remove = []
 
     for pos in positions:
@@ -2658,8 +2659,6 @@ def run_position_monitor():
         if push:
             if status == "⏳ 等待進場":
                 pending_alerts.append((pos, status, action))
-            elif status == "🎯 待確認進場":
-                fill_confirm_alerts.append((pos, status, action))  # 帶雙按鈕單獨發送
             else:
                 alerts.append((pos, status, action))
 
@@ -2698,28 +2697,6 @@ def run_position_monitor():
         requests.post(text_url_p, json={
             "chat_id": str(TELEGRAM_CHAT_ID), "text": msg_p,
             "parse_mode": "HTML"
-        })
-
-    # ── 待確認進場：帶雙按鈕讓用戶決定是否已成交 ──
-    for pos_fc, _, action_fc in fill_confirm_alerts:
-        d_fc  = "🟩多" if pos_fc['dir'] == "多" else "🟥空"
-        tf_fc = pos_fc.get('tf', '4H')
-        msg_fc = (
-            f"🎯 <b>{pos_fc['asset']} 進場確認</b>  {now_str_p}\n"
-            f"{d_fc}  {tf_fc}  "
-            f"進場 <code>{format_price(pos_fc['entry'])}</code>  "
-            f"止損 <code>{format_price(pos_fc['sl'])}</code>\n"
-            f"{action_fc}"
-        )
-        markup_fc = {"inline_keyboard": [[
-            {"text": "✅ 已進場，開始監控TP/SL",
-             "callback_data": f"confirm_fill_{pos_fc['asset']}_{pos_fc['dir']}"},
-            {"text": "❌ 未進場，取消追蹤",
-             "callback_data": f"cancel_pos_{pos_fc['asset']}_{pos_fc['dir']}"},
-        ]]}
-        requests.post(text_url_p, json={
-            "chat_id": str(TELEGRAM_CHAT_ID), "text": msg_fc,
-            "parse_mode": "HTML", "reply_markup": markup_fc
         })
 
     if not alerts:
@@ -4151,26 +4128,6 @@ def handle_telegram_updates():
                                         print(f"📌 按鈕追蹤：{asset_cb} {dir_cb}")
                                     else:
                                         answer_callback(cb_id, "⚠️ 訊號已過期，請重新 /scan", alert=True)
-
-                        elif cb_data.startswith("confirm_fill_"):
-                            # 用戶確認已進場 → 設 filled=True，開始 TP/SL 監控
-                            parts_cf = cb_data.split("_", 3)  # ["confirm","fill","BTC","多"]
-                            if len(parts_cf) == 4:
-                                asset_cf, dir_cf = parts_cf[2], parts_cf[3]
-                                confirmed = False
-                                with active_positions_lock:
-                                    for _p in active_positions:
-                                        if (_p['asset'] == asset_cf and _p['dir'] == dir_cf
-                                                and _p.get('pending_confirm', False)):
-                                            _p['filled']         = True
-                                            _p['pending_confirm'] = False
-                                            save_positions(active_positions)
-                                            confirmed = True
-                                            break
-                                if confirmed:
-                                    answer_callback(cb_id, f"✅ {asset_cf}{dir_cf} 進場確認，開始監控TP/SL！", alert=True)
-                                else:
-                                    answer_callback(cb_id, "⚠️ 找不到待確認持倉（已過期？）", alert=True)
 
                         elif cb_data.startswith("cancel_pos_"):
                             parts_cp = cb_data.split("_", 3)  # ["cancel","pos","ETH","多"]
