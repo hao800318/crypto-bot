@@ -587,8 +587,8 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
 
             # ── 交叉偵測：依時框調整回望窗口 ──
             # 15m=12根(3h) | 1h=10根(10h) | 4h=5根(20h)
-            cross_window = (12 if tf == "15m" else
-                            10 if tf == "30m" else
+            cross_window = (20 if tf == "15m" else
+                            14 if tf == "30m" else
                             10 if tf == "1h"  else
                              5 if tf == "4h"  else 3)
             is_cross_up   = False
@@ -609,6 +609,39 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                     cross_vol     = _curr['vol']
                     _cross_i      = _i
                     break
+
+            # ── 若無新交叉，補偵測「MA8 回踩反彈」（趨勢延伸進場）──
+            # 趨勢已確立（MA8 持續 > EMA89）時，價格回踩 MA8 後反彈 = 有效再進場點。
+            # 不需要新的交叉，捕捉趨勢中每一波的延伸機會。
+            _is_pullback = False
+            if not (is_cross_up or is_cross_down):
+                _n_chk = min(8, len(df) - 2)
+                _up_bars = sum(1 for i in range(1, _n_chk + 1)
+                               if df.iloc[-i]['MA8'] > df.iloc[-i]['EMA89'])
+                _dn_bars = sum(1 for i in range(1, _n_chk + 1)
+                               if df.iloc[-i]['MA8'] < df.iloc[-i]['EMA89'])
+
+                if _up_bars >= 6 and c_last['MA8'] > c_last['EMA89']:
+                    # 上升趨勢：找最近3根中 low 回踩至 MA8 0.5% 內且 close > MA8 的根
+                    for _i in range(1, 4):
+                        _b = df.iloc[-_i]
+                        if _b['low'] <= _b['MA8'] * 1.005 and _b['close'] > _b['MA8']:
+                            is_cross_up  = True
+                            cross_vol    = _b['vol']
+                            _cross_i     = _i
+                            _is_pullback = True
+                            break
+
+                elif _dn_bars >= 6 and c_last['MA8'] < c_last['EMA89']:
+                    # 下降趨勢：找最近3根中 high 回踩至 MA8 0.5% 內且 close < MA8 的根
+                    for _i in range(1, 4):
+                        _b = df.iloc[-_i]
+                        if _b['high'] >= _b['MA8'] * 0.995 and _b['close'] < _b['MA8']:
+                            is_cross_down = True
+                            cross_vol     = _b['vol']
+                            _cross_i      = _i
+                            _is_pullback  = True
+                            break
 
             if not (is_cross_up or is_cross_down):
                 return None
@@ -790,21 +823,22 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             win_rate = score_to_win_rate(score)
             leverage = score_to_leverage(win_rate, max_leverage)
 
+            _pb_tag = "↩回踩" if _is_pullback else ""
             if tf == "15m":
                 order_type = "超短線單"
-                tf_tag = f"15M超短線{tf_note}"
+                tf_tag = f"15M超短線{_pb_tag}{tf_note}"
             elif tf == "30m":
                 order_type = "半時線單"
-                tf_tag = f"30M半時{tf_note}"
+                tf_tag = f"30M半時{_pb_tag}{tf_note}"
             elif tf == "1h":
                 order_type = "短線單"
-                tf_tag = f"1H短線{tf_note}"
+                tf_tag = f"1H短線{_pb_tag}{tf_note}"
             elif tf == "4h":
                 order_type = "長線單"
-                tf_tag = f"4H長線{tf_note}"
+                tf_tag = f"4H長線{_pb_tag}{tf_note}"
             else:
                 order_type = "日線單"
-                tf_tag = f"1D日線{tf_note}"
+                tf_tag = f"1D日線{_pb_tag}{tf_note}"
 
             # ── 進場錨定點（所有時框統一用 MA8，交叉當下的訊號線）──
             entry_price  = current_ma8
@@ -1714,9 +1748,11 @@ def run_strategy_scan():
             deduped.append(s)
 
     now_ts = time.time()
+    _MAJOR_COINS_COOL = {'BTC', 'ETH'}
     with recently_sent_lock:
         cooled_pairs = {k for k, ts in recently_sent_signals.items()
-                        if now_ts - ts < SIGNAL_COOLDOWN_SECS}
+                        if now_ts - ts < (35 * 60 if k[0] in _MAJOR_COINS_COOL
+                                          else SIGNAL_COOLDOWN_SECS)}
 
     top_signals = [
         s for s in deduped
