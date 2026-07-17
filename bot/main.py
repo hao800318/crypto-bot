@@ -3716,30 +3716,41 @@ def handle_close_command(text, chat_id):
 
 
 def send_stats_report(chat_id):
-    """每日勝率播報（近30天）"""
-    send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    def _send(text, parse_mode="HTML"):
-        try:
-            requests.post(send_url,
-                          json={"chat_id": str(chat_id), "text": text, "parse_mode": parse_mode},
-                          timeout=10)
-        except Exception as ex:
-            print(f"⚠️ send_stats_report 發送失敗: {ex}")
+    """勝率統計播報（近30天）"""
+    _url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    _cid = str(chat_id)
+    print(f"📊 send_stats_report 開始執行，chat_id={_cid}")
+
+    # ── Step 1: 立刻送「收到」確認，確認 Telegram API 通 ──
+    try:
+        r0 = requests.post(_url, json={"chat_id": _cid, "text": "📊 查詢勝率中，請稍候…"}, timeout=10)
+        print(f"📊 確認訊息送出，HTTP={r0.status_code}, ok={r0.json().get('ok')}")
+    except Exception as ex:
+        print(f"❌ send_stats_report 確認訊息失敗: {ex}")
+        return   # 連這都送不出去，Telegram API 有問題，直接放棄
+
+    # ── Step 2: 讀取統計資料 ──
     try:
         records = load_stats()
         cutoff  = time.time() - 30 * 86400
         recent  = [r for r in records if r.get('timestamp', 0) >= cutoff]
         valid   = [r for r in recent if r.get('outcome') in ('win_tp3', 'breakeven', 'loss')]
-        print(f"📊 send_stats_report: 總紀錄={len(records)}, 近30天={len(recent)}, 有效={len(valid)}")
+        print(f"📊 統計資料：總={len(records)}, 近30天={len(recent)}, 有效={len(valid)}")
     except Exception as ex:
-        print(f"⚠️ send_stats_report 讀取資料失敗: {ex}")
-        _send(f"⚠️ 勝率統計讀取失敗：{ex}")
+        print(f"❌ load_stats 失敗: {ex}")
+        requests.post(_url, json={"chat_id": _cid, "text": f"⚠️ 讀取統計檔案失敗：{ex}"}, timeout=10)
         return
 
+    # ── Step 3: 無資料情況 ──
     if not valid:
-        _send("📊 近30天尚無完整交易記錄（TP3全止盈/保本/止損），繼續積累數據中。")
+        requests.post(_url, json={
+            "chat_id": _cid,
+            "text": "📊 近30天尚無完整交易記錄（TP3全止盈 / 保本 / 止損）\n繼續積累數據中，每次 TP/SL 觸發後自動更新。"
+        }, timeout=10)
+        print("📊 無有效記錄，已回覆提示")
         return
 
+    # ── Step 4: 計算並組訊息 ──
     try:
         from collections import Counter
         wins       = [r for r in valid if r['outcome'] == 'win_tp3']
@@ -3779,46 +3790,47 @@ def send_stats_report(chat_id):
         fr_records = [r for r in valid if r.get('entry_fr') is not None]
         if len(fr_records) >= 3:
             msg += "\n<b>📊 資金費率 vs 結果：</b>\n"
-            def avg_fr(lst):
+            def _avg_fr(lst):
                 vals = [r.get('entry_fr', 0) for r in lst if r.get('entry_fr') is not None]
                 return sum(vals) / len(vals) if vals else 0.0
-            fr_win  = avg_fr([r for r in fr_records if r['outcome'] == 'win_tp3'])
-            fr_be   = avg_fr([r for r in fr_records if r['outcome'] == 'breakeven'])
-            fr_loss = avg_fr([r for r in fr_records if r['outcome'] == 'loss'])
-
-            def fr_label(v):
+            def _fr_label(v):
                 if v >  0.01: return f"+{v:.4f}%（偏多）"
                 if v < -0.01: return f"{v:.4f}%（偏空）"
                 return f"{v:+.4f}%（中性）"
+            if wins:       msg += f"  🟣 全止盈均費率：{_fr_label(_avg_fr([r for r in fr_records if r['outcome']=='win_tp3']))}\n"
+            if breakevens: msg += f"  🛡️ 保本均費率：  {_fr_label(_avg_fr([r for r in fr_records if r['outcome']=='breakeven']))}\n"
+            if losses:     msg += f"  🔴 止損均費率：  {_fr_label(_avg_fr([r for r in fr_records if r['outcome']=='loss']))}\n"
 
-            if wins:       msg += f"  🟣 全止盈均費率：{fr_label(fr_win)}\n"
-            if breakevens: msg += f"  🛡️ 保本均費率：  {fr_label(fr_be)}\n"
-            if losses:     msg += f"  🔴 止損均費率：  {fr_label(fr_loss)}\n"
-
-            # 費率分區勝率
             high_fr = [r for r in fr_records if r.get('entry_fr', 0) >  0.03]
             low_fr  = [r for r in fr_records if r.get('entry_fr', 0) < -0.03]
             neut_fr = [r for r in fr_records if -0.03 <= r.get('entry_fr', 0) <= 0.03]
-            def zone_wr(lst):
+            def _zone_wr(lst):
                 if not lst: return 0.0
-                ok = sum(1 for r in lst if r['outcome'] in ('win_tp3', 'breakeven'))
-                return ok / len(lst) * 100
-            if high_fr: msg += f"  費率>+0.03%（多頭過熱）：{len(high_fr)}筆  勝率{zone_wr(high_fr):.0f}%\n"
-            if neut_fr: msg += f"  費率中性（±0.03%）：{len(neut_fr)}筆  勝率{zone_wr(neut_fr):.0f}%\n"
-            if low_fr:  msg += f"  費率<-0.03%（空頭過熱）：{len(low_fr)}筆  勝率{zone_wr(low_fr):.0f}%\n"
+                return sum(1 for r in lst if r['outcome'] in ('win_tp3', 'breakeven')) / len(lst) * 100
+            if high_fr: msg += f"  費率>+0.03%（多頭過熱）：{len(high_fr)}筆  勝率{_zone_wr(high_fr):.0f}%\n"
+            if neut_fr: msg += f"  費率中性（±0.03%）：{len(neut_fr)}筆  勝率{_zone_wr(neut_fr):.0f}%\n"
+            if low_fr:  msg += f"  費率<-0.03%（空頭過熱）：{len(low_fr)}筆  勝率{_zone_wr(low_fr):.0f}%\n"
 
         msg += "\n<i>數據僅供參考，保持紀律為第一要務。</i>"
-
-        # Telegram 單訊息上限 4096 字元
         if len(msg) > 4000:
             msg = msg[:3990] + "\n…（訊息過長已截斷）"
 
-        _send(msg)
-        print(f"📊 勝率統計播報完成（{total} 筆）")
-
     except Exception as ex:
-        print(f"⚠️ send_stats_report 建立訊息失敗: {ex}")
-        _send(f"⚠️ 勝率統計計算失敗：{ex}")
+        print(f"❌ send_stats_report 組訊息失敗: {ex}")
+        requests.post(_url, json={"chat_id": _cid, "text": f"⚠️ 勝率計算失敗：{ex}"}, timeout=10)
+        return
+
+    # ── Step 5: 送出正式統計訊息 ──
+    try:
+        r5 = requests.post(_url, json={"chat_id": _cid, "text": msg, "parse_mode": "HTML"}, timeout=10)
+        print(f"📊 統計訊息送出，HTTP={r5.status_code}, ok={r5.json().get('ok')}, total={total}")
+        if not r5.json().get('ok'):
+            print(f"❌ Telegram 拒絕訊息: {r5.json().get('description')}")
+            # 有可能是 HTML parse 問題，改純文字重送
+            plain = msg.replace('<b>','').replace('</b>','').replace('<i>','').replace('</i>','').replace('<code>','').replace('</code>','')
+            requests.post(_url, json={"chat_id": _cid, "text": plain}, timeout=10)
+    except Exception as ex:
+        print(f"❌ send_stats_report 最終發送失敗: {ex}")
 
 
 def fetch_coin_status(inst_id, tf):
