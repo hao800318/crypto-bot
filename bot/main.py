@@ -1859,7 +1859,7 @@ def save_stats(records):
         print(f"⚠️ 儲存統計檔案失敗：{e}")
 
 def record_trade_outcome(pos, outcome):
-    """記錄交易結果；outcome: win_tp3/win_tp2/breakeven/loss"""
+    """記錄交易結果；outcome: win/loss"""
     records = load_stats()
     # 取進場時記錄的資金費率（若無則取當前費率）
     entry_fr = pos.get('entry_fr', None)
@@ -2684,8 +2684,8 @@ def run_position_monitor():
 
         # 止損觸發 / 全部止盈 / 保本回調 / 掛單取消 → 移除追蹤 + 記錄結果
         OUTCOME_MAP = {
-            "🟣 全部止盈":        "win_tp3",
-            "🛡️ 回調至保本止損":  "breakeven",
+            "🟣 全部止盈":        "win",
+            "🛡️ 回調至保本止損":  "win",
             "🔴 止損觸發":        "loss",
         }
         if status in ("🔴 止損觸發", "🟣 全部止盈", "🛡️ 回調至保本止損",
@@ -3389,8 +3389,8 @@ def send_holding_summary(chat_id):
             to_remove.append(pos)
             # 與 run_position_monitor 相同邏輯：記錄交易結果
             _OUTCOME_MAP = {
-                "🟣 全部止盈":        "win_tp3",
-                "🛡️ 回調至保本止損":  "breakeven",
+                "🟣 全部止盈":        "win",
+                "🛡️ 回調至保本止損":  "win",
                 "🔴 止損觸發":        "loss",
             }
             if status in _OUTCOME_MAP and pos.get('filled', False):
@@ -3675,13 +3675,13 @@ def handle_close_command(text, chat_id):
             else:
                 pnl_pct = (entry - current_price) / entry * 100
 
-            if pos.get('tp2_hit') or pos.get('tp1_hit') or pnl_pct > 0:
-                outcome       = "breakeven" if pnl_pct <= 0.05 else "win_tp3"
-                outcome_label = "手動止盈" if pnl_pct > 0.05 else "手動保本"
-                outcome_icon  = "🟣" if pnl_pct > 0.05 else "🛡️"
+            if pos.get('tp1_hit') or pos.get('tp2_hit'):
+                outcome       = "win"
+                outcome_label = "手動平倉（TP後）"
+                outcome_icon  = "🟣"
             else:
                 outcome       = "loss"
-                outcome_label = "手動止損"
+                outcome_label = "策略改變關倉"
                 outcome_icon  = "🔴"
 
             pnl_sign = "+" if pnl_pct >= 0 else ""
@@ -3734,7 +3734,7 @@ def send_stats_report(chat_id):
         records = load_stats()
         cutoff  = time.time() - 30 * 86400
         recent  = [r for r in records if r.get('timestamp', 0) >= cutoff]
-        valid   = [r for r in recent if r.get('outcome') in ('win_tp3', 'breakeven', 'loss')]
+        valid   = [r for r in recent if r.get('outcome') in ('win', 'loss')]
         print(f"📊 統計資料：總={len(records)}, 近30天={len(recent)}, 有效={len(valid)}")
     except Exception as ex:
         print(f"❌ load_stats 失敗: {ex}")
@@ -3745,7 +3745,7 @@ def send_stats_report(chat_id):
     if not valid:
         requests.post(_url, json={
             "chat_id": _cid,
-            "text": "📊 近30天尚無完整交易記錄（TP3全止盈 / 保本 / 止損）\n繼續積累數據中，每次 TP/SL 觸發後自動更新。"
+            "text": "📊 近30天尚無完整交易記錄\n繼續積累數據中，每次 TP/SL 觸發後自動更新。"
         }, timeout=10)
         print("📊 無有效記錄，已回覆提示")
         return
@@ -3753,12 +3753,10 @@ def send_stats_report(chat_id):
     # ── Step 4: 計算並組訊息 ──
     try:
         from collections import Counter
-        wins       = [r for r in valid if r['outcome'] == 'win_tp3']
-        breakevens = [r for r in valid if r['outcome'] == 'breakeven']
-        losses     = [r for r in valid if r['outcome'] == 'loss']
-        total      = len(valid)
-        win_rate   = len(wins) / total * 100
-        be_rate    = len(breakevens) / total * 100
+        wins   = [r for r in valid if r['outcome'] == 'win']
+        losses = [r for r in valid if r['outcome'] == 'loss']
+        total  = len(valid)
+        win_rate = len(wins) / total * 100
 
         la_tz   = pytz.timezone('America/Los_Angeles')
         now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d')
@@ -3766,11 +3764,10 @@ def send_stats_report(chat_id):
         msg  = f"<b>【勝率統計】</b>  <code>{now_str}</code>\n"
         msg += f"近30天共 <b>{total}</b> 筆完整交易\n"
         msg += "─────────────────────────\n"
-        msg += f"🟣 全止盈    <b>{len(wins)}</b> 筆  ({win_rate:.1f}%)\n"
-        msg += f"🛡️ 保本出場  <b>{len(breakevens)}</b> 筆  ({be_rate:.1f}%)\n"
-        msg += f"🔴 止損      <b>{len(losses)}</b> 筆  ({100-win_rate-be_rate:.1f}%)\n"
+        msg += f"🟢 勝（任何 TP 後出場）  <b>{len(wins)}</b> 筆  ({win_rate:.1f}%)\n"
+        msg += f"🔴 敗（止損 / 策略改變）  <b>{len(losses)}</b> 筆  ({100-win_rate:.1f}%)\n"
         msg += "─────────────────────────\n"
-        msg += f"整體勝率（止盈+保本）：<b>{win_rate+be_rate:.1f}%</b>\n\n"
+        msg += f"勝率：<b>{win_rate:.1f}%</b>\n\n"
 
         # 各幣種細分
         asset_wins   = Counter(r['asset'] for r in wins)
@@ -3781,10 +3778,9 @@ def send_stats_report(chat_id):
             for a in all_assets:
                 w = asset_wins.get(a, 0)
                 l = asset_losses.get(a, 0)
-                b = sum(1 for r in breakevens if r['asset'] == a)
-                t = w + l + b
-                pct = (w + b) / t * 100 if t else 0
-                msg += f"  {a}：{w}W {b}BE {l}L  ({pct:.0f}%)\n"
+                t = w + l
+                pct = w / t * 100 if t else 0
+                msg += f"  {a}：{w}勝 {l}敗  ({pct:.0f}%)\n"
 
         # 資金費率分析
         fr_records = [r for r in valid if r.get('entry_fr') is not None]
@@ -3797,16 +3793,15 @@ def send_stats_report(chat_id):
                 if v >  0.01: return f"+{v:.4f}%（偏多）"
                 if v < -0.01: return f"{v:.4f}%（偏空）"
                 return f"{v:+.4f}%（中性）"
-            if wins:       msg += f"  🟣 全止盈均費率：{_fr_label(_avg_fr([r for r in fr_records if r['outcome']=='win_tp3']))}\n"
-            if breakevens: msg += f"  🛡️ 保本均費率：  {_fr_label(_avg_fr([r for r in fr_records if r['outcome']=='breakeven']))}\n"
-            if losses:     msg += f"  🔴 止損均費率：  {_fr_label(_avg_fr([r for r in fr_records if r['outcome']=='loss']))}\n"
+            msg += f"  🟢 勝場均費率：{_fr_label(_avg_fr([r for r in fr_records if r['outcome']=='win']))}\n"
+            msg += f"  🔴 敗場均費率：{_fr_label(_avg_fr([r for r in fr_records if r['outcome']=='loss']))}\n"
 
             high_fr = [r for r in fr_records if r.get('entry_fr', 0) >  0.03]
             low_fr  = [r for r in fr_records if r.get('entry_fr', 0) < -0.03]
             neut_fr = [r for r in fr_records if -0.03 <= r.get('entry_fr', 0) <= 0.03]
             def _zone_wr(lst):
                 if not lst: return 0.0
-                return sum(1 for r in lst if r['outcome'] in ('win_tp3', 'breakeven')) / len(lst) * 100
+                return sum(1 for r in lst if r['outcome'] == 'win') / len(lst) * 100
             if high_fr: msg += f"  費率>+0.03%（多頭過熱）：{len(high_fr)}筆  勝率{_zone_wr(high_fr):.0f}%\n"
             if neut_fr: msg += f"  費率中性（±0.03%）：{len(neut_fr)}筆  勝率{_zone_wr(neut_fr):.0f}%\n"
             if low_fr:  msg += f"  費率<-0.03%（空頭過熱）：{len(low_fr)}筆  勝率{_zone_wr(low_fr):.0f}%\n"
