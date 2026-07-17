@@ -4225,9 +4225,7 @@ def handle_telegram_updates():
 
                         elif cb_data == "cmd_stats":
                             answer_callback(cb_id, "📊 查詢中...", alert=False)
-                            t = threading.Thread(target=send_stats_report, args=(cb_chat,))
-                            t.daemon = True
-                            t.start()
+                            send_stats_report(cb_chat)
 
                     if "message" in update and "text" in update["message"]:
                         msg = update["message"]
@@ -4330,15 +4328,8 @@ def handle_telegram_updates():
                             t.start()
 
                         elif text.lower().startswith("/stats"):
-                            print(f"📊 收到 /stats 指令")
-                            requests.post(
-                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "📊 查詢勝率統計中，請稍候..."},
-                                timeout=5
-                            )
-                            t = threading.Thread(target=send_stats_report, args=(chat_id,))
-                            t.daemon = True
-                            t.start()
+                            print(f"📊 收到 /stats 指令，同步執行")
+                            send_stats_report(chat_id)
 
                         elif text.lower().startswith("/resetstats"):
                             print(f"🗑️ 收到 /resetstats 指令，清空勝率紀錄")
