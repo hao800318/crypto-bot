@@ -651,10 +651,14 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
 
             # ③ EMA89 斜率過濾：EMA89 橫盤或逆向時交叉幾乎全是假突破
             ema89_slope = c_last['EMA89'] - df['EMA89'].iloc[-4]  # 最近3根的斜率
-            if direction == "多" and ema89_slope <= 0:
-                return None  # EMA89 仍在下行或橫盤，多頭訊號不可信
-            if direction == "空" and ema89_slope >= 0:
-                return None  # EMA89 仍在上行或橫盤，空頭訊號不可信
+            # 15m/30m 容忍微幅逆斜：EMA89 是 89 根均線，突破初期轉向極慢，
+            # BTC 在 $63000 時 -$8 斜率 = 0.013%，不應算「逆趨勢」。
+            # 容忍範圍 = 0.05×ATR（BTC ATR14~$180 → 容忍 -$9），嚴重下行仍硬擋。
+            _slope_tol = current_atr * 0.05 if tf in ("15m", "30m") else 0
+            if direction == "多" and ema89_slope < -_slope_tol:
+                return None  # EMA89 明顯下行，多頭訊號不可信
+            if direction == "空" and ema89_slope > _slope_tol:
+                return None  # EMA89 明顯上行，空頭訊號不可信
 
             # ④ RSI 背離過濾：價格方向與 RSI 動能背離 → 假突破機率高
             price_5ago = df['close'].iloc[-6]  # 交叉棒往前5根
@@ -735,12 +739,15 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             #   若 4H（或 1D）MA8/EMA89 方向相反 → 訊號是在賭反轉點，直接丟棄。
             #   例：4H 空頭 + 1H 多叉 = 1H 死貓彈，不做。
             #
-            # 規則 B：HTF ADX 必須 ≥ 25（大週期有方向性）
-            #   若 HTF ADX < 25 → 大週期盤整，小週期任何交叉都是假突破，直接丟棄。
+            # 規則 B：HTF ADX 必須達門檻（大週期有方向性）
+            #   15m/30m → HTF=1H，BTC 從震盪突破時 1H ADX 常在 18-24，
+            #              門檻 ≥ 25 會把所有初段突破訊號都攔掉；降至 20 兼顧初段與防噪。
+            #   1h+    → HTF=4H/1D，等待更強確認，維持 ≥ 25。
             # ──────────────────────────────────────────────────
+            _htf_adx_min = 20 if tf in ("15m", "30m") else 25
             if not aligned:
                 return None   # 逆 HTF 趨勢，硬擋
-            if htf_adx < 25:
+            if htf_adx < _htf_adx_min:
                 return None   # HTF 盤整期，交叉訊號可信度極低，硬擋
 
             # HTF 對齊確認 → 固定加分（已成為進場前提，不再是「可選加分項」）
