@@ -2171,18 +2171,18 @@ def analyze_position(pos):
     # 避免舊棒高低點（訊號出現前）被誤判為已觸碰進場點。
     if not pos.get('filled', False):
         reported_at   = pos.get('reported_at', time.time())
-        # 對齊到「建倉當下正在開著的 K 棒」開盤時間，確保那根棒的高/低點被納入
-        # no_margin=True 只取 >= fill_since 開盤的棒，不往前多抓，避免歷史舊棒誤判
-        _fill_bar_secs = {"15m": 900, "30m": 1800, "1H": 3600, "4H": 14400, "1D": 86400}
-        _fill_cs = _fill_bar_secs.get(bar, 3600)
-        fill_since = (int(reported_at) // _fill_cs) * _fill_cs  # 建倉時 K 棒的開盤秒數
-        fill_high, fill_low = get_candle_range_since(inst_id, fill_since, bar, no_margin=True)
-        # ── 1m K 線補充填單偵測精度（監控間隔 3-5 分鐘，1m 補充中間 wick）──
-        _f1m_h, _f1m_l = get_candle_range_since(inst_id, fill_since, '1m', no_margin=True)
-        if _f1m_h is not None:
-            fill_high = max(fill_high, _f1m_h) if fill_high is not None else _f1m_h
-        if _f1m_l is not None:
-            fill_low  = min(fill_low,  _f1m_l) if fill_low  is not None else _f1m_l
+        # 填單起始點 = 訊號發出的秒數（精確到秒，不對齊 K 棒開盤）
+        # 對齊 K 棒開盤會把訊號發出「之前」的 K 棒價格（例如 4H bar 前 30 分鐘）
+        # 誤算進去，導致還沒到進場點就判定已成交。
+        fill_since = int(reported_at)
+        # ── 以 1m K 線為主要填單判定，精度高、不受大時框對齊誤差影響 ──
+        fill_high, fill_low = get_candle_range_since(inst_id, fill_since, '1m', no_margin=True)
+        # ── 原始時框 K 線補充（只納入訊號發出「之後」新開盤的 K 棒）──
+        _fh2, _fl2 = get_candle_range_since(inst_id, fill_since, bar, no_margin=True)
+        if _fh2 is not None:
+            fill_high = max(fill_high, _fh2) if fill_high is not None else _fh2
+        if _fl2 is not None:
+            fill_low  = min(fill_low,  _fl2) if fill_low  is not None else _fl2
         # 不把 current_price 納入 fill_eff：僅用 K 棒極值做填單判斷
         # 避免「現價本身就已在進場點另一側」時瞬間誤判已成交
         fill_eff_high = fill_high  # 純 K 棒最高點（含1m補充）
