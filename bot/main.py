@@ -2935,7 +2935,7 @@ def fetch_coin_news(coin: str, max_items: int = 2) -> list[str]:
         return []
 
 
-def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報", target_chat_id=None, include_news=False):
+def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報", target_chat_id=None, include_news=False, auto_track=False):
     if target_chat_id is None:
         target_chat_id = TELEGRAM_CHAT_ID
 
@@ -3022,9 +3022,13 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
     html_message += ("<i>TA分 = 各策略技術指標加權評分（趨勢：ADX＋RSI＋量能＋多框確認 | 區間：RSI位置＋拒絕影線＋區間寬度 | 背離：背離幅度＋影線＋超買超賣）\n"
                     "此為即時技術品質評分，★★★★★ 代表當前指標組合最佳，非回測勝率；槓桿僅供參考，請自行控管風險</i>")
 
-    # A. 追蹤快捷按鈕（每個訊號一顆，點擊等同 /open）
-    buttons = [[{"text": f"✅ 追蹤 {item['asset']}{item['dir']}", "callback_data": f"open_{item['asset']}_{item['dir']}"}]
-               for item in valid_signals]
+    # A. 追蹤快捷按鈕（定時：已自動監控；手動：點擊追蹤）
+    if auto_track:
+        buttons = [[{"text": f"📌 已自動監控 {item['asset']}{item['dir']}", "callback_data": "ack_monitor"}]
+                   for item in valid_signals]
+    else:
+        buttons = [[{"text": f"✅ 追蹤 {item['asset']}{item['dir']}", "callback_data": f"open_{item['asset']}_{item['dir']}"}]
+                   for item in valid_signals]
     reply_markup = {"inline_keyboard": buttons}
 
     text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -3039,11 +3043,12 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         print(f"❌ 報告發送失敗：{result}")
 
 # ==================== 📡 7. 原生無衝突監聽引擎 ====================
-def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False, include_news=False):
+def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False, include_news=False, auto_track=False):
     valid_signals = run_strategy_scan()
     if valid_signals:
         send_html_report_via_requests(valid_signals, mode_title=msg_title,
-                                      target_chat_id=target_chat_id, include_news=include_news)
+                                      target_chat_id=target_chat_id, include_news=include_news,
+                                      auto_track=auto_track)
         sent_at = time.time()
         with last_scan_lock:
             last_scan_cache.clear()
@@ -3052,7 +3057,40 @@ def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False, include
         with recently_sent_lock:
             for sig in valid_signals:
                 recently_sent_signals[(sig['asset'], sig['dir'])] = sent_at
-        print(f"📦 訊號已快取 {len(valid_signals)} 筆，等待 /open 指令確認")
+
+        if auto_track:
+            # 定時掃描：自動將訊號加入持倉監控，無需手動按追蹤
+            auto_added = []
+            with active_positions_lock:
+                for sig in valid_signals:
+                    already = any(p['asset'] == sig['asset'] and p['dir'] == sig['dir']
+                                  for p in active_positions)
+                    if not already:
+                        new_pos = {
+                            'asset':          sig['asset'],
+                            'dir':            sig['dir'],
+                            'tf':             sig['tf'],
+                            'entry':          sig['entry'],
+                            'sl':             sig['sl'],
+                            'orig_sl':        sig['sl'],
+                            'tp1':            sig['tp1'],
+                            'tp2':            sig['tp2'],
+                            'tp3':            sig['tp3'],
+                            'signal_price':   sig.get('signal_price', sig['entry']),
+                            'signal_type':    sig.get('signal_type', 'trend'),
+                            'reported_at':    sent_at,
+                            'last_checked_ts': sent_at,
+                            'filled':         False,
+                            'entry_fr':       sig.get('entry_fr'),
+                        }
+                        active_positions.append(new_pos)
+                        auto_added.append(f"{sig['asset']}{sig['dir']}")
+                if auto_added:
+                    save_positions(active_positions)
+            if auto_added:
+                print(f"📌 定時掃描自動監控：{', '.join(auto_added)}")
+        else:
+            print(f"📦 訊號已快取 {len(valid_signals)} 筆，等待 /open 指令確認")
     else:
         if silent_on_empty:
             print(f"📭 定時掃描無訊號，靜默略過（{msg_title}）")
@@ -3813,7 +3851,7 @@ def handle_telegram_updates():
                 last_scan_slot = _cur_slot
                 if _in_scan_window:
                     print(f"🔔 觸發定時掃描：{now_la.strftime('%H:%M')} PT")
-                    t = threading.Thread(target=scan_worker_thread, args=("定時自動速報", TELEGRAM_CHAT_ID, True, True))
+                    t = threading.Thread(target=scan_worker_thread, args=("定時自動速報", TELEGRAM_CHAT_ID, True, True, True))
                     t.daemon = True
                     t.start()
                 else:
