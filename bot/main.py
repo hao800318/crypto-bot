@@ -861,6 +861,19 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             sl_price, tp1, tp2, tp3 = find_market_structure_levels(
                 df, entry_price, direction, current_atr)
 
+            # ── 手續費最低保本距離：TP1 < 0.25% 時「TP1後移至開倉止損」必虧 ──
+            # OKX taker fee ≈ 0.05%；開倉+TP1平倉+SL平倉 共 3 筆 = 0.15% 總費用
+            # TP1 需 ≥ 0.25% 才能讓 50% TP1利潤 > 全部費用，否則保本止損實為虧損
+            _fee_min = entry_price * 0.0025
+            if direction == "多":
+                tp1 = max(tp1, round(entry_price + _fee_min, 8))
+                tp2 = max(tp2, round(tp1 + _fee_min, 8))
+                tp3 = max(tp3, round(tp2 + _fee_min, 8))
+            else:
+                tp1 = min(tp1, round(entry_price - _fee_min, 8))
+                tp2 = min(tp2, round(tp1 - _fee_min, 8))
+                tp3 = min(tp3, round(tp2 - _fee_min, 8))
+
             # ── 進場建議文字（依現價與進場點的偏離程度給出建議）──
             if direction == "多":
                 gap_pct = (current_price - entry_price) / entry_price * 100
@@ -2274,12 +2287,16 @@ def analyze_position(pos):
                     push = False   # 鯨魚警報單獨不推送，只附在訊息裡
             else:
                 status = "🟢 止盈1達標"
+                # 計算費後真正保本點（含開倉+TP1+SL 三筆手續費）
+                # SL_be = 2×E×(1+f)/(1-f) - TP1，保證移至此點後總P&L ≥ 0
+                _f_r  = 0.0005
+                _sl_be = max(entry, 2 * entry * (1 + _f_r) / (1 - _f_r) - tp1)
                 action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈1 {format_price(tp1)}，"
-                          f"現價 {format_price(current_price)}｜止損已自動上移至進場成本（<code>{format_price(entry)}</code>）")
-                pos['tp1_hit']    = True          # 與 sl 同步設定，確保重啟後狀態一致
+                          f"現價 {format_price(current_price)}｜止損已自動上移至保本點（<code>{format_price(_sl_be)}</code>）")
+                pos['tp1_hit']    = True
                 pos['trail_dist'] = entry - sl
-                pos['sl'] = entry
-                sl = entry
+                pos['sl'] = _sl_be
+                sl = _sl_be
                 push = True
         else:
             # 未觸及 SL/TP：信任策略止損，靜默監控
@@ -2384,12 +2401,16 @@ def analyze_position(pos):
                     push = False   # 鯨魚警報單獨不推送
             else:
                 status = "🟢 止盈1達標"
+                # 空頭費後保本點：SL_be = 2×E×(1-f)/(1+f) - TP1
+                # TP1 < entry（空頭），SL_be 若 > entry = 需要讓餘倉再跌才真正保本
+                _f_r  = 0.0005
+                _sl_be_s = min(entry, 2 * entry * (1 - _f_r) / (1 + _f_r) - tp1)
                 action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈1 {format_price(tp1)}，"
-                          f"現價 {format_price(current_price)}｜止損已自動下移至進場成本（<code>{format_price(entry)}</code>）")
-                pos['tp1_hit']    = True          # 與 sl 同步設定，確保重啟後狀態一致
+                          f"現價 {format_price(current_price)}｜止損已自動下移至保本點（<code>{format_price(_sl_be_s)}</code>）")
+                pos['tp1_hit']    = True
                 pos['trail_dist'] = sl - entry
-                pos['sl'] = entry
-                sl = entry
+                pos['sl'] = _sl_be_s
+                sl = _sl_be_s
                 push = True
         else:
             # 未觸及 SL/TP：信任策略止損，靜默監控
@@ -3148,8 +3169,14 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         html_message += f"TP2   {format_price(item['tp2'])}\n"
         html_message += f"TP3   {format_price(item['tp3'])}\n"
         html_message += "</pre>"
-        # ── TP1後止損提示 ──
-        html_message += f"▸ TP1達標 → 止損移至 <code>{format_price(item['entry'])}</code>\n"
+        # ── TP1後止損提示（費後真正保本點，非開倉原點）──
+        _f_msg = 0.0005
+        _e_msg, _t1_msg = item['entry'], item['tp1']
+        if item['dir'] == '多':
+            _sl_be_msg = max(_e_msg, 2 * _e_msg * (1 + _f_msg) / (1 - _f_msg) - _t1_msg)
+        else:
+            _sl_be_msg = min(_e_msg, 2 * _e_msg * (1 - _f_msg) / (1 + _f_msg) - _t1_msg)
+        html_message += f"▸ TP1達標 → 止損移至 <code>{format_price(_sl_be_msg)}</code>（含手續費保本）\n"
         # ── 時事新聞（僅定時播報）──
         if include_news:
             news_items = fetch_coin_news(item['asset'])
