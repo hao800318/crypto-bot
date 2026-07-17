@@ -3676,92 +3676,108 @@ def handle_close_command(text, chat_id):
 
 def send_stats_report(chat_id):
     """每日勝率播報（近30天）"""
-    records = load_stats()
-    cutoff  = time.time() - 30 * 86400
-    recent  = [r for r in records if r.get('timestamp', 0) >= cutoff]
-    valid   = [r for r in recent if r['outcome'] in ('win_tp3', 'breakeven', 'loss')]
-
-    if not valid:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": str(chat_id),
-                  "text": "📊 近30天尚無完整交易記錄，繼續積累數據中。"}
-        )
+    send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    def _send(text, parse_mode="HTML"):
+        try:
+            requests.post(send_url,
+                          json={"chat_id": str(chat_id), "text": text, "parse_mode": parse_mode},
+                          timeout=10)
+        except Exception as ex:
+            print(f"⚠️ send_stats_report 發送失敗: {ex}")
+    try:
+        records = load_stats()
+        cutoff  = time.time() - 30 * 86400
+        recent  = [r for r in records if r.get('timestamp', 0) >= cutoff]
+        valid   = [r for r in recent if r.get('outcome') in ('win_tp3', 'breakeven', 'loss')]
+        print(f"📊 send_stats_report: 總紀錄={len(records)}, 近30天={len(recent)}, 有效={len(valid)}")
+    except Exception as ex:
+        print(f"⚠️ send_stats_report 讀取資料失敗: {ex}")
+        _send(f"⚠️ 勝率統計讀取失敗：{ex}")
         return
 
-    wins       = [r for r in valid if r['outcome'] == 'win_tp3']
-    breakevens = [r for r in valid if r['outcome'] == 'breakeven']
-    losses     = [r for r in valid if r['outcome'] == 'loss']
-    total      = len(valid)
-    win_rate   = len(wins) / total * 100
-    be_rate    = len(breakevens) / total * 100
+    if not valid:
+        _send("📊 近30天尚無完整交易記錄（TP3全止盈/保本/止損），繼續積累數據中。")
+        return
 
-    la_tz   = pytz.timezone('America/Los_Angeles')
-    now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d')
+    try:
+        from collections import Counter
+        wins       = [r for r in valid if r['outcome'] == 'win_tp3']
+        breakevens = [r for r in valid if r['outcome'] == 'breakeven']
+        losses     = [r for r in valid if r['outcome'] == 'loss']
+        total      = len(valid)
+        win_rate   = len(wins) / total * 100
+        be_rate    = len(breakevens) / total * 100
 
-    msg  = f"<b>【每日勝率統計】</b>  <code>{now_str}</code>\n"
-    msg += f"近30天共 <b>{total}</b> 筆完整交易\n"
-    msg += "─────────────────────────\n"
-    msg += f"🟣 全止盈    <b>{len(wins)}</b> 筆  ({win_rate:.1f}%)\n"
-    msg += f"🛡️ 保本出場  <b>{len(breakevens)}</b> 筆  ({be_rate:.1f}%)\n"
-    msg += f"🔴 止損      <b>{len(losses)}</b> 筆  ({100-win_rate-be_rate:.1f}%)\n"
-    msg += "─────────────────────────\n"
-    msg += f"整體勝率（止盈+保本）：<b>{win_rate+be_rate:.1f}%</b>\n\n"
+        la_tz   = pytz.timezone('America/Los_Angeles')
+        now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d')
 
-    # 各幣種細分
-    from collections import Counter
-    asset_wins   = Counter(r['asset'] for r in wins)
-    asset_losses = Counter(r['asset'] for r in losses)
-    all_assets   = sorted(set(r['asset'] for r in valid))
-    if all_assets:
-        msg += "<b>各幣種：</b>\n"
-        for a in all_assets:
-            w = asset_wins.get(a, 0)
-            l = asset_losses.get(a, 0)
-            b = sum(1 for r in breakevens if r['asset'] == a)
-            t = w + l + b
-            pct = (w + b) / t * 100 if t else 0
-            msg += f"  {a}：{w}W {b}BE {l}L  ({pct:.0f}%)\n"
+        msg  = f"<b>【勝率統計】</b>  <code>{now_str}</code>\n"
+        msg += f"近30天共 <b>{total}</b> 筆完整交易\n"
+        msg += "─────────────────────────\n"
+        msg += f"🟣 全止盈    <b>{len(wins)}</b> 筆  ({win_rate:.1f}%)\n"
+        msg += f"🛡️ 保本出場  <b>{len(breakevens)}</b> 筆  ({be_rate:.1f}%)\n"
+        msg += f"🔴 止損      <b>{len(losses)}</b> 筆  ({100-win_rate-be_rate:.1f}%)\n"
+        msg += "─────────────────────────\n"
+        msg += f"整體勝率（止盈+保本）：<b>{win_rate+be_rate:.1f}%</b>\n\n"
 
-    # 資金費率分析
-    fr_records = [r for r in valid if r.get('entry_fr') is not None]
-    if len(fr_records) >= 3:
-        msg += "\n<b>📊 資金費率 vs 結果：</b>\n"
-        def avg_fr(lst):
-            vals = [r.get('entry_fr', 0) for r in lst if r.get('entry_fr') is not None]
-            return sum(vals) / len(vals) if vals else 0.0
-        fr_win = avg_fr([r for r in fr_records if r['outcome'] == 'win_tp3'])
-        fr_be  = avg_fr([r for r in fr_records if r['outcome'] == 'breakeven'])
-        fr_loss= avg_fr([r for r in fr_records if r['outcome'] == 'loss'])
+        # 各幣種細分
+        asset_wins   = Counter(r['asset'] for r in wins)
+        asset_losses = Counter(r['asset'] for r in losses)
+        all_assets   = sorted(set(r['asset'] for r in valid))
+        if all_assets:
+            msg += "<b>各幣種：</b>\n"
+            for a in all_assets:
+                w = asset_wins.get(a, 0)
+                l = asset_losses.get(a, 0)
+                b = sum(1 for r in breakevens if r['asset'] == a)
+                t = w + l + b
+                pct = (w + b) / t * 100 if t else 0
+                msg += f"  {a}：{w}W {b}BE {l}L  ({pct:.0f}%)\n"
 
-        def fr_label(v):
-            if v >  0.01: return f"+{v:.4f}%（偏多）"
-            if v < -0.01: return f"{v:.4f}%（偏空）"
-            return f"{v:+.4f}%（中性）"
+        # 資金費率分析
+        fr_records = [r for r in valid if r.get('entry_fr') is not None]
+        if len(fr_records) >= 3:
+            msg += "\n<b>📊 資金費率 vs 結果：</b>\n"
+            def avg_fr(lst):
+                vals = [r.get('entry_fr', 0) for r in lst if r.get('entry_fr') is not None]
+                return sum(vals) / len(vals) if vals else 0.0
+            fr_win  = avg_fr([r for r in fr_records if r['outcome'] == 'win_tp3'])
+            fr_be   = avg_fr([r for r in fr_records if r['outcome'] == 'breakeven'])
+            fr_loss = avg_fr([r for r in fr_records if r['outcome'] == 'loss'])
 
-        if wins:      msg += f"  🟣 全止盈均費率：{fr_label(fr_win)}\n"
-        if breakevens:msg += f"  🛡️ 保本均費率：  {fr_label(fr_be)}\n"
-        if losses:    msg += f"  🔴 止損均費率：  {fr_label(fr_loss)}\n"
+            def fr_label(v):
+                if v >  0.01: return f"+{v:.4f}%（偏多）"
+                if v < -0.01: return f"{v:.4f}%（偏空）"
+                return f"{v:+.4f}%（中性）"
 
-        # 費率分區勝率
-        high_fr  = [r for r in fr_records if r.get('entry_fr', 0) >  0.03]
-        low_fr   = [r for r in fr_records if r.get('entry_fr', 0) < -0.03]
-        neut_fr  = [r for r in fr_records if -0.03 <= r.get('entry_fr', 0) <= 0.03]
-        def zone_wr(lst):
-            if not lst: return None
-            ok = sum(1 for r in lst if r['outcome'] in ('win_tp3','breakeven'))
-            return ok / len(lst) * 100
-        if high_fr:  msg += f"  費率>+0.03%（多頭過熱）：{len(high_fr)}筆  勝率{zone_wr(high_fr):.0f}%\n"
-        if neut_fr:  msg += f"  費率中性（±0.03%）：{len(neut_fr)}筆  勝率{zone_wr(neut_fr):.0f}%\n"
-        if low_fr:   msg += f"  費率<-0.03%（空頭過熱）：{len(low_fr)}筆  勝率{zone_wr(low_fr):.0f}%\n"
+            if wins:       msg += f"  🟣 全止盈均費率：{fr_label(fr_win)}\n"
+            if breakevens: msg += f"  🛡️ 保本均費率：  {fr_label(fr_be)}\n"
+            if losses:     msg += f"  🔴 止損均費率：  {fr_label(fr_loss)}\n"
 
-    msg += "\n<i>數據僅供參考，保持紀律為第一要務。</i>"
+            # 費率分區勝率
+            high_fr = [r for r in fr_records if r.get('entry_fr', 0) >  0.03]
+            low_fr  = [r for r in fr_records if r.get('entry_fr', 0) < -0.03]
+            neut_fr = [r for r in fr_records if -0.03 <= r.get('entry_fr', 0) <= 0.03]
+            def zone_wr(lst):
+                if not lst: return 0.0
+                ok = sum(1 for r in lst if r['outcome'] in ('win_tp3', 'breakeven'))
+                return ok / len(lst) * 100
+            if high_fr: msg += f"  費率>+0.03%（多頭過熱）：{len(high_fr)}筆  勝率{zone_wr(high_fr):.0f}%\n"
+            if neut_fr: msg += f"  費率中性（±0.03%）：{len(neut_fr)}筆  勝率{zone_wr(neut_fr):.0f}%\n"
+            if low_fr:  msg += f"  費率<-0.03%（空頭過熱）：{len(low_fr)}筆  勝率{zone_wr(low_fr):.0f}%\n"
 
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": str(chat_id), "text": msg, "parse_mode": "HTML"}
-    )
-    print(f"📊 每日勝率播報完成（{total} 筆）")
+        msg += "\n<i>數據僅供參考，保持紀律為第一要務。</i>"
+
+        # Telegram 單訊息上限 4096 字元
+        if len(msg) > 4000:
+            msg = msg[:3990] + "\n…（訊息過長已截斷）"
+
+        _send(msg)
+        print(f"📊 勝率統計播報完成（{total} 筆）")
+
+    except Exception as ex:
+        print(f"⚠️ send_stats_report 建立訊息失敗: {ex}")
+        _send(f"⚠️ 勝率統計計算失敗：{ex}")
 
 
 def fetch_coin_status(inst_id, tf):
@@ -4270,6 +4286,11 @@ def handle_telegram_updates():
 
                         elif text.lower().startswith("/stats"):
                             print(f"📊 收到 /stats 指令")
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": "📊 查詢勝率統計中，請稍候..."},
+                                timeout=5
+                            )
                             t = threading.Thread(target=send_stats_report, args=(chat_id,))
                             t.daemon = True
                             t.start()
