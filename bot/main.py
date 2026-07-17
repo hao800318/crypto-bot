@@ -4004,10 +4004,20 @@ def handle_telegram_updates():
                             t.daemon = True
                             t.start()
 
+                        elif text.lower().startswith("/resetstats"):
+                            print(f"🗑️ 收到 /resetstats 指令，清空勝率紀錄")
+                            save_stats([])
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id,
+                                      "text": "🗑️ <b>勝率紀錄已清空</b>\n\n從現在起依照最新策略重新統計。\n歷史資料已全部移除，後續的 TP/SL 結果將從零開始累積。",
+                                      "parse_mode": "HTML"}
+                            )
+
                         elif text.startswith("/") and len(text) > 1:
                             # 通用幣種查詢：/eth /btc /sol /doge 等
                             coin_cmd = text.split()[0].lstrip("/").split("@")[0]
-                            if coin_cmd and coin_cmd.isalpha() and coin_cmd.lower() not in ("open","close","scan","holding","watch","unwatch","watching","stats"):
+                            if coin_cmd and coin_cmd.isalpha() and coin_cmd.lower() not in ("open","close","scan","holding","watch","unwatch","watching","stats","resetstats"):
                                 print(f"🔍 收到幣種查詢指令：/{coin_cmd.upper()}")
                                 requests.post(
                                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
