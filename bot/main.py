@@ -400,13 +400,14 @@ def check_market_deterioration(inst_id, direction, tf):
     """
     warnings = []
 
-    # ── 1. BTC 方向是否逆向 ──
+    # ── 1. 該幣自身趨勢是否已逆向（MA8/EMA89 1H）──
     try:
-        btc_trend = get_btc_trend()
-        if direction == "多" and btc_trend == "bear":
-            warnings.append("BTC 轉空頭，對多單形成壓制")
-        elif direction == "空" and btc_trend == "bull":
-            warnings.append("BTC 轉多頭，對空單形成頂托")
+        coin = inst_id.split('-')[0]
+        coin_trend = _fetch_one_trend(coin)
+        if direction == "多" and coin_trend == "bear":
+            warnings.append(f"{coin} 1H MA8 已跌破 EMA89，多頭趨勢反轉")
+        elif direction == "空" and coin_trend == "bull":
+            warnings.append(f"{coin} 1H MA8 已站上 EMA89，空頭趨勢反轉")
     except:
         pass
 
