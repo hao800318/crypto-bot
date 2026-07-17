@@ -249,6 +249,72 @@ def find_market_structure_levels(df, entry, direction, atr, n=2):
     return sl, tp1, tp2, tp3
 
 
+def get_fibonacci_context(df, entry, direction):
+    """
+    找出最近一次明顯擺動（多頭：波低→波高，空頭：波高→波低），
+    計算斐波那契回撤水位（0.236/0.382/0.5/0.618/0.786），
+    回傳最近的關鍵 Fib 水位與距離。
+
+    回傳：(fib_label, fib_price, near_fib, dist_pct)
+        fib_label : str  e.g. "0.618" 或 None（找不到有效擺動時）
+        fib_price : float
+        near_fib  : bool（距入場點 ≤ 1.5%）
+        dist_pct  : float
+    """
+    KEY_FIBS = [0.236, 0.382, 0.500, 0.618, 0.786]
+    N_CONFIRM = 3   # 左右各 3 根確認擺動點
+    LOOKBACK  = 80  # 只看最近 80 根 K 線
+
+    highs = df['high'].values[-LOOKBACK:]
+    lows  = df['low'].values[-LOOKBACK:]
+
+    swing_highs, swing_lows = [], []
+    for i in range(N_CONFIRM, len(highs) - N_CONFIRM):
+        if highs[i] == max(highs[i - N_CONFIRM: i + N_CONFIRM + 1]):
+            swing_highs.append((i, float(highs[i])))
+        if lows[i]  == min(lows[i  - N_CONFIRM: i + N_CONFIRM + 1]):
+            swing_lows.append((i, float(lows[i])))
+
+    if not swing_highs or not swing_lows:
+        return None, None, False, 999.0
+
+    try:
+        if direction == "多":
+            # 找「波低 → 波高」的最近上行擺動，然後量回撤
+            last_hi_idx, last_hi_px = swing_highs[-1]
+            lows_before = [(i, p) for i, p in swing_lows if i < last_hi_idx]
+            if not lows_before:
+                return None, None, False, 999.0
+            _, swing_lo_px = lows_before[-1]
+            rng = last_hi_px - swing_lo_px
+            if rng < last_hi_px * 0.005:    # 擺動幅度 < 0.5%，無意義
+                return None, None, False, 999.0
+            # 回撤水位：從高點往下量
+            levels = {f"{r:.3f}": last_hi_px - rng * r for r in KEY_FIBS}
+        else:
+            # 找「波高 → 波低」的最近下行擺動，然後量反彈
+            last_lo_idx, last_lo_px = swing_lows[-1]
+            highs_before = [(i, p) for i, p in swing_highs if i < last_lo_idx]
+            if not highs_before:
+                return None, None, False, 999.0
+            _, swing_hi_px = highs_before[-1]
+            rng = swing_hi_px - last_lo_px
+            if rng < swing_hi_px * 0.005:
+                return None, None, False, 999.0
+            # 反彈水位：從低點往上量
+            levels = {f"{r:.3f}": last_lo_px + rng * r for r in KEY_FIBS}
+    except Exception:
+        return None, None, False, 999.0
+
+    # 找最近 Fib 水位
+    closest_lbl = min(levels, key=lambda k: abs(levels[k] - entry))
+    closest_px  = levels[closest_lbl]
+    dist_pct    = abs(closest_px - entry) / entry * 100
+    near_fib    = dist_pct <= 1.5   # ≤ 1.5% 算匯流
+
+    return closest_lbl, closest_px, near_fib, round(dist_pct, 2)
+
+
 def find_range_bounds(df, n=2, tol=0.005, min_touches=2):
     """
     識別橫盤區間的支撐帶和壓力帶。
@@ -866,6 +932,21 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             sl_price, tp1, tp2, tp3 = find_market_structure_levels(
                 df, entry_price, direction, current_atr)
 
+            # ── 斐波那契回撤匯流：找最近擺動水位，判斷進場是否在 Fib 關鍵支撐/壓力 ──
+            _fib_lbl, _fib_px, _fib_near, _fib_dist = get_fibonacci_context(
+                df, entry_price, direction)
+            if _fib_near and _fib_lbl in ('0.382', '0.618'):
+                _fib_bonus = 8   # 最強 Fib 水位匯流
+            elif _fib_near and _fib_lbl == '0.500':
+                _fib_bonus = 5   # 0.5 中位支撐
+            elif _fib_near:
+                _fib_bonus = 2   # 其他 Fib 水位附近
+            else:
+                _fib_bonus = 0
+            score    += _fib_bonus
+            win_rate  = score_to_win_rate(score)
+            leverage  = score_to_leverage(win_rate, max_leverage)
+
             # ── 手續費最低保本距離：TP1 < 0.25% 時「TP1後移至開倉止損」必虧 ──
             # OKX taker fee ≈ 0.05%；開倉+TP1平倉+SL平倉 共 3 筆 = 0.15% 總費用
             # TP1 需 ≥ 0.25% 才能讓 50% TP1利潤 > 全部費用，否則保本止損實為虧損
@@ -930,6 +1011,10 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 "vol_confirmed":  cross_vol > avg_vol_20,
                 "tf_note":        tf_note,
                 "entry_fr":       round(funding_rate * 100, 4),  # 進場時資金費率（%）
+                "fib_level":      _fib_lbl,
+                "fib_price":      _fib_px,
+                "fib_near":       _fib_near,
+                "fib_dist":       _fib_dist,
             }
     except:
         pass
@@ -1020,6 +1105,9 @@ def fetch_trend_state(inst_id, tf):
         pullback_pct = abs(price - ma8) / ma8 * 100
         is_pullback = (pullback_pct <= 1.5 and adx >= 20)  # 回踩 MA8 1.5% 以內
 
+        # 斐波那契匯流
+        _fib_lbl, _fib_px, _fib_near, _fib_dist = get_fibonacci_context(df, entry, direction)
+
         entry = round_to_tick(entry, inst_id)
         sl    = round_to_tick(sl,    inst_id)
         tp1   = round_to_tick(tp1,   inst_id)
@@ -1048,6 +1136,10 @@ def fetch_trend_state(inst_id, tf):
             'is_pullback':  is_pullback,
             'pullback_pct': round(pullback_pct, 2),
             'crossed':      recent_cross,
+            'fib_level':    _fib_lbl,
+            'fib_price':    _fib_px,
+            'fib_near':     _fib_near,
+            'fib_dist':     _fib_dist,
         }
     except Exception as e:
         print(f"⚠️ fetch_trend_state({inst_id}) 失敗：{e}")
@@ -3231,6 +3323,17 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         else:
             _sl_be_msg = min(_e_msg, 2 * _e_msg * (1 - _f_msg) / (1 + _f_msg) - _t1_msg)
         html_message += f"▸ TP1達標 → 止損移至 <code>{format_price(_sl_be_msg)}</code>（含手續費保本）\n"
+        # ── 斐波那契回撤匯流 ──
+        _fib_lbl  = item.get('fib_level')
+        _fib_near = item.get('fib_near', False)
+        if _fib_lbl:
+            _fib_px   = item.get('fib_price', 0)
+            _fib_dist = item.get('fib_dist', 0)
+            _fib_inst = item['asset'] + '-USDT-SWAP'
+            if _fib_near:
+                html_message += f"📐 Fib <b>{_fib_lbl}</b>  <code>{format_price(_fib_px, _fib_inst)}</code>  ✅ 斐波那契匯流\n"
+            else:
+                html_message += f"📐 Fib {_fib_lbl}  <code>{format_price(_fib_px, _fib_inst)}</code>  ({_fib_dist:.1f}% away)\n"
         # ── 時事新聞（僅定時播報）──
         if include_news:
             news_items = fetch_coin_news(item['asset'])
