@@ -579,6 +579,9 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             minus_di = 100 * minus_dm_clean.rolling(14).mean() / atr14
             dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
             df['ADX'] = dx.rolling(14).mean()
+            # DI+ / DI- 末根值（用於方向確認閘）
+            c_di_plus  = float(plus_di.iloc[-1])
+            c_di_minus = float(minus_di.iloc[-1])
 
             c_last = df.iloc[-1]
 
@@ -660,6 +663,22 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 return None  # 頂背離：價格新高但 RSI 沒跟上，多頭動能衰竭
             if direction == "空" and current_price < price_5ago and current_rsi > rsi_5ago:
                 return None  # 底背離：價格新低但 RSI 沒跟上，空頭動能衰竭
+
+            # ⑤ DI+ vs DI- 方向壓力閘（確認 14 週期方向壓力真的支持訊號）
+            # MA8/EMA89 交叉是領先指標，DI 是確認指標。
+            # 若交叉後 DI 方向壓力仍然反向，代表主力力量未切換，假突破率高。
+            if direction == "多" and c_di_plus <= c_di_minus:
+                return None   # 空方向壓(DI-)仍 > 多方向壓(DI+)，多叉可信度低
+            if direction == "空" and c_di_minus <= c_di_plus:
+                return None   # 多方向壓(DI+)仍 > 空方向壓(DI-)，死叉可信度低
+
+            # ⑥ RSI 極端區間硬性過濾（防追高殺低）
+            # RSI 超買/超賣時進場，即使方向對也會被震倉。
+            # 現有評分已降低極端RSI的分數，但高ADX仍可蓋過而通過門檻，需硬擋。
+            if direction == "多" and current_rsi > 76:
+                return None   # RSI > 76 = 過度超買，多方動能耗盡在即，不追頂
+            if direction == "空" and current_rsi < 24:
+                return None   # RSI < 24 = 過度超賣，空方動能耗盡在即，不追底
 
             # ── 技術強度基礎評分（ADX 趨勢強度 + RSI 進場位置，有實際 TA 依據）──
             #
@@ -1044,6 +1063,17 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
         if direction is None:
             return None
 
+        # ④-B 鏈參考方向過濾（區間策略補充）
+        # 區間反彈訊號若逆大市方向，被反向趨勢打穿支撐/壓力的機率大幅提升。
+        # 強烈逆向（ref_coin 明確 bear/bull 且與訊號方向相反）→ 直接丟棄。
+        _sym_r = asset.split('-')[0]
+        _ref_r = _CHAIN_REF.get(_sym_r, "BTC")
+        _rt_r  = (ref_trends or {}).get(_ref_r, "neutral")
+        if _rt_r == "bear" and direction == "多":
+            return None   # 區間多單 + 鏈參考幣空頭 → 支撐極易被打穿，跳過
+        if _rt_r == "bull" and direction == "空":
+            return None   # 區間空單 + 鏈參考幣多頭 → 壓力極易被突破，跳過
+
         # ⑤ 成交量確認：反彈應量縮，放量 > 1.8× 均量代表可能突破，跳過
         if float(c['vol']) > avg_vol * 1.8:
             return None
@@ -1250,6 +1280,17 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
 
         if direction is None:
             return None
+
+        # ③-C 鏈參考方向過濾（背離策略補充）
+        # 背離是逆趨勢反轉訊號，若大市環境方向強烈一致，背離失敗率大幅上升。
+        # BTC/鏈參考幣方向強烈相反 → 背離反彈空間有限，跳過。
+        _sym_d = asset.split('-')[0]
+        _ref_d = _CHAIN_REF.get(_sym_d, "BTC")
+        _rt_d  = (ref_trends or {}).get(_ref_d, "neutral")
+        if _rt_d == "bear" and direction == "多":
+            return None   # 底背離多單 + 鏈幣空頭 → 大跌趨勢中假反彈機率高
+        if _rt_d == "bull" and direction == "空":
+            return None   # 頂背離空單 + 鏈幣多頭 → 強多趨勢中假頂機率高
 
         # ④ 前一根 K 棒需有拒絕影線（確認賣/買盤確實退縮）
         o_p  = float(c_prev['open'])
