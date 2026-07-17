@@ -664,13 +664,17 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             if direction == "空" and current_price < price_5ago and current_rsi > rsi_5ago:
                 return None  # 底背離：價格新低但 RSI 沒跟上，空頭動能衰竭
 
-            # ⑤ DI+ vs DI- 方向壓力閘（確認 14 週期方向壓力真的支持訊號）
-            # MA8/EMA89 交叉是領先指標，DI 是確認指標。
-            # 若交叉後 DI 方向壓力仍然反向，代表主力力量未切換，假突破率高。
-            if direction == "多" and c_di_plus <= c_di_minus:
-                return None   # 空方向壓(DI-)仍 > 多方向壓(DI+)，多叉可信度低
-            if direction == "空" and c_di_minus <= c_di_plus:
-                return None   # 多方向壓(DI+)仍 > 空方向壓(DI-)，死叉可信度低
+            # ⑤ DI+ vs DI- 方向壓力閘（僅 1h / 4h / 1d 啟用）
+            # DI 是滯後指標，計算的是「過去 14 根」的方向壓力累計。
+            # 15m/30m：MA8/EMA89 交叉發生時 DI 往往還未切換（要 3–5 根才追上），
+            #          硬擋會讓所有短線早期訊號（如 BTC 剛破局時）全部被過濾掉。
+            #          短線已有 EMA89 斜率 + HTF 對齊 + RSI 作防護，不需要 DI 確認。
+            # 1h+：等 DI 確認的代價低，保留以強化訊號可信度。
+            if tf in ("1h", "4h", "1d"):
+                if direction == "多" and c_di_plus <= c_di_minus:
+                    return None   # 空方向壓(DI-)仍 > 多方向壓(DI+)，多叉可信度低
+                if direction == "空" and c_di_minus <= c_di_plus:
+                    return None   # 多方向壓(DI+)仍 > 空方向壓(DI-)，死叉可信度低
 
             # ⑥ RSI 極端區間硬性過濾（防追高殺低）
             # RSI 超買/超賣時進場，即使方向對也會被震倉。
