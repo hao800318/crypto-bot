@@ -1600,22 +1600,52 @@ def run_strategy_scan():
 
     # ── 趨勢訊號品質門檻（維持原有嚴格條件）──
     trend_signals.sort(key=lambda x: x['score'], reverse=True)
+    trend_signals_raw = trend_signals[:]          # 篩選前原始清單（供大幣保底使用）
     trend_signals = [s for s in trend_signals
                      if s['win_rate'] >= MIN_WIN_RATE and s['adx'] >= MIN_ADX]
 
     # ── 區間訊號品質門檻（ADX 15-28，技術分 ≥ 60）──
     range_signals.sort(key=lambda x: x['score'], reverse=True)
+    range_signals_raw = range_signals[:]
     range_signals = [s for s in range_signals if s['win_rate'] >= 60]
 
     # ── 背離訊號品質門檻（ADX 20-40，技術分 ≥ 62）──
     div_signals.sort(key=lambda x: x['score'], reverse=True)
+    div_signals_raw = div_signals[:]
     div_signals = [s for s in div_signals if s['win_rate'] >= 62]
 
     print(f"   趨勢候選 {len(trend_signals)} 組 | 區間候選 {len(range_signals)} 組 | 背離候選 {len(div_signals)} 組")
 
-    # ── 組合：趨勢前 2 + 區間前 1 + 背離前 1（最多 4 個，去重後通常 2-3 個）──
-    # 優先順序：趨勢 > 背離 > 區間（趨勢確定性最高，背離早進場，區間橫盤補位）
+    # ── 組合：趨勢前 2 + 背離前 1 + 區間前 1（最多 4 個）──
+    # 優先順序：趨勢 > 背離 > 區間
     combined = trend_signals[:2] + div_signals[:1] + range_signals[:1]
+
+    # ── 大幣保底名額（BTC / ETH 專屬第5槽，寬鬆門檻）──
+    # BTC/ETH 走勢平滑，ADX 常在 30-38，被嚴格門檻直接淘汰。
+    # 從篩選前原始清單中找大幣訊號（TA ≥ 78, ADX ≥ 30），補進獨立第5槽。
+    # 只補「尚未在 combined 中的大幣」，且每次至多補 1 個（取分數最高者）。
+    _MAJOR_COINS = {'BTC', 'ETH'}
+    _in_combined  = {s['asset'] for s in combined}
+    _missing_major = _MAJOR_COINS - _in_combined
+    if _missing_major:
+        _major_pool = [
+            s for raw in (trend_signals_raw, div_signals_raw, range_signals_raw)
+            for s in raw
+            if s['asset'] in _missing_major
+            and s['win_rate'] >= 78
+            and s['adx'] >= 30
+        ]
+        # 同幣種只保留最高分
+        _seen_maj = set()
+        _major_dedup = []
+        for _s in sorted(_major_pool, key=lambda x: x['score'], reverse=True):
+            if _s['asset'] not in _seen_maj:
+                _seen_maj.add(_s['asset'])
+                _major_dedup.append(_s)
+        if _major_dedup:
+            combined = combined + [_major_dedup[0]]   # 最多補 1 個
+            print(f"   🏦 大幣保底補入：{_major_dedup[0]['asset']} {_major_dedup[0]['dir']} "
+                  f"TA={_major_dedup[0]['win_rate']} ADX={_major_dedup[0]['adx']:.1f}")
 
     with active_positions_lock:
         busy_pairs = {(p['asset'], p['dir']) for p in active_positions}
