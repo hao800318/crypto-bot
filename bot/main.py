@@ -3933,7 +3933,37 @@ def handle_telegram_updates():
                         text = msg["text"].strip()
                         chat_id = str(msg["chat"]["id"])
 
-                        if text.startswith("/scan"):
+                        if text.lower().startswith("/help"):
+                            help_text = (
+                                "📖 <b>指令說明</b>\n"
+                                "─────────────────────────\n"
+                                "🔍 <b>掃描與訊號</b>\n"
+                                "/scan — 全網掃描，精選最高技術分訊號（趨勢/區間/背離）\n"
+                                "/[幣種] — 單幣分析，例如 /btc /eth /sol\n\n"
+                                "📌 <b>持倉管理</b>\n"
+                                "/open [幣種] [方向] — 確認開倉並加入 TP/SL 監控\n"
+                                "　例：/open BTC 多　或　/open ETH 空\n"
+                                "/close [幣種] [方向] — 平倉後解除監控\n"
+                                "　例：/close BTC 多\n"
+                                "/holding — 查看目前所有持倉的監控狀態\n\n"
+                                "👁 <b>自選監控</b>\n"
+                                "/watch [幣種] — 加入自選監控（定時掃描通知）\n"
+                                "/unwatch [幣種] — 移除自選監控\n"
+                                "/watching — 查看自選監控清單\n\n"
+                                "📊 <b>統計</b>\n"
+                                "/stats — 查看近 30 天真實交易勝率統計\n"
+                                "/resetstats — 清空歷史勝率紀錄，重新開始累積\n\n"
+                                "─────────────────────────\n"
+                                "<i>TP/SL 觸發、市場惡化時系統自動推播\n"
+                                "TP1 達標後止損自動移至成本價（保本）\n"
+                                "槓桿建議僅供參考，請自行控管風險</i>"
+                            )
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": help_text, "parse_mode": "HTML"}
+                            )
+
+                        elif text.startswith("/scan"):
                             print(f"⚡ 收到 /scan 指令")
                             confirm_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
                             requests.post(confirm_url, json={"chat_id": chat_id, "text": "⚡ 收到指令！正在進行全網掃描 + 主力動向確認，精選最高技術分訊號（趨勢/區間/背離），請稍候約 15 秒..."})
@@ -4017,7 +4047,7 @@ def handle_telegram_updates():
                         elif text.startswith("/") and len(text) > 1:
                             # 通用幣種查詢：/eth /btc /sol /doge 等
                             coin_cmd = text.split()[0].lstrip("/").split("@")[0]
-                            if coin_cmd and coin_cmd.isalpha() and coin_cmd.lower() not in ("open","close","scan","holding","watch","unwatch","watching","stats","resetstats"):
+                            if coin_cmd and coin_cmd.isalpha() and coin_cmd.lower() not in ("open","close","scan","holding","watch","unwatch","watching","stats","resetstats","help"):
                                 print(f"🔍 收到幣種查詢指令：/{coin_cmd.upper()}")
                                 requests.post(
                                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
