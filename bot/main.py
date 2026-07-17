@@ -2969,8 +2969,15 @@ def send_coin_analysis(asset_input, chat_id):
     )
 
 def format_price(p):
+    """
+    依價格區間自動選擇小數位數：
+    ≥ $10  → 2位  (BTC $120000.00 / ETH $3500.00 / OKB $81.26)
+    $1–10  → 3位  (XRP $2.510 / DOT $4.250)
+    < $1   → 動態 (SHIB 0.00001798 / DOGE 0.3210)
+    """
     if p == 0: return "0.00"
-    if p >= 1: return f"{p:,.2f}" if p >= 100 else f"{p:,.4f}"
+    if p >= 10: return f"{p:,.2f}"
+    if p >= 1:  return f"{p:,.3f}"
     num_zeros = math.floor(-math.log10(abs(p)))
     precision = num_zeros + 4
     return f"{p:.{precision}f}"
