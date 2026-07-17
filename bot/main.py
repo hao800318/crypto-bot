@@ -3982,9 +3982,9 @@ def handle_telegram_updates():
                 t.start()
                 last_watchlist_check_time_local = now_ts
 
-            # A. 固定整點/半點掃描（08:00–00:00 PT，每小時 :00 和 :30 觸發一次）
+            # A. 固定整點/半點掃描（06:00–23:59 PT，每 10 分鐘觸發一次）
             _h, _m = now_la.hour, now_la.minute
-            _in_scan_window = 8 <= _h <= 23          # 08:00–23:59 PT
+            _in_scan_window = 6 <= _h <= 23          # 06:00–23:59 PT
             _is_slot = _m in (0, 10, 20, 30, 40, 50)   # 每 10 分鐘一槽
             _cur_slot = (_h, _m)
             if _is_slot and _cur_slot != last_scan_slot:
