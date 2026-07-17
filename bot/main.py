@@ -1631,15 +1631,23 @@ def run_strategy_scan():
             seen.add(key)
             deduped.append(s)
 
+    now_ts = time.time()
+    with recently_sent_lock:
+        cooled_pairs = {k for k, ts in recently_sent_signals.items()
+                        if now_ts - ts < SIGNAL_COOLDOWN_SECS}
+
     top_signals = [
         s for s in deduped
         if (s['asset'], s['dir']) not in busy_pairs
         and s['asset'] not in watch_assets
+        and (s['asset'], s['dir']) not in cooled_pairs
     ]
 
     excluded = len(deduped) - len(top_signals)
+    cooled_out = len([s for s in deduped
+                      if (s['asset'], s['dir']) in cooled_pairs])
     print(f"📊 掃描結果：趨勢 {len(trend_signals[:2])} + 區間 {len(range_signals[:1])} → "
-          f"排除衝突 {excluded} 個 → 推播 {len(top_signals)} 個")
+          f"排除衝突 {excluded} 個（含冷卻 {cooled_out} 個）→ 推播 {len(top_signals)} 個")
     return top_signals
 
 # ==================== 📊 5. 持倉監控系統 ====================
@@ -1722,6 +1730,11 @@ last_scan_cache: dict = {}
 last_scan_lock  = threading.Lock()
 near_miss_cache: dict = {}
 near_miss_lock  = threading.Lock()
+# 推播冷卻緩存：同幣種同方向推出後 90 分鐘內不再重複推播
+# key = (asset, dir)，value = 推播時間戳
+recently_sent_signals: dict = {}
+recently_sent_lock = threading.Lock()
+SIGNAL_COOLDOWN_SECS = 90 * 60  # 90 分鐘
 MIN_WIN_RATE = 90                     # 低於此勝率的訊號不推播
 MIN_ADX      = 40                     # 只推播強勢趨勢（ADX ≥ 40）
 WATCH_FILE = os.path.join(_DATA_DIR, "watch_list.json")
@@ -3031,10 +3044,14 @@ def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False, include
     if valid_signals:
         send_html_report_via_requests(valid_signals, mode_title=msg_title,
                                       target_chat_id=target_chat_id, include_news=include_news)
+        sent_at = time.time()
         with last_scan_lock:
             last_scan_cache.clear()
             for sig in valid_signals:
-                last_scan_cache[sig['asset']] = {**sig, 'cached_at': time.time()}
+                last_scan_cache[sig['asset']] = {**sig, 'cached_at': sent_at}
+        with recently_sent_lock:
+            for sig in valid_signals:
+                recently_sent_signals[(sig['asset'], sig['dir'])] = sent_at
         print(f"📦 訊號已快取 {len(valid_signals)} 筆，等待 /open 指令確認")
     else:
         if silent_on_empty:
@@ -3424,6 +3441,11 @@ def handle_close_command(text, chat_id):
             if p in active_positions:
                 active_positions.remove(p)
         save_positions(active_positions)
+
+    # 平倉後清除推播冷卻，讓同幣種可以在下次掃描重新出現
+    with recently_sent_lock:
+        for p in closing:
+            recently_sent_signals.pop((p['asset'], p['dir']), None)
 
     lines.append(f"<i>共移除 {len(closing)} 筆持倉監控</i>")
     msg = "\n".join(lines)
