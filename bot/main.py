@@ -2370,11 +2370,20 @@ def analyze_position(pos):
                 action = f"剩餘20%持倉中，等待TP3 <code>{format_price(tp3)}</code>，追蹤止損 {format_price(sl)}，現價 {format_price(current_price)}"
                 deteri = check_market_deterioration(inst_id, dir, pos.get('tf','1H'))
                 if deteri:
-                    status = "🚨 局勢惡化"
-                    action += f"\n{deteri}"
-                    push = True
+                    if not pos.get('deteri_alerted'):
+                        status = "🚨 局勢惡化"
+                        action += f"\n{deteri}"
+                        pos['deteri_alerted'] = True
+                        push = True
+                    else:
+                        push = False
                 else:
-                    push = False
+                    if pos.get('deteri_alerted'):
+                        pos['deteri_alerted'] = False
+                        action += "\n✅ 市場局勢已恢復，持倉方向重新與趨勢一致"
+                        push = True
+                    else:
+                        push = False
             else:
                 pos['tp2_hit'] = True
                 pos['sl'] = tp1   # SL 立即鎖至 TP1，剩餘倉位零風險
@@ -2404,11 +2413,20 @@ def analyze_position(pos):
                 action = f"剩餘50%持倉中，等待TP2 <code>{format_price(tp2)}</code>，追蹤止損 {format_price(sl)}，現價 {format_price(current_price)}"
                 deteri = check_market_deterioration(inst_id, dir, pos.get('tf','1H'))
                 if deteri:
-                    status = "🚨 局勢惡化"
-                    action += f"\n{deteri}"
-                    push = True
+                    if not pos.get('deteri_alerted'):
+                        status = "🚨 局勢惡化"
+                        action += f"\n{deteri}"
+                        pos['deteri_alerted'] = True
+                        push = True
+                    else:
+                        push = False
                 else:
-                    push = False   # 鯨魚警報單獨不推送，只附在訊息裡
+                    if pos.get('deteri_alerted'):
+                        pos['deteri_alerted'] = False
+                        action += "\n✅ 市場局勢已恢復，持倉方向重新與趨勢一致"
+                        push = True
+                    else:
+                        push = False
             else:
                 status = "🟢 止盈1達標"
                 # 計算費後真正保本點（含開倉+TP1+SL 三筆手續費）
@@ -2429,11 +2447,20 @@ def analyze_position(pos):
             action = f"持倉中，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%"
             deteri = check_market_deterioration(inst_id, dir, pos.get('tf','1H'))
             if deteri:
-                status = "🚨 局勢惡化"
-                action = f"現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%\n{deteri}"
-                push = True
+                if not pos.get('deteri_alerted'):
+                    status = "🚨 局勢惡化"
+                    action = f"現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%\n{deteri}"
+                    pos['deteri_alerted'] = True
+                    push = True
+                else:
+                    push = False
             else:
-                push = False
+                if pos.get('deteri_alerted'):
+                    pos['deteri_alerted'] = False
+                    action = f"現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%\n✅ 市場局勢已恢復，持倉方向重新與趨勢一致"
+                    push = True
+                else:
+                    push = False
     else:  # 空
         dist_to_sl_pct = (sl - current_price) / entry * 100
         # 止損：用 K 線高點
@@ -2484,11 +2511,20 @@ def analyze_position(pos):
                 action = f"剩餘20%持倉中，等待TP3 <code>{format_price(tp3)}</code>，追蹤止損 {format_price(sl)}，現價 {format_price(current_price)}"
                 deteri = check_market_deterioration(inst_id, dir, pos.get('tf','4H'))
                 if deteri:
-                    status = "🚨 局勢惡化"
-                    action += f"\n{deteri}"
-                    push = True
+                    if not pos.get('deteri_alerted'):
+                        status = "🚨 局勢惡化"
+                        action += f"\n{deteri}"
+                        pos['deteri_alerted'] = True
+                        push = True
+                    else:
+                        push = False
                 else:
-                    push = False
+                    if pos.get('deteri_alerted'):
+                        pos['deteri_alerted'] = False
+                        action += "\n✅ 市場局勢已恢復，持倉方向重新與趨勢一致"
+                        push = True
+                    else:
+                        push = False
             else:
                 pos['tp2_hit'] = True
                 pos['sl'] = tp1   # SL 立即鎖至 TP1，剩餘倉位零風險
@@ -2518,11 +2554,20 @@ def analyze_position(pos):
                 action = f"剩餘50%持倉中，等待TP2 <code>{format_price(tp2)}</code>，追蹤止損 {format_price(sl)}，現價 {format_price(current_price)}"
                 deteri = check_market_deterioration(inst_id, dir, pos.get('tf','4H'))
                 if deteri:
-                    status = "🚨 局勢惡化"
-                    action += f"\n{deteri}"
-                    push = True
+                    if not pos.get('deteri_alerted'):
+                        status = "🚨 局勢惡化"
+                        action += f"\n{deteri}"
+                        pos['deteri_alerted'] = True
+                        push = True
+                    else:
+                        push = False
                 else:
-                    push = False   # 鯨魚警報單獨不推送
+                    if pos.get('deteri_alerted'):
+                        pos['deteri_alerted'] = False
+                        action += "\n✅ 市場局勢已恢復，持倉方向重新與趨勢一致"
+                        push = True
+                    else:
+                        push = False
             else:
                 status = "🟢 止盈1達標"
                 # 空頭費後保本點：SL_be = 2×E×(1-f)/(1+f) - TP1
@@ -2543,11 +2588,20 @@ def analyze_position(pos):
             action = f"持倉中，現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%"
             deteri = check_market_deterioration(inst_id, dir, pos.get('tf','4H'))
             if deteri:
-                status = "🚨 局勢惡化"
-                action = f"現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%\n{deteri}"
-                push = True
+                if not pos.get('deteri_alerted'):
+                    status = "🚨 局勢惡化"
+                    action = f"現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%\n{deteri}"
+                    pos['deteri_alerted'] = True
+                    push = True
+                else:
+                    push = False
             else:
-                push = False
+                if pos.get('deteri_alerted'):
+                    pos['deteri_alerted'] = False
+                    action = f"現價 {format_price(current_price)}，距止損 {dist_to_sl_pct:.1f}%\n✅ 市場局勢已恢復，持倉方向重新與趨勢一致"
+                    push = True
+                else:
+                    push = False
 
     full_action = action
     if whale_warn:
