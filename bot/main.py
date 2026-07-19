@@ -4247,20 +4247,16 @@ def handle_telegram_updates():
                 t.start()
                 last_watchlist_check_time_local = now_ts
 
-            # A. 固定整點/半點掃描（06:00–23:59 PT，每 10 分鐘觸發一次）
+            # A. 固定整點/半點掃描（24小時全天，每 10 分鐘觸發一次）
             _h, _m = now_la.hour, now_la.minute
-            _in_scan_window = 6 <= _h <= 23          # 06:00–23:59 PT
             _is_slot = _m in (0, 10, 20, 30, 40, 50)   # 每 10 分鐘一槽
             _cur_slot = (_h, _m)
             if _is_slot and _cur_slot != last_scan_slot:
                 last_scan_slot = _cur_slot
-                if _in_scan_window:
-                    print(f"🔔 觸發定時掃描：{now_la.strftime('%H:%M')} PT")
-                    t = threading.Thread(target=scan_worker_thread, args=("定時自動速報", TELEGRAM_CHAT_ID, True, True, True))
-                    t.daemon = True
-                    t.start()
-                else:
-                    print(f"🌙 靜默時段（{now_la.strftime('%H:%M')} PT），跳過自動掃描")
+                print(f"🔔 觸發定時掃描：{now_la.strftime('%H:%M')} PT")
+                t = threading.Thread(target=scan_worker_thread, args=("定時自動速報", TELEGRAM_CHAT_ID, True, True, True))
+                t.daemon = True
+                t.start()
 
             # B2. 每日勝率播報（00:00 PT）
             if now_la.hour == 0 and now_la.minute < 2 and last_stats_date != now_la.date():
