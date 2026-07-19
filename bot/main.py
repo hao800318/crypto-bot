@@ -3926,19 +3926,6 @@ def send_stats_report(chat_id):
         msg += "─────────────────────────\n"
         msg += f"勝率：<b>{win_rate:.1f}%</b>\n\n"
 
-        # 各幣種細分
-        asset_wins   = Counter(r['asset'] for r in wins)
-        asset_losses = Counter(r['asset'] for r in losses)
-        all_assets   = sorted(set(r['asset'] for r in valid))
-        if all_assets:
-            msg += "<b>各幣種：</b>\n"
-            for a in all_assets:
-                w = asset_wins.get(a, 0)
-                l = asset_losses.get(a, 0)
-                t = w + l
-                pct = w / t * 100 if t else 0
-                msg += f"  {a}：{w}勝 {l}敗  ({pct:.0f}%)\n"
-
         # 資金費率分析
         fr_records = [r for r in valid if r.get('entry_fr') is not None]
         if len(fr_records) >= 3:
