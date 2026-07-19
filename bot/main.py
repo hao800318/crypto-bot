@@ -371,6 +371,58 @@ def find_range_bounds(df, n=2, tol=0.005, min_touches=2):
     return sup * 0.997, sup * 1.003, res * 0.997, res * 1.003
 
 
+def compute_poc(df, n_candles=50, n_buckets=200):
+    """
+    計算最近 n_candles 根 K 棒的成交量分布 Point of Control（成交量最大聚集的價格）。
+    使用等寬價格桶，每根 K 棒成交量按其高低點範圍均勻分配到覆蓋的桶中。
+    回傳 poc_price（float）或 None（資料不足時）。
+    """
+    try:
+        recent = df.tail(n_candles)
+        if len(recent) < 10:
+            return None
+        lo = float(recent['low'].min())
+        hi = float(recent['high'].max())
+        if hi <= lo or (hi - lo) < lo * 0.0001:
+            return None
+        bucket_size = (hi - lo) / n_buckets
+        vol_profile = np.zeros(n_buckets)
+        for _, row in recent.iterrows():
+            b_lo = max(0, min(int((row['low']  - lo) / bucket_size), n_buckets - 1))
+            b_hi = max(0, min(int((row['high'] - lo) / bucket_size), n_buckets - 1))
+            span = max(1, b_hi - b_lo + 1)
+            vol_profile[b_lo:b_hi + 1] += row['vol'] / span
+        poc_idx = int(np.argmax(vol_profile))
+        return lo + (poc_idx + 0.5) * bucket_size
+    except Exception:
+        return None
+
+
+def poc_check(poc, entry, atr):
+    """
+    比較進場點與 POC 的距離，回傳 (bonus: int, label: str)。
+    bonus：正數加分、負數扣分（納入 score/win_rate 計算）。
+    label：顯示在訊號訊息的說明文字。
+    距離標準（以 entry 百分比）：
+      ≤0.3%  → POC 匯流，強確認  +10
+      ≤1.0%  → 靠近 POC，有支撐  +5
+      ≤2.5%  → 參考距離，中性     0
+      >2.5%  → 偏離 POC，訊號較弱 -5
+    """
+    if poc is None:
+        return 0, ""
+    dist_pct = abs(entry - poc) / max(entry, 1e-10) * 100
+    poc_str  = format_price(poc)
+    if dist_pct <= 0.3:
+        return 10, f"✅ POC匯流 <code>{poc_str}</code>（差{dist_pct:.2f}%）"
+    elif dist_pct <= 1.0:
+        return 5,  f"📊 近POC <code>{poc_str}</code>（差{dist_pct:.1f}%）"
+    elif dist_pct <= 2.5:
+        return 0,  f"📊 POC <code>{poc_str}</code>（差{dist_pct:.1f}%）"
+    else:
+        return -5, f"⚠️ 偏離POC <code>{poc_str}</code>（差{dist_pct:.1f}%）"
+
+
 def get_candle_range_since(inst_id, since_ts, bar="1H", no_margin=False):
     """取得 since_ts 以來所有 K 線的最高價和最低價。
     用於偵測監控間隔中曾觸碰的價格極值，防止漏掉 TP/SL/填單事件。
@@ -957,6 +1009,13 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             win_rate  = score_to_win_rate(score)
             leverage  = score_to_leverage(win_rate, max_leverage)
 
+            # ── POC 匯流確認（成交量最大聚集點，進場點越靠近 POC 品質越高）──
+            _poc_price = compute_poc(df)
+            _poc_bonus, _poc_label = poc_check(_poc_price, entry_price, current_atr)
+            score    += _poc_bonus
+            win_rate  = score_to_win_rate(score)
+            leverage  = score_to_leverage(win_rate, max_leverage)
+
             # ── 動態 TP 數量：依時框與訊號強度決定幾個止盈目標 ──
             # 短週期訊號（15m/30m）動能衰減快，保守取利；長週期訊號視強度決定
             if tf in ("15m", "30m"):
@@ -1018,6 +1077,10 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                     entry_type = f"📌 {tf_tag}掛限價 {anchor_label}，止損={format_price(sl_price)}"
                     is_market_entry = False
 
+            # 將 POC 資訊附加到進場建議說明尾端（供訊號訊息顯示）
+            if _poc_label:
+                entry_type += f"  |  {_poc_label}"
+
             entry_price = round_to_tick(entry_price, asset)
             sl_price    = round_to_tick(sl_price,    asset)
             tp1         = round_to_tick(tp1,         asset)
@@ -1047,6 +1110,8 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 "fib_price":        _fib_px,
                 "fib_near":         _fib_near,
                 "fib_dist":         _fib_dist,
+                "poc_price":        _poc_price,
+                "poc_label":        _poc_label,
                 "tp_count":         tp_count,
                 "price":            current_price,      # 訊號發出時的市價（signal_price 用）
                 "is_market_entry":  is_market_entry,    # True=可直接市價進場，建倉即標為 filled
@@ -1326,6 +1391,14 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
             return None
 
         leverage = score_to_leverage(win_rate, max_leverage, signal_type='range')
+
+        # ── POC 匯流確認 ──
+        _poc_price_r = compute_poc(df)
+        _poc_bonus_r, _poc_label_r = poc_check(_poc_price_r, price, atr)
+        raw      += _poc_bonus_r
+        win_rate  = min(80, max(0, int(raw * 0.8)))
+        leverage  = score_to_leverage(win_rate, max_leverage, signal_type='range')
+
         tf_label = _TF_LABEL.get(tf, tf.upper())
         dir_tag  = "支撐做多" if direction == "多" else "壓力做空"
         tf_tag   = f"{tf_label}區間{dir_tag}"
@@ -1340,6 +1413,8 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
                           f"[{format_price(res_lo)}–{format_price(res_hi)}]，"
                           f"影線拒絕 RSI {rsi:.0f}，"
                           f"止損 {format_price(sl_price)}，TP {format_price(tp1)} / {format_price(tp2)}")
+        if _poc_label_r:
+            entry_desc += f"  |  {_poc_label_r}"
 
         # 主力動向（輕量取得，用於推播顯示完整度）
         try:
@@ -1375,6 +1450,8 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
             "entry_fr":       round(funding_rate_r * 100, 4),
             "vol_confirmed":  True,   # 已確認量縮（非放量突破）
             "tf_note":        f"支撐[{format_price(sup_lo)}–{format_price(sup_hi)}]→壓力[{format_price(res_lo)}–{format_price(res_hi)}]",
+            "poc_price":      _poc_price_r,
+            "poc_label":      _poc_label_r,
         }
     except Exception:
         return None
@@ -1552,6 +1629,14 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             return None
 
         leverage = score_to_leverage(win_rate, max_leverage, signal_type='divergence')
+
+        # ── POC 匯流確認 ──
+        _poc_price_d = compute_poc(df)
+        _poc_bonus_d, _poc_label_d = poc_check(_poc_price_d, price, atr)
+        raw      += _poc_bonus_d
+        win_rate  = min(82, max(0, int(raw * 0.9)))
+        leverage  = score_to_leverage(win_rate, max_leverage, signal_type='divergence')
+
         tf_label = _TF_LABEL.get(tf, tf.upper())
         dir_tag  = "頂背離做空" if direction == "空" else "底背離做多"
         tf_tag   = f"{tf_label}{dir_tag}"
@@ -1559,6 +1644,8 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         entry_desc = (f"⚡ {tf_tag}  {div_desc}  |  "
                       f"現價 {format_price(price)}  RSI {rsi:.0f}  ADX {adx:.0f}  "
                       f"止損 {format_price(sl_price)}  TP {format_price(tp1)} / {format_price(tp2)}")
+        if _poc_label_d:
+            entry_desc += f"  |  {_poc_label_d}"
 
         # 主力動向（用於推播顯示完整度）
         try:
@@ -1593,6 +1680,8 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             "entry_fr":       round(funding_rate_d * 100, 4),
             "vol_confirmed":  True,
             "tf_note":        div_desc,   # 背離描述作為 tf_note 備用
+            "poc_price":      _poc_price_d,
+            "poc_label":      _poc_label_d,
         }
     except Exception:
         return None
@@ -3503,6 +3592,10 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
                 html_message += f"📐 Fib <b>{_fib_lbl}</b>  <code>{format_price(_fib_px, _fib_inst)}</code>  ✅ 斐波那契匯流\n"
             else:
                 html_message += f"📐 Fib {_fib_lbl}  <code>{format_price(_fib_px, _fib_inst)}</code>  ({_fib_dist:.1f}% away)\n"
+        # ── POC 成交量聚集點 ──
+        _poc_lbl = item.get('poc_label', '')
+        if _poc_lbl:
+            html_message += f"🎯 {_poc_lbl}\n"
         # ── 時事新聞（僅定時播報）──
         if include_news:
             news_items = fetch_coin_news(item['asset'])
