@@ -956,6 +956,19 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             win_rate  = score_to_win_rate(score)
             leverage  = score_to_leverage(win_rate, max_leverage)
 
+            # ── 動態 TP 數量：依時框與訊號強度決定幾個止盈目標 ──
+            # 短週期訊號（15m/30m）動能衰減快，保守取利；長週期訊號視強度決定
+            if tf in ("15m", "30m"):
+                tp_count = 2 if score >= 75 else 1
+            elif tf == "1h":
+                if score >= 80:    tp_count = 3
+                elif score >= 65:  tp_count = 2
+                else:              tp_count = 1
+            else:  # 4h, 1d
+                if score >= 80:    tp_count = 3
+                elif score >= 68:  tp_count = 2
+                else:              tp_count = 1
+
             # ── 手續費最低保本距離：TP1 < 0.25% 時「TP1後移至開倉止損」必虧 ──
             # OKX taker fee ≈ 0.05%；開倉+TP1平倉+SL平倉 共 3 筆 = 0.15% 總費用
             # TP1 需 ≥ 0.25% 才能讓 50% TP1利潤 > 全部費用，否則保本止損實為虧損
@@ -1024,6 +1037,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 "fib_price":      _fib_px,
                 "fib_near":       _fib_near,
                 "fib_dist":       _fib_dist,
+                "tp_count":       tp_count,
             }
     except:
         pass
@@ -2368,7 +2382,7 @@ def analyze_position(pos):
             push = True
         elif effective_high >= tp2 * TP_CONFIRM:
             if pos.get('tp2_hit'):
-                # TP2 已完成，追蹤止損繼續鎖利剩餘 20%
+                # TP2 已完成（tp_count==3），追蹤止損繼續鎖利剩餘 20%
                 trail_dist = pos.get('trail_dist', entry * 0.015)
                 new_trail_sl = current_price - trail_dist
                 if new_trail_sl > sl:
@@ -2393,20 +2407,31 @@ def analyze_position(pos):
                     else:
                         push = False
             else:
-                pos['tp2_hit'] = True
-                pos['sl'] = tp1   # SL 立即鎖至 TP1，剩餘倉位零風險
-                sl = tp1
-                status = "🔵 止盈2達標"
-                if not pos.get('tp1_hit'):
-                    # K線一根直接衝破 TP1→TP2，補記 TP1 並在訊息中說明
-                    pos['tp1_hit'] = True
-                    pos['trail_dist'] = entry - pos.get('orig_sl', entry - (tp1 - entry))
-                    action = (f"✅ K線高點 {format_price(effective_high)} 同時穿越 TP1 <code>{format_price(tp1)}</code> 並達止盈2 <code>{format_price(tp2)}</code>，"
-                              f"現價 {format_price(current_price)}\n"
-                              f"🔒 TP1 段已自動確認，止損鎖至TP1（<code>{format_price(tp1)}</code>），建議平倉50%")
+                _tp_count_long = pos.get('tp_count', 3)
+                if _tp_count_long == 2:
+                    # TP2 是最終目標 → 全部平倉
+                    pos['tp2_hit'] = True
+                    if not pos.get('tp1_hit'):
+                        pos['tp1_hit'] = True
+                    status = "🟣 全部止盈"
+                    action = (f"🎯 K線高點 {format_price(effective_high)} 已達止盈2 {format_price(tp2)}，"
+                              f"現價 {format_price(current_price)}\n<b>所有止盈目標達成，建議全部平倉</b>")
                 else:
-                    action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈2 {format_price(tp2)}，"
-                              f"現價 {format_price(current_price)}｜<b>建議將止損上移至TP1（<code>{format_price(tp1)}</code>）</b>")
+                    # tp_count == 3 → 原始行為：50% 平倉，等 TP3
+                    pos['tp2_hit'] = True
+                    pos['sl'] = tp1   # SL 立即鎖至 TP1，剩餘倉位零風險
+                    sl = tp1
+                    status = "🔵 止盈2達標"
+                    if not pos.get('tp1_hit'):
+                        # K線一根直接衝破 TP1→TP2，補記 TP1 並在訊息中說明
+                        pos['tp1_hit'] = True
+                        pos['trail_dist'] = entry - pos.get('orig_sl', entry - (tp1 - entry))
+                        action = (f"✅ K線高點 {format_price(effective_high)} 同時穿越 TP1 <code>{format_price(tp1)}</code> 並達止盈2 <code>{format_price(tp2)}</code>，"
+                                  f"現價 {format_price(current_price)}\n"
+                                  f"🔒 TP1 段已自動確認，止損鎖至TP1（<code>{format_price(tp1)}</code>），建議平倉50%")
+                    else:
+                        action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈2 {format_price(tp2)}，"
+                                  f"現價 {format_price(current_price)}｜<b>建議將止損上移至TP1（<code>{format_price(tp1)}</code>）</b>")
                 push = True
         elif effective_high >= tp1 * TP_CONFIRM:
             if pos.get('tp1_hit'):
@@ -2436,17 +2461,24 @@ def analyze_position(pos):
                     else:
                         push = False
             else:
-                status = "🟢 止盈1達標"
-                # 計算費後真正保本點（含開倉+TP1+SL 三筆手續費）
-                # SL_be = 2×E×(1+f)/(1-f) - TP1，保證移至此點後總P&L ≥ 0
-                _f_r  = 0.0005
-                _sl_be = max(entry, 2 * entry * (1 + _f_r) / (1 - _f_r) - tp1)
-                action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈1 {format_price(tp1)}，"
-                          f"現價 {format_price(current_price)}｜止損已自動上移至保本點（<code>{format_price(_sl_be)}</code>）")
-                pos['tp1_hit']    = True
-                pos['trail_dist'] = entry - sl
-                pos['sl'] = _sl_be
-                sl = _sl_be
+                _tp_count_long = pos.get('tp_count', 3)
+                if _tp_count_long == 1:
+                    # 單一止盈目標 → 全部平倉
+                    status = "🟣 全部止盈"
+                    action = (f"🎯 K線高點 {format_price(effective_high)} 已達止盈 {format_price(tp1)}，"
+                              f"現價 {format_price(current_price)}\n<b>止盈目標達成，建議全部平倉</b>")
+                    pos['tp1_hit'] = True
+                else:
+                    # tp_count >= 2 → 原始行為：50% 平倉，移止損至保本，等 TP2
+                    status = "🟢 止盈1達標"
+                    _f_r  = 0.0005
+                    _sl_be = max(entry, 2 * entry * (1 + _f_r) / (1 - _f_r) - tp1)
+                    action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈1 {format_price(tp1)}，"
+                              f"現價 {format_price(current_price)}｜止損已自動上移至保本點（<code>{format_price(_sl_be)}</code>）")
+                    pos['tp1_hit']    = True
+                    pos['trail_dist'] = entry - sl
+                    pos['sl'] = _sl_be
+                    sl = _sl_be
                 push = True
         else:
             # 未觸及 SL/TP：信任策略止損，靜默監控
@@ -2534,20 +2566,31 @@ def analyze_position(pos):
                     else:
                         push = False
             else:
-                pos['tp2_hit'] = True
-                pos['sl'] = tp1   # SL 立即鎖至 TP1，剩餘倉位零風險
-                sl = tp1
-                status = "🔵 止盈2達標"
-                if not pos.get('tp1_hit'):
-                    # K線一根直接衝破 TP1→TP2，補記 TP1 並在訊息中說明（空頭）
-                    pos['tp1_hit'] = True
-                    pos['trail_dist'] = pos.get('orig_sl', entry + (entry - tp1)) - entry
-                    action = (f"✅ K線低點 {format_price(effective_low)} 同時穿越 TP1 <code>{format_price(tp1)}</code> 並達止盈2 <code>{format_price(tp2)}</code>，"
-                              f"現價 {format_price(current_price)}\n"
-                              f"🔒 TP1 段已自動確認，止損鎖至TP1（<code>{format_price(tp1)}</code>），建議平倉50%")
+                _tp_count_short = pos.get('tp_count', 3)
+                if _tp_count_short == 2:
+                    # TP2 是最終目標 → 全部平倉
+                    pos['tp2_hit'] = True
+                    if not pos.get('tp1_hit'):
+                        pos['tp1_hit'] = True
+                    status = "🟣 全部止盈"
+                    action = (f"🎯 K線低點 {format_price(effective_low)} 已達止盈2 {format_price(tp2)}，"
+                              f"現價 {format_price(current_price)}\n<b>所有止盈目標達成，建議全部平倉</b>")
                 else:
-                    action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈2 {format_price(tp2)}，"
-                              f"現價 {format_price(current_price)}｜<b>建議將止損下移至TP1（<code>{format_price(tp1)}</code>）</b>")
+                    # tp_count == 3 → 原始行為：50% 平倉，等 TP3
+                    pos['tp2_hit'] = True
+                    pos['sl'] = tp1   # SL 立即鎖至 TP1，剩餘倉位零風險
+                    sl = tp1
+                    status = "🔵 止盈2達標"
+                    if not pos.get('tp1_hit'):
+                        # K線一根直接衝破 TP1→TP2，補記 TP1 並在訊息中說明（空頭）
+                        pos['tp1_hit'] = True
+                        pos['trail_dist'] = pos.get('orig_sl', entry + (entry - tp1)) - entry
+                        action = (f"✅ K線低點 {format_price(effective_low)} 同時穿越 TP1 <code>{format_price(tp1)}</code> 並達止盈2 <code>{format_price(tp2)}</code>，"
+                                  f"現價 {format_price(current_price)}\n"
+                                  f"🔒 TP1 段已自動確認，止損鎖至TP1（<code>{format_price(tp1)}</code>），建議平倉50%")
+                    else:
+                        action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈2 {format_price(tp2)}，"
+                                  f"現價 {format_price(current_price)}｜<b>建議將止損下移至TP1（<code>{format_price(tp1)}</code>）</b>")
                 push = True
         elif effective_low <= tp1 / TP_CONFIRM:
             if pos.get('tp1_hit'):
@@ -2577,17 +2620,24 @@ def analyze_position(pos):
                     else:
                         push = False
             else:
-                status = "🟢 止盈1達標"
-                # 空頭費後保本點：SL_be = 2×E×(1-f)/(1+f) - TP1
-                # TP1 < entry（空頭），SL_be 若 > entry = 需要讓餘倉再跌才真正保本
-                _f_r  = 0.0005
-                _sl_be_s = min(entry, 2 * entry * (1 - _f_r) / (1 + _f_r) - tp1)
-                action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈1 {format_price(tp1)}，"
-                          f"現價 {format_price(current_price)}｜止損已自動下移至保本點（<code>{format_price(_sl_be_s)}</code>）")
-                pos['tp1_hit']    = True
-                pos['trail_dist'] = sl - entry
-                pos['sl'] = _sl_be_s
-                sl = _sl_be_s
+                _tp_count_short = pos.get('tp_count', 3)
+                if _tp_count_short == 1:
+                    # 單一止盈目標 → 全部平倉
+                    status = "🟣 全部止盈"
+                    action = (f"🎯 K線低點 {format_price(effective_low)} 已達止盈 {format_price(tp1)}，"
+                              f"現價 {format_price(current_price)}\n<b>止盈目標達成，建議全部平倉</b>")
+                    pos['tp1_hit'] = True
+                else:
+                    # tp_count >= 2 → 原始行為：50% 平倉，移止損至保本，等 TP2
+                    status = "🟢 止盈1達標"
+                    _f_r  = 0.0005
+                    _sl_be_s = min(entry, 2 * entry * (1 - _f_r) / (1 + _f_r) - tp1)
+                    action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈1 {format_price(tp1)}，"
+                              f"現價 {format_price(current_price)}｜止損已自動下移至保本點（<code>{format_price(_sl_be_s)}</code>）")
+                    pos['tp1_hit']    = True
+                    pos['trail_dist'] = sl - entry
+                    pos['sl'] = _sl_be_s
+                    sl = _sl_be_s
                 push = True
         else:
             # 未觸及 SL/TP：信任策略止損，靜默監控
@@ -3370,21 +3420,25 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         # ── 分隔 ──
         html_message += "┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         # ── 進場 / 止損 / TP（等寬對齊，CJK=2格 ASCII=1格，統一補至6格） ──
+        _tc = item.get('tp_count', 3)
         html_message += "<pre>"
         html_message += f"進場  {format_price(item['entry'])}\n"
         html_message += f"止損  {format_price(item['sl'])}\n"
         html_message += f"TP1   {format_price(item['tp1'])}\n"
-        html_message += f"TP2   {format_price(item['tp2'])}\n"
-        html_message += f"TP3   {format_price(item['tp3'])}\n"
+        if _tc >= 2:
+            html_message += f"TP2   {format_price(item['tp2'])}\n"
+        if _tc >= 3:
+            html_message += f"TP3   {format_price(item['tp3'])}\n"
         html_message += "</pre>"
-        # ── TP1後止損提示（費後真正保本點，非開倉原點）──
-        _f_msg = 0.0005
-        _e_msg, _t1_msg = item['entry'], item['tp1']
-        if item['dir'] == '多':
-            _sl_be_msg = max(_e_msg, 2 * _e_msg * (1 + _f_msg) / (1 - _f_msg) - _t1_msg)
-        else:
-            _sl_be_msg = min(_e_msg, 2 * _e_msg * (1 - _f_msg) / (1 + _f_msg) - _t1_msg)
-        html_message += f"▸ TP1達標 → 止損移至 <code>{format_price(_sl_be_msg)}</code>（含手續費保本）\n"
+        # ── TP1後止損提示（費後真正保本點，非開倉原點）── 只有多 TP 策略才需要移止損等下一個 TP
+        if _tc >= 2:
+            _f_msg = 0.0005
+            _e_msg, _t1_msg = item['entry'], item['tp1']
+            if item['dir'] == '多':
+                _sl_be_msg = max(_e_msg, 2 * _e_msg * (1 + _f_msg) / (1 - _f_msg) - _t1_msg)
+            else:
+                _sl_be_msg = min(_e_msg, 2 * _e_msg * (1 - _f_msg) / (1 + _f_msg) - _t1_msg)
+            html_message += f"▸ TP1達標 → 止損移至 <code>{format_price(_sl_be_msg)}</code>（含手續費保本）\n"
         # ── 斐波那契回撤匯流 ──
         _fib_lbl  = item.get('fib_level')
         _fib_near = item.get('fib_near', False)
