@@ -2185,8 +2185,10 @@ def analyze_position(pos):
     entry = pos['entry']
     sl    = pos['sl']
     tp1   = pos['tp1']
-    tp2   = pos['tp2']
-    tp3   = pos['tp3']
+    # 安全取值：tp2/tp3 可能因舊持倉或 tp_count=1 而為 None，fallback 到合理估算值
+    _tp1  = tp1
+    tp2   = pos.get('tp2') or (_tp1 + (_tp1 - entry) * 1.5)
+    tp3   = pos.get('tp3') or (_tp1 + (_tp1 - entry) * 2.5)
 
     _tf_str = pos.get('tf', '1H')
     if "15M" in _tf_str:
@@ -2368,12 +2370,10 @@ def analyze_position(pos):
     elif oi_change > 5:
         whale_warn += f"\n📈 OI 上升 {oi_change:.1f}%，主力持續加倉，<b>可繼續持倉並同步上移止損鎖利</b>"
 
-    # TP 確認緩衝：要求超過 TP 0.03% 才算達標，避免 1-pip wick 誤觸
-    # 0.03% 足以擋掉最小假 wick（原始 ZKP 案例：wick 只超 TP 0.022%）
-    # 比舊值 0.05% 寬鬆：讓 wick 超 TP 0.03-0.05% 的真實觸碰正常觸發 TP1，
-    # 防止 TP1 被錯過後 SL 仍在原位導致不必要虧損。
+    # TP 確認緩衝：只要求超過 TP 0.01% 即觸發，避免漏掉真實觸碰
+    # 0.01% 緩衝仍能擋掉數據噪音，但不會讓價格剛好踩到 TP1 的情況被漏掉
     # SL 不加緩衝（止損要快，只要 wick 碰到就觸發）
-    TP_CONFIRM = 1.0003   # 多頭 TP：effective_high >= tp * TP_CONFIRM
+    TP_CONFIRM = 1.0001   # 多頭 TP：effective_high >= tp * TP_CONFIRM
                           # 空頭 TP：effective_low  <= tp / TP_CONFIRM
 
     # ── 持倉狀態判定（用 K 線高低點而非現價，防止監控間隔中的事件被漏掉）──
@@ -2916,7 +2916,12 @@ def run_position_monitor():
             to_remove.append(pos)
             continue
 
-        status, action, push = analyze_position(pos)
+        try:
+            status, action, push = analyze_position(pos)
+        except Exception as _e:
+            print(f"⚠️ analyze_position 發生錯誤 [{pos.get('asset','?')} {pos.get('dir','?')}]：{_e}")
+            import traceback; traceback.print_exc()
+            continue
         if status is None:
             continue
 
