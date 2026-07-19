@@ -983,30 +983,39 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 tp3 = min(tp3, round(tp2 - _fee_min, 8))
 
             # ── 進場建議文字（依現價與進場點的偏離程度給出建議）──
+            # is_market_entry = True 表示可直接市價進場（現價已貼近或已超過進場點）
             if direction == "多":
                 gap_pct = (current_price - entry_price) / entry_price * 100
                 if current_rsi > 65:
                     entry_type = f"⚠️ {tf_tag}RSI過熱({current_rsi:.1f})，宜等回踩支撐後再掛限價 {anchor_label}"
+                    is_market_entry = False
                 elif current_price < entry_price:
                     entry_type = (f"🔴 {tf_tag}現價 {format_price(current_price)} 低於 {anchor_label}，"
                                   f"偏離 {abs(gap_pct):.2f}%｜確認大週期趨勢仍多，可市價進場")
+                    is_market_entry = True   # 現價已超過進場點，視為可立即市價成交
                 elif gap_pct <= 0.5:
                     entry_type = (f"⚡ {tf_tag}現價緊貼 {anchor_label}（差 {gap_pct:.2f}%），"
                                   f"建議<b>市價進場</b>或快速掛限價 {format_price(entry_price)}")
+                    is_market_entry = True
                 else:
                     entry_type = f"📌 {tf_tag}掛限價 {anchor_label}，止損={format_price(sl_price)}"
+                    is_market_entry = False
             else:
                 gap_pct = (entry_price - current_price) / entry_price * 100
                 if current_rsi < 35:
                     entry_type = f"⚠️ {tf_tag}RSI超賣({current_rsi:.1f})，宜等反彈至壓力後再掛限價 {anchor_label}"
+                    is_market_entry = False
                 elif current_price > entry_price:
                     entry_type = (f"🔴 {tf_tag}現價 {format_price(current_price)} 高於 {anchor_label}，"
                                   f"偏離 {abs(gap_pct):.2f}%｜確認大週期趨勢仍空，可市價進場")
+                    is_market_entry = True   # 現價已超過進場點，視為可立即市價成交
                 elif gap_pct <= 0.5:
                     entry_type = (f"⚡ {tf_tag}現價緊貼 {anchor_label}（差 {gap_pct:.2f}%），"
                                   f"建議<b>市價進場</b>或快速掛限價 {format_price(entry_price)}")
+                    is_market_entry = True
                 else:
                     entry_type = f"📌 {tf_tag}掛限價 {anchor_label}，止損={format_price(sl_price)}"
+                    is_market_entry = False
 
             entry_price = round_to_tick(entry_price, asset)
             sl_price    = round_to_tick(sl_price,    asset)
@@ -1033,11 +1042,13 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 "vol_confirmed":  cross_vol > avg_vol_20,
                 "tf_note":        tf_note,
                 "entry_fr":       round(funding_rate * 100, 4),  # 進場時資金費率（%）
-                "fib_level":      _fib_lbl,
-                "fib_price":      _fib_px,
-                "fib_near":       _fib_near,
-                "fib_dist":       _fib_dist,
-                "tp_count":       tp_count,
+                "fib_level":        _fib_lbl,
+                "fib_price":        _fib_px,
+                "fib_near":         _fib_near,
+                "fib_dist":         _fib_dist,
+                "tp_count":         tp_count,
+                "price":            current_price,      # 訊號發出時的市價（signal_price 用）
+                "is_market_entry":  is_market_entry,    # True=可直接市價進場，建倉即標為 filled
             }
     except:
         pass
@@ -2215,17 +2226,29 @@ def analyze_position(pos):
         #   多頭回調（進場 ≤ signal_price）→ 等價格「跌」到進場：low  ≤ entry
         #   空頭突破（進場 < signal_price）→ 等價格「跌」到進場：low  ≤ entry
         #   空頭回調（進場 ≥ signal_price）→ 等價格「漲」到進場：high ≥ entry
-        signal_price = pos.get('signal_price', entry)  # 無記錄時 fallback = entry（視為回調）
+        signal_price = pos.get('signal_price', entry)  # 無記錄時 fallback = entry
         if dir == "多":
             if entry > signal_price:   # 突破多：等高點達到進場
-                filled_by_candle = fill_eff_high is not None and fill_eff_high >= entry
+                filled_by_candle = (
+                    (fill_eff_high is not None and fill_eff_high >= entry) or
+                    current_price >= entry   # 現價已超過進場點（市價買入後繼續上漲）
+                )
             else:                      # 回調多：等低點跌到進場
-                filled_by_candle = fill_eff_low  is not None and fill_eff_low  <= entry
+                filled_by_candle = (
+                    (fill_eff_low is not None and fill_eff_low <= entry) or
+                    current_price <= entry   # 現價已回落至進場點（K線資料不足時補充）
+                )
         else:  # 空
             if entry < signal_price:   # 突破空：等低點跌到進場
-                filled_by_candle = fill_eff_low  is not None and fill_eff_low  <= entry
+                filled_by_candle = (
+                    (fill_eff_low is not None and fill_eff_low <= entry) or
+                    current_price <= entry
+                )
             else:                      # 回調空：等高點漲到進場
-                filled_by_candle = fill_eff_high is not None and fill_eff_high >= entry
+                filled_by_candle = (
+                    (fill_eff_high is not None and fill_eff_high >= entry) or
+                    current_price >= entry
+                )
         if filled_by_candle:
             pos['filled']          = True
             pos['fill_ts']         = time.time()   # 記錄成交時間，供 TP/SL K 線範圍保護使用
@@ -3421,8 +3444,9 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         html_message += "┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         # ── 進場 / 止損 / TP（等寬對齊，CJK=2格 ASCII=1格，統一補至6格） ──
         _tc = item.get('tp_count', 3)
+        _mkt_tag = "(市價)" if item.get('is_market_entry') else ""
         html_message += "<pre>"
-        html_message += f"進場  {format_price(item['entry'])}\n"
+        html_message += f"進場  {format_price(item['entry'])}{_mkt_tag}\n"
         html_message += f"止損  {format_price(item['sl'])}\n"
         html_message += f"TP1   {format_price(item['tp1'])}\n"
         if _tc >= 2:
@@ -3506,6 +3530,7 @@ def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False, include
                     already = any(p['asset'] == sig['asset'] and p['dir'] == sig['dir']
                                   for p in active_positions)
                     if not already:
+                        _is_mkt = sig.get('is_market_entry', False)
                         new_pos = {
                             'asset':          sig['asset'],
                             'dir':            sig['dir'],
@@ -3516,11 +3541,13 @@ def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False, include
                             'tp1':            sig['tp1'],
                             'tp2':            sig['tp2'],
                             'tp3':            sig['tp3'],
-                            'signal_price':   sig.get('signal_price', sig['entry']),
+                            'tp_count':       sig.get('tp_count', 3),
+                            'signal_price':   sig.get('price', sig['entry']),  # 訊號發出時市價
                             'signal_type':    sig.get('signal_type', 'trend'),
                             'reported_at':    sent_at,
                             'last_checked_ts': sent_at,
-                            'filled':         False,
+                            'filled':         _is_mkt,   # 市價進場：立即視為已成交，跳過等待期
+                            'fill_ts':        sent_at if _is_mkt else 0,
                             'entry_fr':       sig.get('entry_fr'),
                         }
                         active_positions.append(new_pos)
@@ -4377,19 +4404,22 @@ def handle_telegram_updates():
                                                 _sp = _raw_entry * 1.003  # entry < signal_price → 突破空
                                         else:
                                             _sp = sig_cb.get('price', _raw_entry)
+                                        _is_mkt_cb = sig_cb.get('is_market_entry', False)
                                         new_pos_cb = {
                                             'asset': sig_cb['asset'], 'dir': sig_cb['dir'],
                                             'tf': sig_cb['tf'], 'entry': _raw_entry,
                                             'sl': sig_cb['sl'],
-                                            'orig_sl': sig_cb['sl'],  # 原始止損，trail_dist 基準
+                                            'orig_sl': sig_cb['sl'],
                                             'tp1': sig_cb['tp1'],
                                             'tp2': sig_cb['tp2'], 'tp3': sig_cb['tp3'],
+                                            'tp_count':       sig_cb.get('tp_count', 3),
                                             'signal_price':   _sp,
                                             'signal_type':    _sig_type,
                                             'reported_at': now_ts_cb,
                                             'last_checked_ts': now_ts_cb,
-                                            'filled': False,
-                                            'entry_fr': sig_cb.get('entry_fr'),  # 進場時資金費率
+                                            'filled': _is_mkt_cb,  # 市價進場：立即視為已成交
+                                            'fill_ts': now_ts_cb if _is_mkt_cb else 0,
+                                            'entry_fr': sig_cb.get('entry_fr'),
                                         }
                                         with active_positions_lock:
                                             active_positions.append(new_pos_cb)
