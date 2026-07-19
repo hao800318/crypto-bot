@@ -2182,8 +2182,11 @@ def save_stats(records):
     except Exception as e:
         print(f"⚠️ 儲存統計檔案失敗：{e}")
 
-def record_trade_outcome(pos, outcome):
-    """記錄交易結果；outcome: win/loss"""
+def record_trade_outcome(pos, outcome, exit_type=None):
+    """
+    記錄交易結果；outcome: win/loss
+    exit_type: tp1/tp2/tp3/sl/breakeven/timeout/manual（None 時自動從 pos 推算）
+    """
     records = load_stats()
     # 取進場時記錄的資金費率（若無則取當前費率）
     entry_fr = pos.get('entry_fr', None)
@@ -2197,17 +2200,55 @@ def record_trade_outcome(pos, outcome):
             entry_fr = float(fr_res['data'][0]['fundingRate'])
         except Exception:
             entry_fr = 0.0
+
+    # 推算出場類型（若未指定）
+    if exit_type is None:
+        if pos.get('tp3_hit'):
+            exit_type = "tp3"
+        elif pos.get('tp2_hit'):
+            exit_type = "tp2"
+        elif pos.get('tp1_hit'):
+            exit_type = "tp1"
+        elif outcome == 'loss':
+            exit_type = "sl"
+        else:
+            exit_type = "unknown"
+
+    # 用目標/止損價推算預估損益%（正數=獲利，負數=虧損）
+    entry  = pos.get('entry') or 0
+    pnl_pct = None
+    if entry > 0:
+        sign = 1 if pos.get('dir') == "多" else -1
+        _tgt_map = {
+            "tp3": pos.get('tp3'), "tp2": pos.get('tp2'),
+            "tp1": pos.get('tp1'), "sl":  pos.get('sl'),
+            "breakeven": entry,
+        }
+        _tgt = _tgt_map.get(exit_type)
+        if _tgt:
+            pnl_pct = round(sign * (_tgt - entry) / entry * 100, 3)
+
     records.append({
-        "asset":    pos['asset'],
-        "dir":      pos['dir'],
-        "tf":       pos.get('tf', '—'),
-        "entry":    pos.get('entry'),
-        "entry_fr": round(entry_fr * 100, 4),   # 百分比，保留4位
-        "outcome":  outcome,
-        "timestamp": time.time(),
+        "asset":       pos['asset'],
+        "dir":         pos['dir'],
+        "tf":          pos.get('tf', '—'),
+        "signal_type": pos.get('signal_type', 'trend'),
+        "entry":       entry or None,
+        "sl":          pos.get('sl'),
+        "tp1":         pos.get('tp1'),
+        "adx":         pos.get('adx', 0),
+        "score":       pos.get('score', 0),
+        "win_rate":    pos.get('win_rate', 0),
+        "entry_fr":    round(entry_fr * 100, 4),
+        "exit_type":   exit_type,
+        "pnl_pct":     pnl_pct,
+        "outcome":     outcome,
+        "timestamp":   time.time(),
+        "open_time":   pos.get('timestamp', pos.get('signal_time', 0)),
     })
     save_stats(records)
-    print(f"📊 記錄交易結果：{pos['asset']} {pos['dir']} → {outcome}  費率{entry_fr*100:.4f}%")
+    pnl_str = f"  P&L≈{pnl_pct:+.2f}%" if pnl_pct is not None else ""
+    print(f"📊 記錄交易結果：{pos['asset']} {pos['dir']} → {outcome} ({exit_type}){pnl_str}  費率{entry_fr*100:.4f}%")
 
 # 最近一次掃描結果快取（key = asset 如 "ETH"，value = signal dict）
 # 供 /open 指令查詢，不自動加入持倉監控
@@ -4206,6 +4247,220 @@ def handle_close_command(text, chat_id):
     )
 
 
+def send_daily_journal(chat_id):
+    """
+    每日交易日誌（23:50 PT 觸發）。
+    總結當天所有完整交易，列出勝敗明細、策略失效原因分析、優化建議。
+    """
+    _url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    _cid = str(chat_id)
+    la_tz   = pytz.timezone('America/Los_Angeles')
+    now_la  = datetime.datetime.now(la_tz)
+    today   = now_la.date()
+
+    # 今日 00:00 PT 的 Unix 時間戳
+    day_start = la_tz.localize(datetime.datetime.combine(today, datetime.time.min)).timestamp()
+
+    try:
+        all_records = load_stats()
+        today_records = [
+            r for r in all_records
+            if r.get('timestamp', 0) >= day_start
+            and r.get('outcome') in ('win', 'loss')
+        ]
+    except Exception as e:
+        requests.post(_url, json={"chat_id": _cid,
+            "text": f"⚠️ 日誌讀取失敗：{e}"}, timeout=10)
+        return
+
+    date_str = today.strftime('%Y-%m-%d')
+    header   = f"📔 <b>【每日交易日誌】{date_str} PT</b>\n"
+
+    if not today_records:
+        requests.post(_url, json={"chat_id": _cid,
+            "text": header + "\n今日無完整交易記錄。\n持倉中或無訊號觸發，繼續監控中。",
+            "parse_mode": "HTML"}, timeout=10)
+        return
+
+    wins   = [r for r in today_records if r['outcome'] == 'win']
+    losses = [r for r in today_records if r['outcome'] == 'loss']
+    total  = len(today_records)
+    wr     = len(wins) / total * 100
+
+    # ── 出場類型標籤 ──
+    def _exit_tag(r):
+        et = r.get('exit_type', '')
+        return {"tp3": "TP3 🎯", "tp2": "TP2 ✅", "tp1": "TP1 ✅",
+                "breakeven": "保本 🛡️", "sl": "SL ❌",
+                "timeout": "逾時 ⏰", "manual": "手動 🖐️"}.get(et, et)
+
+    # ── P&L 標籤 ──
+    def _pnl_tag(r):
+        v = r.get('pnl_pct')
+        return f"{v:+.2f}%" if v is not None else "—"
+
+    # ── 策略標籤 ──
+    def _st_tag(r):
+        return {"trend": "趨勢", "range": "區間", "divergence": "背離"}.get(
+            r.get('signal_type', 'trend'), r.get('signal_type', ''))
+
+    # ── 失效原因分析（單筆敗場）──
+    def _failure_reason(r):
+        st  = r.get('signal_type', 'trend')
+        tf  = r.get('tf', '')
+        adx = r.get('adx') or 0
+        if st == 'trend':
+            if '15M' in tf or '超短' in tf:
+                return "超短線(15M)雜訊大，趨勢動能維持時間短，快速反轉"
+            if adx < 30:
+                return f"ADX偏低({adx:.0f})，趨勢方向性不足，進場後趨勢消失"
+            if adx > 55:
+                return "ADX過高，趨勢末段進場，動能耗盡後反轉"
+            return "趨勢中途反轉，建議加強更高時框方向確認"
+        if st == 'range':
+            if adx > 35:
+                return f"ADX過高({adx:.0f})，市場已由盤整轉趨勢，區間結構被突破"
+            return "支撐/壓力位被有效突破，盤整結構失效"
+        if st == 'divergence':
+            if adx > 35:
+                return f"強趨勢(ADX {adx:.0f})中的背離往往是假反轉，趨勢繼續延伸"
+            if adx < 20:
+                return f"ADX偏低({adx:.0f})，背離訊號可靠性低，方向性不明"
+            return "背離反轉空間不足，趨勢未完全結束便再度延伸"
+        return "策略條件在出場前發生變化"
+
+    # ── 組合今日概要 ──
+    tp_types   = [r.get('exit_type','') for r in wins]
+    tp3_c = tp_types.count('tp3')
+    tp2_c = tp_types.count('tp2')
+    tp1_c = tp_types.count('tp1')
+    be_c  = tp_types.count('breakeven')
+    sl_c  = sum(1 for r in losses if r.get('exit_type') == 'sl')
+
+    win_detail  = "  ".join(filter(None, [
+        f"TP3×{tp3_c}" if tp3_c else "",
+        f"TP2×{tp2_c}" if tp2_c else "",
+        f"TP1×{tp1_c}" if tp1_c else "",
+        f"保本×{be_c}" if be_c  else "",
+    ])) or "—"
+    loss_detail = f"SL×{sl_c}" if sl_c else "逾時/手動"
+
+    msg  = header
+    msg += "─────────────────────────\n"
+    msg += f"📊 <b>今日概要</b>  共 {total} 筆完整交易\n"
+    msg += f"🟢 勝  <b>{len(wins)}</b> 筆 ({wr:.0f}%)   {win_detail}\n"
+    msg += f"🔴 敗  <b>{len(losses)}</b> 筆 ({100-wr:.0f}%)   {loss_detail}\n"
+
+    # ── 勝場明細 ──
+    if wins:
+        msg += "\n🟢 <b>勝場明細</b>\n"
+        for r in wins[:8]:   # 最多顯示 8 筆，避免訊息過長
+            msg += (f"  ✅ <b>{r['asset']}</b> {r.get('dir','')} "
+                    f"{r.get('tf','')} {_st_tag(r)}  "
+                    f"{_exit_tag(r)}  {_pnl_tag(r)}  "
+                    f"ADX{r.get('adx',0):.0f}  TA{r.get('win_rate',0)}\n")
+
+    # ── 敗場明細 + 失效原因 ──
+    if losses:
+        msg += "\n🔴 <b>敗場明細</b>\n"
+        for r in losses[:8]:
+            msg += (f"  ❌ <b>{r['asset']}</b> {r.get('dir','')} "
+                    f"{r.get('tf','')} {_st_tag(r)}  "
+                    f"{_exit_tag(r)}  {_pnl_tag(r)}  "
+                    f"ADX{r.get('adx',0):.0f}  TA{r.get('win_rate',0)}\n"
+                    f"     ↳ {_failure_reason(r)}\n")
+
+    # ── 策略分析（各策略勝敗拆解）──
+    msg += "\n📌 <b>策略分析</b>\n"
+    for stype, label in [('trend','趨勢'), ('range','區間'), ('divergence','背離')]:
+        st_recs = [r for r in today_records if r.get('signal_type','trend') == stype]
+        if not st_recs:
+            continue
+        st_w = sum(1 for r in st_recs if r['outcome'] == 'win')
+        st_l = len(st_recs) - st_w
+        st_wr = st_w / len(st_recs) * 100
+        flag = "⚠️" if st_wr < 50 and len(st_recs) >= 2 else ("✅" if st_wr >= 70 else "")
+        # 時框細分
+        tf_notes = []
+        for tf_key, tf_name in [('15M','15M'), ('30M','30M'), ('1H','1H'), ('4H','4H'), ('1D','1D')]:
+            tf_recs = [r for r in st_recs if tf_key in r.get('tf','')]
+            if len(tf_recs) >= 1:
+                tw = sum(1 for r in tf_recs if r['outcome'] == 'win')
+                tf_notes.append(f"{tf_name}:{tw}/{len(tf_recs)}")
+        tf_str = "  ".join(tf_notes)
+        msg += f"  {flag} {label}策略  {st_w}勝/{st_l}敗 ({st_wr:.0f}%)  {tf_str}\n"
+
+    # ── 優化建議（規則引擎）──
+    suggestions = []
+
+    # 1. 15M 趨勢勝率分析
+    trend_15m = [r for r in today_records
+                 if r.get('signal_type','trend') == 'trend' and '15M' in r.get('tf','')]
+    if len(trend_15m) >= 2:
+        wr15 = sum(1 for r in trend_15m if r['outcome'] == 'win') / len(trend_15m) * 100
+        if wr15 < 50:
+            suggestions.append(f"15M趨勢今日勝率 {wr15:.0f}%（{len(trend_15m)}筆），建議提高15M的ADX/分數門檻")
+
+    # 2. 背離策略分析
+    div_recs = [r for r in today_records if r.get('signal_type','trend') == 'divergence']
+    if len(div_recs) >= 2:
+        div_wr = sum(1 for r in div_recs if r['outcome'] == 'win') / len(div_recs) * 100
+        if div_wr < 40:
+            avg_adx = sum(r.get('adx',0) for r in div_recs) / len(div_recs)
+            suggestions.append(
+                f"背離策略今日勝率 {div_wr:.0f}%（{len(div_recs)}筆），"
+                f"均ADX={avg_adx:.0f}，強趨勢中背離失敗率高，建議ADX>35時跳過")
+
+    # 3. 區間策略分析
+    rng_recs = [r for r in today_records if r.get('signal_type','trend') == 'range']
+    if len(rng_recs) >= 2:
+        rng_wr = sum(1 for r in rng_recs if r['outcome'] == 'win') / len(rng_recs) * 100
+        if rng_wr < 40:
+            suggestions.append(
+                f"區間策略今日勝率 {rng_wr:.0f}%（{len(rng_recs)}筆），今日波動性強非盤整市，"
+                f"可考慮在BTC大幅波動時降低區間策略權重")
+
+    # 4. 最佳策略+時框組合
+    best_combo = None
+    best_combo_wr = 0
+    for stype in ('trend','range','divergence'):
+        for tf_key in ('4H','1H','1D','30M','15M'):
+            combo = [r for r in today_records
+                     if r.get('signal_type','trend') == stype and tf_key in r.get('tf','')]
+            if len(combo) >= 2:
+                c_wr = sum(1 for r in combo if r['outcome'] == 'win') / len(combo) * 100
+                if c_wr > best_combo_wr:
+                    best_combo_wr = c_wr
+                    best_combo = (tf_key, stype, len(combo), c_wr)
+    if best_combo and best_combo_wr >= 75:
+        label_map = {'trend':'趨勢','range':'區間','divergence':'背離'}
+        suggestions.append(
+            f"{best_combo[0]} {label_map[best_combo[1]]}今日表現最佳 "
+            f"({best_combo[2]}筆勝率{best_combo[3]:.0f}%)，可優先追蹤此類訊號")
+
+    # 5. 整體勝率
+    if total >= 3 and wr < 50:
+        suggestions.append("今日整體勝率偏低，建議檢視是否處於震盪市，考慮暫緩開倉等待更明確趨勢")
+
+    if suggestions:
+        msg += "\n💡 <b>優化建議</b>\n"
+        for i, s in enumerate(suggestions[:4], 1):
+            msg += f"  {i}. {s}\n"
+    else:
+        msg += "\n💡 今日策略運作正常，無特別優化建議。\n"
+
+    msg += "\n<i>日誌基於當日已結案交易自動生成，P&L為預估值（依TP/SL目標推算）。</i>"
+
+    if len(msg) > 4000:
+        msg = msg[:3990] + "\n…（訊息過長已截斷）"
+
+    try:
+        requests.post(_url, json={"chat_id": _cid, "text": msg, "parse_mode": "HTML"}, timeout=15)
+        print(f"📔 每日交易日誌已發送：{date_str}，共 {total} 筆，勝率 {wr:.0f}%")
+    except Exception as e:
+        print(f"❌ 每日交易日誌發送失敗：{e}")
+
+
 def send_stats_report(chat_id):
     """勝率統計播報（近30天）"""
     _url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -4555,6 +4810,7 @@ def handle_telegram_updates():
     last_monitor_time        = 0
     last_watchlist_check_time_local = 0
     last_stats_date          = None  # 每日勝率播報去重
+    last_journal_date        = None  # 每日交易日誌去重
 
     while True:
         try:
@@ -4576,6 +4832,14 @@ def handle_telegram_updates():
                 last_scan_slot = _cur_slot
                 print(f"🔔 觸發定時掃描：{now_la.strftime('%H:%M')} PT")
                 t = threading.Thread(target=scan_worker_thread, args=("定時自動速報", TELEGRAM_CHAT_ID, True, True, True))
+                t.daemon = True
+                t.start()
+
+            # B1. 每日交易日誌（23:50 PT，在當天結束前總結）
+            if now_la.hour == 23 and 50 <= now_la.minute < 52 and last_journal_date != now_la.date():
+                last_journal_date = now_la.date()
+                print(f"📔 觸發每日交易日誌：{now_la.strftime('%Y-%m-%d')}")
+                t = threading.Thread(target=send_daily_journal, args=(TELEGRAM_CHAT_ID,))
                 t.daemon = True
                 t.start()
 
