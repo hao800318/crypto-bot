@@ -2896,6 +2896,11 @@ def run_position_monitor():
                 f"   OI變化：{oi_change:+.1f}% | 多空比：{ls_ratio:.2f}\n"
                 f"   {recommendation}")
             alerts.append(expiry_alert)
+            # ── 逾時移除前記錄結果（防止 TP1 已達標的勝場被漏記）──
+            if pos.get('tp1_hit') or pos.get('tp2_hit'):
+                record_trade_outcome(pos, "win")
+            elif pos.get('filled', False):
+                record_trade_outcome(pos, "loss")
             to_remove.append(pos)
             continue
 
