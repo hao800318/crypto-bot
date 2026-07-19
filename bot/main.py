@@ -2955,18 +2955,21 @@ def run_position_monitor():
     now_str_p = datetime.datetime.now(la_tz_p).strftime('%H:%M PT')
     text_url_p = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     for pos_p, _, action_p in pending_alerts:
-        d_p  = "🟩多" if pos_p['dir'] == "多" else "🟥空"
-        tf_p = pos_p.get('tf', '4H')
-        msg_p = (
-            f"⏳ <b>{pos_p['asset']} 掛單更新</b>  {now_str_p}\n"
-            f"{d_p}  {tf_p}  "
-            f"進場 <code>{format_price(pos_p['entry'])}</code>  止損 <code>{format_price(pos_p['sl'])}</code>\n"
-            f"{action_p}"
-        )
-        requests.post(text_url_p, json={
-            "chat_id": str(TELEGRAM_CHAT_ID), "text": msg_p,
-            "parse_mode": "HTML"
-        })
+        try:
+            d_p  = "🟩多" if pos_p['dir'] == "多" else "🟥空"
+            tf_p = pos_p.get('tf', '4H')
+            msg_p = (
+                f"⏳ <b>{pos_p['asset']} 掛單更新</b>  {now_str_p}\n"
+                f"{d_p}  {tf_p}  "
+                f"進場 <code>{format_price(pos_p['entry'])}</code>  止損 <code>{format_price(pos_p['sl'])}</code>\n"
+                f"{action_p}"
+            )
+            requests.post(text_url_p, json={
+                "chat_id": str(TELEGRAM_CHAT_ID), "text": msg_p,
+                "parse_mode": "HTML"
+            })
+        except Exception as _pe:
+            print(f"⚠️ pending_alert 發送錯誤 [{pos_p.get('asset','?')}]：{_pe}")
 
     if not alerts:
         print(f"✅ 持倉監控完成，{len(positions)} 筆持倉狀態正常")
@@ -3008,35 +3011,39 @@ def run_position_monitor():
     }
 
     for asset, asset_alerts in alerts_by_asset.items():
-        inst_id = asset + '-USDT-SWAP'
-        cp = get_current_price(inst_id)
-        price_str = format_price(cp) if cp else "—"
-        msg += f"<b>{asset}</b>  現價 <code>{price_str}</code>\n"
+        try:
+            inst_id = asset + '-USDT-SWAP'
+            cp = get_current_price(inst_id)
+            price_str = format_price(cp) if cp else "—"
+            msg += f"<b>{asset}</b>  現價 <code>{price_str}</code>\n"
 
-        for i, (pos, status, action) in enumerate(asset_alerts, 1):
-            d   = "🟩<b>多</b>" if pos['dir'] == "多" else "🟥<b>空</b>"
-            sub = f"#{i} " if len(asset_alerts) > 1 else ""
-            msg += f"{sub}{d}  {pos['tf']}  {status}\n"
-            msg += "<pre>"
-            msg += f"進場  {format_price(pos['entry'])}\n"
-            msg += f"止損  {format_price(pos['sl'])}\n"
-            msg += "</pre>"
-            msg += f"▸ {action}\n"
-            # 掛單取消：action 已說明真正原因，不再重複 REC 文字
-            if status in ("🚫 掛單已取消", "⏰ 掛單逾時取消"):
-                msg += f"<i>（掛單已自動取消並移除追蹤）</i>\n"
-            elif status in ("🔴 止損觸發", "🛡️ 回調至保本止損", "🟣 全部止盈"):
-                rec_text, rec_icon = REC.get(status, ("自行判斷", "❓"))
-                msg += f"<b>【持倉建議】{rec_icon} {rec_text}</b>\n"
-                msg += f"<i>（此持倉已自動移除追蹤）</i>\n"
-            else:
-                rec_text, rec_icon = REC.get(status, ("自行判斷", "❓"))
-                msg += f"<b>【持倉建議】{rec_icon} {rec_text}</b>\n"
+            for i, (pos, status, action) in enumerate(asset_alerts, 1):
+                d   = "🟩<b>多</b>" if pos['dir'] == "多" else "🟥<b>空</b>"
+                sub = f"#{i} " if len(asset_alerts) > 1 else ""
+                msg += f"{sub}{d}  {pos['tf']}  {status}\n"
+                msg += "<pre>"
+                msg += f"進場  {format_price(pos['entry'])}\n"
+                msg += f"止損  {format_price(pos['sl'])}\n"
+                msg += "</pre>"
+                msg += f"▸ {action}\n"
+                if status in ("🚫 掛單已取消", "⏰ 掛單逾時取消"):
+                    msg += f"<i>（掛單已自動取消並移除追蹤）</i>\n"
+                elif status in ("🔴 止損觸發", "🛡️ 回調至保本止損", "🟣 全部止盈"):
+                    rec_text, rec_icon = REC.get(status, ("自行判斷", "❓"))
+                    msg += f"<b>【持倉建議】{rec_icon} {rec_text}</b>\n"
+                    msg += f"<i>（此持倉已自動移除追蹤）</i>\n"
+                else:
+                    rec_text, rec_icon = REC.get(status, ("自行判斷", "❓"))
+                    msg += f"<b>【持倉建議】{rec_icon} {rec_text}</b>\n"
 
-        conclusion = build_coin_conclusion(all_by_asset[asset], cp)
-        if conclusion:
-            msg += f"{conclusion}\n"
-        msg += "─────────────────────────\n"
+            conclusion = build_coin_conclusion(all_by_asset[asset], cp)
+            if conclusion:
+                msg += f"{conclusion}\n"
+            msg += "─────────────────────────\n"
+        except Exception as _ae:
+            print(f"⚠️ 警報組合錯誤 [{asset}]：{_ae}")
+            msg += f"<i>（{asset} 狀態組合時發生錯誤，請稍後再查）</i>\n"
+            msg += "─────────────────────────\n"
 
     msg += "<i>以上為自動監控建議，請結合自身判斷操作。</i>"
 
@@ -3530,6 +3537,13 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
 
 # ==================== 📡 7. 原生無衝突監聽引擎 ====================
 def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False, include_news=False, auto_track=False):
+    try:
+     _scan_worker_thread_impl(msg_title, target_chat_id, silent_on_empty, include_news, auto_track)
+    except Exception as _swe:
+        print(f"❌ scan_worker_thread 未捕獲例外：{_swe}")
+        import traceback; traceback.print_exc()
+
+def _scan_worker_thread_impl(msg_title, target_chat_id, silent_on_empty=False, include_news=False, auto_track=False):
     valid_signals = run_strategy_scan()
     if valid_signals:
         send_html_report_via_requests(valid_signals, mode_title=msg_title,
@@ -3650,7 +3664,11 @@ def send_holding_summary(chat_id):
     to_remove   = []
     active_rows = []   # (pos, status, action) 真正需要顯示的
     for pos in positions:
-        status, action, _ = analyze_position(pos)
+        try:
+            status, action, _ = analyze_position(pos)
+        except Exception as _he:
+            print(f"⚠️ send_holding_summary analyze_position 錯誤 [{pos.get('asset','?')}]：{_he}")
+            status, action = None, "—"
         if status is None:
             status, action = "❓ 無法取得現價", "—"
         if status in _TERMINAL:
