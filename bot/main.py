@@ -2232,13 +2232,17 @@ def analyze_position(pos):
             if entry > signal_price:   # 突破多：等高點達到進場
                 filled_by_candle = (
                     (fill_eff_high is not None and fill_eff_high >= entry) or
-                    current_price >= entry   # 現價已超過進場點（市價買入後繼續上漲）
+                    current_price >= entry
                 )
             else:                      # 回調多：等低點跌到進場
                 filled_by_candle = (
                     (fill_eff_low is not None and fill_eff_low <= entry) or
-                    current_price <= entry   # 現價已回落至進場點（K線資料不足時補充）
+                    current_price <= entry
                 )
+            # ── 價格已明顯越過進場點（多頭）→ 限價單必然已成交 ──
+            # 適用：signal_price fallback 為 entry、或市價進場後價格持續上漲
+            if not filled_by_candle and current_price >= entry * 1.001:
+                filled_by_candle = True
         else:  # 空
             if entry < signal_price:   # 突破空：等低點跌到進場
                 filled_by_candle = (
@@ -2250,6 +2254,9 @@ def analyze_position(pos):
                     (fill_eff_high is not None and fill_eff_high >= entry) or
                     current_price >= entry
                 )
+            # ── 價格已明顯越過進場點（空頭）→ 限價單必然已成交 ──
+            if not filled_by_candle and current_price <= entry * 0.999:
+                filled_by_candle = True
         if filled_by_candle:
             pos['filled']          = True
             pos['fill_ts']         = time.time()   # 記錄成交時間，供 TP/SL K 線範圍保護使用
@@ -2327,7 +2334,8 @@ def analyze_position(pos):
     since_ts = pos.get('last_checked_ts', pos.get('reported_at', time.time() - 3600))
     fill_ts  = pos.get('fill_ts', 0)
     # 以 1m K 線為主要 TP/SL 判定來源：精度最高，不受大時框 wick 誤差影響
-    effective_high, effective_low = get_candle_range_since(inst_id, since_ts, '1m', no_margin=True)
+    # since_ts - 120：回溯多 2 分鐘，確保 fill 偵測與 TP 觸碰在同一個 1m 蠟燭的情況下不漏掉
+    effective_high, effective_low = get_candle_range_since(inst_id, since_ts - 120, '1m', no_margin=True)
     # ── 關鍵：只有 API 成功回傳資料才推進 last_checked_ts ──
     # 若 API 超時回傳 None，保留舊 since_ts，下一輪重新覆蓋同一時段，防止 TP 觸碰被永久跳過
     _candle_api_ok = effective_high is not None
