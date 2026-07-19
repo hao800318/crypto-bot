@@ -4461,6 +4461,51 @@ def send_daily_journal(chat_id):
         print(f"❌ 每日交易日誌發送失敗：{e}")
 
 
+def export_trade_data(chat_id):
+    """
+    將完整交易記錄以 JSON 檔案形式透過 Telegram 發送。
+    供人工備份與日後策略優化分析用。
+    """
+    import io
+    _url_doc = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    _url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    _cid   = str(chat_id)
+    la_tz  = pytz.timezone('America/Los_Angeles')
+    now_la = datetime.datetime.now(la_tz)
+    try:
+        records = load_stats()
+        if not records:
+            requests.post(_url_msg, json={"chat_id": _cid,
+                "text": "📭 目前無交易記錄可匯出。"}, timeout=10)
+            return
+        wins   = sum(1 for r in records if r.get('outcome') == 'win')
+        losses = sum(1 for r in records if r.get('outcome') == 'loss')
+        wr_str = f"{wins/(wins+losses)*100:.0f}%" if (wins + losses) > 0 else "—"
+        filename = f"trade_records_{now_la.strftime('%Y%m%d_%H%M')}.json"
+        content  = json.dumps(records, ensure_ascii=False, indent=2).encode('utf-8')
+        caption  = (
+            f"📦 <b>交易記錄備份</b>\n"
+            f"📅 {now_la.strftime('%Y-%m-%d %H:%M')} PT\n"
+            f"📊 共 <b>{len(records)}</b> 筆  勝{wins} / 敗{losses}  整體勝率 {wr_str}\n"
+            f"💡 含策略類型、ADX、出場類型、預估P&L等欄位\n"
+            f"💾 JSON 格式，可直接用 Excel / Python 分析"
+        )
+        requests.post(
+            _url_doc,
+            data={"chat_id": _cid, "caption": caption, "parse_mode": "HTML"},
+            files={"document": (filename, io.BytesIO(content), "application/json")},
+            timeout=30
+        )
+        print(f"📦 交易記錄已匯出：{len(records)} 筆 → {filename}")
+    except Exception as e:
+        print(f"❌ 匯出交易記錄失敗：{e}")
+        try:
+            requests.post(_url_msg, json={"chat_id": _cid,
+                "text": f"❌ 匯出失敗：{e}"}, timeout=10)
+        except Exception:
+            pass
+
+
 def send_stats_report(chat_id):
     """勝率統計播報（近30天）"""
     _url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -4811,6 +4856,7 @@ def handle_telegram_updates():
     last_watchlist_check_time_local = 0
     last_stats_date          = None  # 每日勝率播報去重
     last_journal_date        = None  # 每日交易日誌去重
+    last_weekly_backup_date  = None  # 每週備份去重
 
     while True:
         try:
@@ -4832,6 +4878,15 @@ def handle_telegram_updates():
                 last_scan_slot = _cur_slot
                 print(f"🔔 觸發定時掃描：{now_la.strftime('%H:%M')} PT")
                 t = threading.Thread(target=scan_worker_thread, args=("定時自動速報", TELEGRAM_CHAT_ID, True, True, True))
+                t.daemon = True
+                t.start()
+
+            # B0. 每週日自動備份（週日 23:55 PT）
+            if now_la.weekday() == 6 and now_la.hour == 23 and 55 <= now_la.minute < 57 \
+                    and last_weekly_backup_date != now_la.date():
+                last_weekly_backup_date = now_la.date()
+                print(f"📦 觸發每週交易記錄備份：{now_la.strftime('%Y-%m-%d')}")
+                t = threading.Thread(target=export_trade_data, args=(TELEGRAM_CHAT_ID,))
                 t.daemon = True
                 t.start()
 
@@ -4997,8 +5052,9 @@ def handle_telegram_updates():
                                 "/watch [幣種] — 加入自選監控（定時掃描通知）\n"
                                 "/unwatch [幣種] — 移除自選監控\n"
                                 "/watching — 查看自選監控清單\n\n"
-                                "📊 <b>統計</b>\n"
+                                "📊 <b>統計與備份</b>\n"
                                 "/stats — 查看近 30 天真實交易勝率統計\n"
+                                "/export_data — 匯出完整交易記錄 JSON（人工備份）\n"
                                 "/resetstats — 清空歷史勝率紀錄，重新開始累積\n\n"
                                 "─────────────────────────\n"
                                 "<i>TP/SL 觸發、市場惡化時系統自動推播\n"
@@ -5078,6 +5134,12 @@ def handle_telegram_updates():
                         elif text.lower().startswith("/stats"):
                             print(f"📊 收到 /stats 指令，同步執行")
                             send_stats_report(chat_id)
+
+                        elif text.lower().startswith("/export_data") or text.lower().startswith("/exportdata"):
+                            print(f"📦 收到 /export_data 指令")
+                            t = threading.Thread(target=export_trade_data, args=(chat_id,))
+                            t.daemon = True
+                            t.start()
 
                         elif text.lower().startswith("/resetstats"):
                             print(f"🗑️ 收到 /resetstats 指令，清空勝率紀錄")
