@@ -225,10 +225,16 @@ def find_market_structure_levels(df, entry, direction, atr, n=2):
     supports    = cluster(swing_lows)
     resistances = cluster(swing_highs)
 
+    # SL 最低距離：取 1 倍 ATR 與 0.4% 中的較大值
+    # 確保正常市場波動不會在進場後立刻觸發止損
+    min_sl_dist = max(atr * 1.0, entry * 0.004)
+
     if direction == "多":
-        # SL：entry 下方（需有一定距離，≥ 0.1% 避免貼身）最近支撐
-        below = [s for s in supports if s < entry * 0.999]
-        sl    = max(below) if below else entry - atr * 2.0
+        # SL：entry 下方至少 min_sl_dist 的最近支撐
+        below = [s for s in supports if s <= entry - min_sl_dist]
+        sl    = max(below) if below else entry - max(atr * 2.0, entry * 0.004)
+        # 防呆：即使找到支撐，也確保距離足夠
+        sl    = min(sl, entry - min_sl_dist)
 
         # TP：entry 上方壓力由近到遠
         above = sorted(r for r in resistances if r > entry * 1.001)
@@ -236,9 +242,11 @@ def find_market_structure_levels(df, entry, direction, atr, n=2):
         tp2   = above[1] if len(above) >= 2 else tp1  + atr * 1.5
         tp3   = above[2] if len(above) >= 3 else tp2  + atr * 2.0
     else:
-        # SL：entry 上方最近壓力
-        above = [r for r in resistances if r > entry * 1.001]
-        sl    = min(above) if above else entry + atr * 2.0
+        # SL：entry 上方至少 min_sl_dist 的最近壓力
+        above = [r for r in resistances if r >= entry + min_sl_dist]
+        sl    = min(above) if above else entry + max(atr * 2.0, entry * 0.004)
+        # 防呆：即使找到壓力，也確保距離足夠
+        sl    = max(sl, entry + min_sl_dist)
 
         # TP：entry 下方支撐由近到遠
         below = sorted((s for s in supports if s < entry * 0.999), reverse=True)
