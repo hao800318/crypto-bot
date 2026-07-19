@@ -376,9 +376,10 @@ def get_candle_range_since(inst_id, since_ts, bar="1H", no_margin=False):
     用於偵測監控間隔中曾觸碰的價格極值，防止漏掉 TP/SL/填單事件。
     no_margin=True：嚴格只取 since_ts 之後開始的 K 棒（用於填單判定，避免納入舊棒）。
     回傳 (range_high, range_low) 或 (None, None)。
+    limit=100：覆蓋最近 100 根 K 棒（1m = 100 分鐘），確保監控間隔內的極值不被遺漏。
     """
     try:
-        url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar}&limit=30"
+        url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar}&limit=100"
         res = requests.get(url, timeout=3).json()
         if res.get('code') == '0' and res['data']:
             df = pd.DataFrame(res['data'],
@@ -2327,19 +2328,22 @@ def analyze_position(pos):
     fill_ts  = pos.get('fill_ts', 0)
     # 以 1m K 線為主要 TP/SL 判定來源：精度最高，不受大時框 wick 誤差影響
     effective_high, effective_low = get_candle_range_since(inst_id, since_ts, '1m', no_margin=True)
+    # ── 關鍵：只有 API 成功回傳資料才推進 last_checked_ts ──
+    # 若 API 超時回傳 None，保留舊 since_ts，下一輪重新覆蓋同一時段，防止 TP 觸碰被永久跳過
+    _candle_api_ok = effective_high is not None
     effective_high = max(effective_high, current_price) if effective_high is not None else current_price
     effective_low  = min(effective_low,  current_price) if effective_low  is not None else current_price
     # 原始時框補充：只納入 since_ts 之後「新開盤」的 K 棒（no_margin=True，不往前抓舊棒）
-    # 例外：成交後第一個 bar 週期內強制也用 no_margin=True，防止成交那根 K 線
-    # 在成交「前」的 wick 被誤算為 TP/SL 觸碰。
     _bar_secs = {"15m": 900, "30m": 1800, "1H": 3600, "4H": 14400, "1D": 86400}
     _bar_dur  = _bar_secs.get(bar, 3600)
     _rng_h, _rng_l = get_candle_range_since(inst_id, since_ts, bar, no_margin=True)
     if _rng_h is not None:
         effective_high = max(effective_high, _rng_h)
+        _candle_api_ok = True
     if _rng_l is not None:
         effective_low  = min(effective_low,  _rng_l)
-    pos['last_checked_ts'] = time.time()
+    if _candle_api_ok:
+        pos['last_checked_ts'] = time.time()  # 只在拿到有效資料後才推進時間窗口
 
     oi_change  = get_open_interest_change(inst_id)
     vol_spike  = get_volume_spike(inst_id)
