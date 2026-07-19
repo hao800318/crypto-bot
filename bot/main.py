@@ -423,6 +423,78 @@ def poc_check(poc, entry, atr):
         return -5, f"⚠️ 偏離POC <code>{poc_str}</code>（差{dist_pct:.1f}%）"
 
 
+def detect_fvg(df, entry, direction, n_lookback=30):
+    """
+    偵測最近 n_lookback 根 K 棒中，最靠近進場點且仍有效的 FVG（公平價值缺口）。
+
+    多頭 FVG（做多支撐）：df[i].high < df[i+2].low
+      缺口區 = [df[i].high, df[i+2].low]，作為多頭回踩支撐區
+    空頭 FVG（做空壓力）：df[i].low > df[i+2].high
+      缺口區 = [df[i+2].high, df[i].low]，作為空頭反彈壓力區
+
+    有效性：缺口形成後，後續 K 棒的收盤價未穿越缺口邊界（底部/頂部）。
+    回傳 (fvg_lo, fvg_hi) 或 (None, None)。
+    """
+    try:
+        n = len(df)
+        if n < 5:
+            return None, None
+        candidates = []
+        # 從最近的 pattern 往前掃（n-3 → n-n_lookback-2）
+        start = max(0, n - n_lookback - 2)
+        for idx in range(start, n - 2):
+            c1 = df.iloc[idx]
+            c3 = df.iloc[idx + 2]
+            if direction == "多":
+                # 多頭 FVG：c1.high < c3.low
+                if c3['low'] > c1['high']:
+                    fvg_lo = float(c1['high'])
+                    fvg_hi = float(c3['low'])
+                    # 後續 K 棒收盤未穿越缺口底部 → 仍有效
+                    post = df.iloc[idx + 3:]
+                    if post.empty or (post['close'] >= fvg_lo).all():
+                        dist = abs(entry - (fvg_lo + fvg_hi) / 2) / max(entry, 1e-10)
+                        candidates.append((fvg_lo, fvg_hi, dist))
+            else:
+                # 空頭 FVG：c1.low > c3.high
+                if c1['low'] > c3['high']:
+                    fvg_lo = float(c3['high'])
+                    fvg_hi = float(c1['low'])
+                    # 後續 K 棒收盤未穿越缺口頂部 → 仍有效
+                    post = df.iloc[idx + 3:]
+                    if post.empty or (post['close'] <= fvg_hi).all():
+                        dist = abs(entry - (fvg_lo + fvg_hi) / 2) / max(entry, 1e-10)
+                        candidates.append((fvg_lo, fvg_hi, dist))
+        if not candidates:
+            return None, None
+        # 選最靠近 entry 的有效 FVG
+        best = min(candidates, key=lambda x: x[2])
+        return best[0], best[1]
+    except Exception:
+        return None, None
+
+
+def fvg_check(fvg_lo, fvg_hi, entry):
+    """
+    比較進場點與 FVG 缺口區的關係，回傳 (bonus: int, label: str)。
+    進場在缺口內（最佳回踩點）：+8，label 顯示 ✅ FVG匯流
+    進場在缺口邊緣（距中心 ≤1%）：+5，label 顯示 📊 近FVG
+    進場不在缺口附近：0, ""（FVG 只做加分，不做扣分）
+    """
+    if fvg_lo is None or fvg_hi is None:
+        return 0, ""
+    lo_str = format_price(fvg_lo)
+    hi_str = format_price(fvg_hi)
+    zone   = f"[<code>{lo_str}</code>–<code>{hi_str}</code>]"
+    if fvg_lo <= entry <= fvg_hi:
+        return 8, f"✅ FVG匯流 {zone}  進場在缺口內"
+    dist_pct = abs(entry - (fvg_lo + fvg_hi) / 2) / max(entry, 1e-10) * 100
+    if dist_pct <= 1.0:
+        side = "下緣附近" if entry < fvg_lo else "上緣附近"
+        return 5, f"📊 近FVG {zone}  {side}（差{dist_pct:.1f}%）"
+    return 0, ""
+
+
 def get_candle_range_since(inst_id, since_ts, bar="1H", no_margin=False):
     """取得 since_ts 以來所有 K 線的最高價和最低價。
     用於偵測監控間隔中曾觸碰的價格極值，防止漏掉 TP/SL/填單事件。
@@ -1016,6 +1088,13 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             win_rate  = score_to_win_rate(score)
             leverage  = score_to_leverage(win_rate, max_leverage)
 
+            # ── FVG 公平價值缺口匯流確認 ──
+            _fvg_lo, _fvg_hi = detect_fvg(df, entry_price, direction)
+            _fvg_bonus, _fvg_label = fvg_check(_fvg_lo, _fvg_hi, entry_price)
+            score    += _fvg_bonus
+            win_rate  = score_to_win_rate(score)
+            leverage  = score_to_leverage(win_rate, max_leverage)
+
             # ── 動態 TP 數量：依時框與訊號強度決定幾個止盈目標 ──
             # 短週期訊號（15m/30m）動能衰減快，保守取利；長週期訊號視強度決定
             if tf in ("15m", "30m"):
@@ -1077,9 +1156,11 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                     entry_type = f"📌 {tf_tag}掛限價 {anchor_label}，止損={format_price(sl_price)}"
                     is_market_entry = False
 
-            # 將 POC 資訊附加到進場建議說明尾端（供訊號訊息顯示）
+            # 將 POC / FVG 資訊附加到進場建議說明尾端（供訊號訊息顯示）
             if _poc_label:
                 entry_type += f"  |  {_poc_label}"
+            if _fvg_label:
+                entry_type += f"  |  {_fvg_label}"
 
             entry_price = round_to_tick(entry_price, asset)
             sl_price    = round_to_tick(sl_price,    asset)
@@ -1112,6 +1193,9 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 "fib_dist":         _fib_dist,
                 "poc_price":        _poc_price,
                 "poc_label":        _poc_label,
+                "fvg_lo":           _fvg_lo,
+                "fvg_hi":           _fvg_hi,
+                "fvg_label":        _fvg_label,
                 "tp_count":         tp_count,
                 "price":            current_price,      # 訊號發出時的市價（signal_price 用）
                 "is_market_entry":  is_market_entry,    # True=可直接市價進場，建倉即標為 filled
@@ -1399,6 +1483,13 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
         win_rate  = min(80, max(0, int(raw * 0.8)))
         leverage  = score_to_leverage(win_rate, max_leverage, signal_type='range')
 
+        # ── FVG 公平價值缺口匯流確認 ──
+        _fvg_lo_r, _fvg_hi_r = detect_fvg(df, price, direction)
+        _fvg_bonus_r, _fvg_label_r = fvg_check(_fvg_lo_r, _fvg_hi_r, price)
+        raw      += _fvg_bonus_r
+        win_rate  = min(80, max(0, int(raw * 0.8)))
+        leverage  = score_to_leverage(win_rate, max_leverage, signal_type='range')
+
         tf_label = _TF_LABEL.get(tf, tf.upper())
         dir_tag  = "支撐做多" if direction == "多" else "壓力做空"
         tf_tag   = f"{tf_label}區間{dir_tag}"
@@ -1415,6 +1506,8 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
                           f"止損 {format_price(sl_price)}，TP {format_price(tp1)} / {format_price(tp2)}")
         if _poc_label_r:
             entry_desc += f"  |  {_poc_label_r}"
+        if _fvg_label_r:
+            entry_desc += f"  |  {_fvg_label_r}"
 
         # 主力動向（輕量取得，用於推播顯示完整度）
         try:
@@ -1452,6 +1545,9 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
             "tf_note":        f"支撐[{format_price(sup_lo)}–{format_price(sup_hi)}]→壓力[{format_price(res_lo)}–{format_price(res_hi)}]",
             "poc_price":      _poc_price_r,
             "poc_label":      _poc_label_r,
+            "fvg_lo":         _fvg_lo_r,
+            "fvg_hi":         _fvg_hi_r,
+            "fvg_label":      _fvg_label_r,
         }
     except Exception:
         return None
@@ -1637,6 +1733,13 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         win_rate  = min(82, max(0, int(raw * 0.9)))
         leverage  = score_to_leverage(win_rate, max_leverage, signal_type='divergence')
 
+        # ── FVG 公平價值缺口匯流確認 ──
+        _fvg_lo_d, _fvg_hi_d = detect_fvg(df, price, direction)
+        _fvg_bonus_d, _fvg_label_d = fvg_check(_fvg_lo_d, _fvg_hi_d, price)
+        raw      += _fvg_bonus_d
+        win_rate  = min(82, max(0, int(raw * 0.9)))
+        leverage  = score_to_leverage(win_rate, max_leverage, signal_type='divergence')
+
         tf_label = _TF_LABEL.get(tf, tf.upper())
         dir_tag  = "頂背離做空" if direction == "空" else "底背離做多"
         tf_tag   = f"{tf_label}{dir_tag}"
@@ -1646,6 +1749,8 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
                       f"止損 {format_price(sl_price)}  TP {format_price(tp1)} / {format_price(tp2)}")
         if _poc_label_d:
             entry_desc += f"  |  {_poc_label_d}"
+        if _fvg_label_d:
+            entry_desc += f"  |  {_fvg_label_d}"
 
         # 主力動向（用於推播顯示完整度）
         try:
@@ -1682,6 +1787,9 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             "tf_note":        div_desc,   # 背離描述作為 tf_note 備用
             "poc_price":      _poc_price_d,
             "poc_label":      _poc_label_d,
+            "fvg_lo":         _fvg_lo_d,
+            "fvg_hi":         _fvg_hi_d,
+            "fvg_label":      _fvg_label_d,
         }
     except Exception:
         return None
@@ -3596,6 +3704,10 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         _poc_lbl = item.get('poc_label', '')
         if _poc_lbl:
             html_message += f"🎯 {_poc_lbl}\n"
+        # ── FVG 公平價值缺口 ──
+        _fvg_lbl = item.get('fvg_label', '')
+        if _fvg_lbl:
+            html_message += f"↔️ {_fvg_lbl}\n"
         # ── 時事新聞（僅定時播報）──
         if include_news:
             news_items = fetch_coin_news(item['asset'])
