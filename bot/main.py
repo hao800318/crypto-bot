@@ -3524,12 +3524,14 @@ def analyze_position(pos):
                                   f"現價 {format_price(current_price)}\n"
                                   f"▸ TP1 <code>{format_price(tp1)}</code> 已自動確認\n"
                                   f"▸ <b>建議合計平倉80%</b>（TP1段40% + TP2段40%）\n"
-                                  f"▸ 止損已上修至 <code>{format_price(sl)}</code>（ATR×2.5），剩20%等待TP3 <code>{format_price(tp3)}</code>")
+                                  f"⚠️ <b>請立即將止損上移至 <code>{format_price(sl)}</code></b>（ATR×2.5）\n"
+                                  f"▸ 剩20%等待TP3 <code>{format_price(tp3)}</code>，止損移至保本以上")
                     else:
                         action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈2 <code>{format_price(tp2)}</code>，"
                                   f"現價 {format_price(current_price)}\n"
                                   f"▸ <b>建議平倉40%</b>（TP2段）\n"
-                                  f"▸ 止損已上修至 <code>{format_price(sl)}</code>（ATR×2.5），剩20%等待TP3 <code>{format_price(tp3)}</code>")
+                                  f"⚠️ <b>請立即將止損上移至 <code>{format_price(sl)}</code></b>（ATR×2.5）\n"
+                                  f"▸ 剩20%等待TP3 <code>{format_price(tp3)}</code>")
                 push = True
         elif effective_high >= tp1 * TP_CONFIRM:
             if pos.get('tp1_hit'):
@@ -3722,12 +3724,14 @@ def analyze_position(pos):
                                   f"現價 {format_price(current_price)}\n"
                                   f"▸ TP1 <code>{format_price(tp1)}</code> 已自動確認\n"
                                   f"▸ <b>建議合計平倉80%</b>（TP1段40% + TP2段40%）\n"
-                                  f"▸ 止損已下修至 <code>{format_price(sl)}</code>（ATR×2.5），剩20%等待TP3 <code>{format_price(tp3)}</code>")
+                                  f"⚠️ <b>請立即將止損下移至 <code>{format_price(sl)}</code></b>（ATR×2.5）\n"
+                                  f"▸ 剩20%等待TP3 <code>{format_price(tp3)}</code>，止損移至保本以上")
                     else:
                         action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈2 <code>{format_price(tp2)}</code>，"
                                   f"現價 {format_price(current_price)}\n"
                                   f"▸ <b>建議平倉40%</b>（TP2段）\n"
-                                  f"▸ 止損已下修至 <code>{format_price(sl)}</code>（ATR×2.5），剩20%等待TP3 <code>{format_price(tp3)}</code>")
+                                  f"⚠️ <b>請立即將止損下移至 <code>{format_price(sl)}</code></b>（ATR×2.5）\n"
+                                  f"▸ 剩20%等待TP3 <code>{format_price(tp3)}</code>")
                 push = True
         elif effective_low <= tp1 / TP_CONFIRM:
             if pos.get('tp1_hit'):
