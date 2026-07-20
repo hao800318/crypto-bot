@@ -3184,7 +3184,7 @@ def run_position_monitor():
         }
         if status in ("🔴 止損觸發", "🟣 全部止盈", "🛡️ 回調至保本止損",
                       "🚫 掛單已取消", "⏰ 掛單逾時取消"):
-            if status in OUTCOME_MAP and pos.get('filled', True):
+            if status in OUTCOME_MAP and pos.get('filled', False):
                 record_trade_outcome(pos, OUTCOME_MAP[status])
             to_remove.append(pos)
 
@@ -3831,11 +3831,14 @@ def _scan_worker_thread_impl(msg_title, target_chat_id, silent_on_empty=False, i
                             'tp2':            sig['tp2'],
                             'tp3':            sig['tp3'],
                             'tp_count':       sig.get('tp_count', 3),
-                            'signal_price':   sig.get('price', sig['entry']),  # 訊號發出時市價
+                            'signal_price':   sig.get('price', sig['entry']),
                             'signal_type':    sig.get('signal_type', 'trend'),
+                            'adx':            sig.get('adx', 0),
+                            'score':          sig.get('score', 0),
+                            'win_rate':       sig.get('win_rate', 0),
                             'reported_at':    sent_at,
                             'last_checked_ts': sent_at,
-                            'filled':         _is_mkt,   # 市價進場：立即視為已成交，跳過等待期
+                            'filled':         _is_mkt,
                             'fill_ts':        sent_at if _is_mkt else 0,
                             'entry_fr':       sig.get('entry_fr'),
                         }
@@ -4120,20 +4123,28 @@ def handle_open_command(text, chat_id):
         f"取消請輸入 /close {symbol}"
     )
 
+    _is_mkt_open = best.get('is_market_entry', False)
     new_pos = {
         'asset':           symbol,
         'dir':             direction,
         'tf':              tf_label,
         'entry':           entry,
         'sl':              sl,
-        'orig_sl':         sl,    # 原始止損，供 trail_dist 計算使用（不隨追蹤止損改變）
+        'orig_sl':         sl,
         'tp1':             tp1,
         'tp2':             tp2,
         'tp3':             tp3,
-        'signal_price':    best.get('price', entry),  # 訊號產生時的市價，用於填單方向判斷
+        'tp_count':        best.get('tp_count', 3),
+        'signal_price':    best.get('price', entry),
+        'signal_type':     best.get('signal_type', 'trend'),
+        'adx':             best.get('adx', 0),
+        'score':           best.get('score', 0),
+        'win_rate':        best.get('win_rate', 0),
+        'entry_fr':        best.get('entry_fr'),
         'reported_at':     now_ts,
         'last_checked_ts': now_ts,
-        'filled':          False,
+        'filled':          _is_mkt_open,
+        'fill_ts':         now_ts if _is_mkt_open else 0,
     }
 
     with active_positions_lock:
