@@ -916,9 +916,9 @@ def get_higher_tf_ema89_slope(asset, current_bar):
 
 def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0):
     bar_param = _TF_BAR.get(tf, "1H")
-    url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={bar_param}&limit=100"
+    url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={bar_param}&limit=300"
     try:
-        res = requests.get(url, timeout=1.5).json()
+        res = requests.get(url, timeout=2.5).json()
         if res.get('code') == '0' and len(res['data']) >= 90:
             df = pd.DataFrame(res['data'], columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
             for col in ['open','high','low','close','vol']:
@@ -926,8 +926,16 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             df = df.iloc[::-1].reset_index(drop=True)
 
             # ── 基礎指標 ──
-            df['MA8']  = df['close'].rolling(8).mean()
-            df['EMA89']= df['close'].ewm(span=89, adjust=False).mean()
+            df['MA8']   = df['close'].rolling(8).mean()
+            df['EMA89'] = df['close'].ewm(span=89,  adjust=False).mean()
+            df['EMA200']= df['close'].ewm(span=200, adjust=False).mean()
+
+            # ── MACD（12/26/9）—— 多因子策略核心確認指標 ──
+            _ema12 = df['close'].ewm(span=12, adjust=False).mean()
+            _ema26 = df['close'].ewm(span=26, adjust=False).mean()
+            df['MACD']     = _ema12 - _ema26
+            df['MACD_SIG'] = df['MACD'].ewm(span=9, adjust=False).mean()
+            df['MACD_HIST']= df['MACD'] - df['MACD_SIG']
 
             delta = df['close'].diff()
             gain  = delta.where(delta > 0, 0).rolling(14).mean()
@@ -983,10 +991,13 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                     _cross_i      = _i
                     break
 
-            # ── 若無新交叉，補偵測「MA8 回踩反彈」（趨勢延伸進場）──
-            # 趨勢已確立（MA8 持續 > EMA89）時，價格回踩 MA8 後反彈 = 有效再進場點。
-            # 不需要新的交叉，捕捉趨勢中每一波的延伸機會。
+            # ── 若無新交叉，偵測「突破回踩阻力位」（Strategy 1: Breakout Pullback）──
+            # 核心概念：趨勢確立後，價格回踩當初突破的阻力位（現為支撐）= 最強再進場點。
+            # ① 找「突破阻力位」= 趨勢確立前的最後一個擺動高點（局部峰值）
+            # ② 偵測現價是否回踩至該位置 1.5% 以內，且 close 收回阻力位上方（彈起確認）
+            # 找不到擺動點時 fallback 至 MA8（現行機制）
             _is_pullback = False
+            _pb_level    = None   # 阻力位（突破後成為支撐的那條線）
             if not (is_cross_up or is_cross_down):
                 _n_chk = min(8, len(df) - 2)
                 _up_bars = sum(1 for i in range(1, _n_chk + 1)
@@ -995,25 +1006,58 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                                if df.iloc[-i]['MA8'] < df.iloc[-i]['EMA89'])
 
                 if _up_bars >= 6 and c_last['MA8'] > c_last['EMA89']:
-                    # 上升趨勢：找最近3根中 low 回踩至 MA8 0.5% 內且 close > MA8 的根
-                    for _i in range(1, 4):
-                        _b = df.iloc[-_i]
-                        if _b['low'] <= _b['MA8'] * 1.005 and _b['close'] > _b['MA8']:
+                    # 找趨勢確立前的最後擺動高點（局部峰值 = 被突破的阻力位）
+                    _lookback = min(60, len(df) - _n_chk - 3)
+                    _swing_high = None
+                    for _j in range(_n_chk + 2, _n_chk + _lookback):
+                        if _j + 1 >= len(df):
+                            break
+                        _bj    = df.iloc[-_j]
+                        _bprev = df.iloc[-(_j + 1)]
+                        _bnext = df.iloc[-(_j - 1)] if _j > 1 else _bj
+                        if float(_bj['high']) > float(_bprev['high']) and \
+                           float(_bj['high']) > float(_bnext['high']):
+                            _swing_high = float(_bj['high'])
+                            break
+
+                    # 偵測回踩：low 觸碰阻力位 1.5% 內，close 收回阻力位上方
+                    for _i in range(1, 5):
+                        _b   = df.iloc[-_i]
+                        _ref = _swing_high if _swing_high else float(_b['MA8'])
+                        if float(_b['low']) <= _ref * 1.015 and \
+                           float(_b['close']) >= _ref * 0.990:
                             is_cross_up  = True
-                            cross_vol    = _b['vol']
+                            cross_vol    = float(_b['vol'])
                             _cross_i     = _i
                             _is_pullback = True
+                            _pb_level    = _ref
                             break
 
                 elif _dn_bars >= 6 and c_last['MA8'] < c_last['EMA89']:
-                    # 下降趨勢：找最近3根中 high 回踩至 MA8 0.5% 內且 close < MA8 的根
-                    for _i in range(1, 4):
-                        _b = df.iloc[-_i]
-                        if _b['high'] >= _b['MA8'] * 0.995 and _b['close'] < _b['MA8']:
+                    # 找趨勢確立前的最後擺動低點（被跌破的支撐位 = 現在壓力位）
+                    _lookback = min(60, len(df) - _n_chk - 3)
+                    _swing_low = None
+                    for _j in range(_n_chk + 2, _n_chk + _lookback):
+                        if _j + 1 >= len(df):
+                            break
+                        _bj    = df.iloc[-_j]
+                        _bprev = df.iloc[-(_j + 1)]
+                        _bnext = df.iloc[-(_j - 1)] if _j > 1 else _bj
+                        if float(_bj['low']) < float(_bprev['low']) and \
+                           float(_bj['low']) < float(_bnext['low']):
+                            _swing_low = float(_bj['low'])
+                            break
+
+                    for _i in range(1, 5):
+                        _b   = df.iloc[-_i]
+                        _ref = _swing_low if _swing_low else float(_b['MA8'])
+                        if float(_b['high']) >= _ref * 0.985 and \
+                           float(_b['close']) <= _ref * 1.010:
                             is_cross_down = True
-                            cross_vol     = _b['vol']
+                            cross_vol     = float(_b['vol'])
                             _cross_i      = _i
                             _is_pullback  = True
+                            _pb_level     = _ref
                             break
 
             if not (is_cross_up or is_cross_down):
@@ -1089,12 +1133,21 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                     return None   # 多方向壓(DI+)仍 > 空方向壓(DI-)，死叉可信度低
 
             # ⑥ RSI 極端區間硬性過濾（防追高殺低）
-            # RSI 超買/超賣時進場，即使方向對也會被震倉。
-            # 現有評分已降低極端RSI的分數，但高ADX仍可蓋過而通過門檻，需硬擋。
             if direction == "多" and current_rsi > 76:
-                return None   # RSI > 76 = 過度超買，多方動能耗盡在即，不追頂
+                return None
             if direction == "空" and current_rsi < 24:
-                return None   # RSI < 24 = 過度超賣，空方動能耗盡在即，不追底
+                return None
+
+            # ⑦ EMA200 大趨勢方向硬性過濾（機構趨勢線，多因子策略核心條件）
+            # 概念：EMA200 = 最廣泛使用的長期趨勢分界線（200日均線）。
+            #        做多需確認大趨勢向上（價格 > EMA200）；做空反之。
+            # 容忍 ±0.5%：EMA200 剛穿越初期避免誤殺合理轉折訊號。
+            c_ema200 = float(c_last['EMA200']) if pd.notna(c_last['EMA200']) else None
+            if c_ema200 and c_ema200 > 0:
+                if direction == "多" and current_price < c_ema200 * 0.995:
+                    return None   # 大趨勢仍空頭，多單勝率大幅降低
+                if direction == "空" and current_price > c_ema200 * 1.005:
+                    return None   # 大趨勢仍多頭，空單勝率大幅降低
 
             # ── 技術強度基礎評分（ADX 趨勢強度 + RSI 進場位置，有實際 TA 依據）──
             #
@@ -1124,6 +1177,25 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 vol_bonus = -8   # 偏低量，扣分降低勝率顯示
             else:
                 vol_bonus = 0    # 已在前面硬擋，不會到這裡
+
+            # ── MACD 方向確認評分（Strategy 3 多因子共振核心指標）──
+            # 金叉/死叉 = MACD 剛穿越 Signal 線（最強動能訊號）
+            # 同向 = MACD 在 Signal 正確側（多頭在上 / 空頭在下）
+            # 逆向 = MACD 方向反向（扣分，不硬擋——ADX / EMA200 等指標仍可綜合判斷）
+            _macd_now  = float(c_last['MACD'])     if pd.notna(c_last['MACD'])     else 0.0
+            _macd_sig  = float(c_last['MACD_SIG']) if pd.notna(c_last['MACD_SIG']) else 0.0
+            _macd_prev = float(df.iloc[-2]['MACD'])     if len(df) >= 2 and pd.notna(df.iloc[-2]['MACD'])     else _macd_now
+            _msig_prev = float(df.iloc[-2]['MACD_SIG']) if len(df) >= 2 and pd.notna(df.iloc[-2]['MACD_SIG']) else _macd_sig
+            _macd_cross_up   = (_macd_prev <= _msig_prev) and (_macd_now > _macd_sig)
+            _macd_cross_down = (_macd_prev >= _msig_prev) and (_macd_now < _macd_sig)
+            _macd_agree = (direction == "多" and _macd_now > _macd_sig) or \
+                          (direction == "空" and _macd_now < _macd_sig)
+            if (direction == "多" and _macd_cross_up) or (direction == "空" and _macd_cross_down):
+                _macd_bonus = 18   # 剛金叉/死叉：最強動能共振
+            elif _macd_agree:
+                _macd_bonus = 8    # MACD 同向確認
+            else:
+                _macd_bonus = -15  # MACD 逆向：明顯扣分
 
             # ── 主力動向 + HTF 對齊：並行發出，節省 ~200-400ms ──
             htf_bar   = _TF_HTF.get(tf, "1D")
@@ -1196,7 +1268,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             # 把 BTC 風險提示附加到時框標籤，讓訊號訊息直接可見
             tf_note = tf_note + btc_risk_note
 
-            score = base_score + sentiment_bonus + vol_bonus + btc_bonus + fr_bonus
+            score = base_score + sentiment_bonus + vol_bonus + btc_bonus + fr_bonus + _macd_bonus
 
             win_rate = score_to_win_rate(score)
             leverage = score_to_leverage(win_rate, max_leverage)
@@ -1218,9 +1290,15 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 order_type = "日線單"
                 tf_tag = f"1D日線{_pb_tag}{tf_note}"
 
-            # ── 進場錨定點（所有時框統一用 MA8，交叉當下的訊號線）──
-            entry_price  = current_ma8
-            anchor_label = f"MA8={format_price(current_ma8)}"
+            # ── 進場錨定點（Strategy 1 突破回踩：用阻力位；MA 交叉：用 MA8）──
+            # 突破回踩策略：進場點 = 阻力位（被突破後成為支撐），SL 放在該位下方。
+            # 此設定讓 SL 更緊（阻力位比 MA8 更精確），盈虧比也更好。
+            if _is_pullback and _pb_level is not None:
+                entry_price  = _pb_level
+                anchor_label = f"突破支撐={format_price(_pb_level)}"
+            else:
+                entry_price  = current_ma8
+                anchor_label = f"MA8={format_price(current_ma8)}"
 
             # ⑦ SL：從 K 線擺動結構推導（entry 後方最近支撐/壓力，跌破訊號失效）
             sl_price, _ms_tp1, _ms_tp2, _ms_tp3 = find_market_structure_levels(
@@ -2191,6 +2269,325 @@ def fetch_near_miss_candidate(asset, tf, btc_trend="neutral", market_fr=0.0):
     return None
 
 
+def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0):
+    """
+    Strategy 2: SMC / ICT 流動性獵取策略。
+
+    多頭三步：
+    1. 流動性獵取（Liquidity Sweep）：K 棒下破前低，下影線長，快速收回 = 止損收割完畢
+    2. 結構轉換（CHoCH）：隨後 K 棒收盤突破最近局部高點，確認反轉
+    3. 回踩進場：現價回踩訂單塊（OB）或公允價值缺口（FVG），或 Fib 38.2%-78.6%
+
+    空頭三步：對稱反向。
+
+    SL = 流動性獵取最低點（掃高最高點）之外 0.3%
+    TP = Fib 擴展 1.272 / 1.618 / 2.0
+    """
+    bar_param = _TF_BAR.get(tf, "1H")
+    url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={bar_param}&limit=200"
+    try:
+        res = requests.get(url, timeout=2.5).json()
+        if res.get('code') != '0' or len(res['data']) < 60:
+            return None
+        df = pd.DataFrame(res['data'],
+                          columns=['ts','open','high','low','close','vol',
+                                   'volCcy','volCcyQuote','state'])
+        for col in ['open','high','low','close','vol']:
+            df[col] = df[col].astype(float)
+        df = df.iloc[::-1].reset_index(drop=True)
+
+        # ── 指標 ──
+        df['EMA200'] = df['close'].ewm(span=200, adjust=False).mean()
+        delta = df['close'].diff()
+        gain  = delta.where(delta > 0, 0).rolling(14).mean()
+        loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        df['RSI'] = 100 - (100 / (1 + gain / (loss + 1e-10)))
+        df['H-L']  = df['high'] - df['low']
+        df['H-PC'] = (df['high'] - df['close'].shift(1)).abs()
+        df['L-PC'] = (df['low']  - df['close'].shift(1)).abs()
+        df['TR']   = df[['H-L','H-PC','L-PC']].max(axis=1)
+        df['ATR14']= df['TR'].rolling(14).mean()
+        pdm  = df['high'].diff().clip(lower=0)
+        mdm  = (-df['low'].diff()).clip(lower=0)
+        mask = pdm >= mdm
+        pdm_c = pdm.where(mask, 0); mdm_c = mdm.where(~mask, 0)
+        atr14 = df['ATR14'] + 1e-10
+        plus_di  = 100 * pdm_c.rolling(14).mean() / atr14
+        minus_di = 100 * mdm_c.rolling(14).mean() / atr14
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
+        df['ADX'] = dx.rolling(14).mean()
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
+        df['MACD']     = ema12 - ema26
+        df['MACD_SIG'] = df['MACD'].ewm(span=9, adjust=False).mean()
+
+        if len(df) < 40:
+            return None
+
+        c_last        = df.iloc[-1]
+        current_price = float(c_last['close'])
+        current_atr   = float(c_last['ATR14'])   if pd.notna(c_last['ATR14'])   else current_price * 0.01
+        current_adx   = float(c_last['ADX'])     if pd.notna(c_last['ADX'])     else 0.0
+        current_rsi   = float(c_last['RSI'])     if pd.notna(c_last['RSI'])     else 50.0
+        c_ema200      = float(c_last['EMA200'])  if pd.notna(c_last['EMA200'])  else 0.0
+        macd_now      = float(c_last['MACD'])    if pd.notna(c_last['MACD'])    else 0.0
+        macd_sig      = float(c_last['MACD_SIG'])if pd.notna(c_last['MACD_SIG'])else 0.0
+
+        tf_label = _TF_LABEL.get(tf, tf)
+        scan_window = min(30, len(df) - 10)   # 掃描最近 30 根
+
+        # ══════════════════════════════════════════════════════════════
+        # 多頭 SMC 掃描
+        # ══════════════════════════════════════════════════════════════
+        bull_sweep_i   = None
+        bull_sweep_low = None
+
+        for _i in range(3, scan_window + 1):
+            if _i + 5 >= len(df):
+                break
+            bar = df.iloc[-_i]
+            # 前低 = 此根之前 scan_window 根的最低點
+            _ref_end   = len(df) - _i
+            _ref_start = max(0, _ref_end - scan_window)
+            prev_low = float(df['low'].iloc[_ref_start:_ref_end].min())
+            if prev_low <= 0:
+                continue
+            # 流動性獵取：跌破前低 ≥ 0.1%，但快速收回前低上方
+            if float(bar['low']) < prev_low * 0.999 and float(bar['close']) > prev_low * 0.998:
+                _body       = abs(float(bar['close']) - float(bar['open']))
+                _lower_wick = min(float(bar['open']), float(bar['close'])) - float(bar['low'])
+                # 下影線需 ≥ 1.2× 實體 或 ≥ 0.3× ATR（防止普通陰線誤判）
+                if _lower_wick >= _body * 1.2 or _lower_wick >= current_atr * 0.3:
+                    bull_sweep_i   = _i
+                    bull_sweep_low = float(bar['low'])
+                    break
+
+        if bull_sweep_i is not None:
+            # 掃描前的局部高點（CHoCH 參照：最近 10 根內最高 high）
+            _win_s = min(bull_sweep_i + 10, len(df) - 1)
+            _win_e = bull_sweep_i
+            _pre_high = float(df['high'].iloc[len(df) - _win_s:len(df) - _win_e].max()) \
+                        if _win_s > _win_e else current_price * 1.01
+
+            # CHoCH 確認：掃描後（更近的 K 棒）有 close 突破 _pre_high
+            _choch_ok = any(
+                float(df.iloc[-_j]['close']) > _pre_high
+                for _j in range(1, bull_sweep_i)
+                if _j < len(df)
+            )
+
+            if _choch_ok and current_price < _pre_high:   # 目前仍在 CHoCH 水位下方 = 回踩中
+                # 訂單塊（OB）= 掃描前最後一根陰線
+                _ob_lo = _ob_hi = None
+                for _k in range(bull_sweep_i, min(bull_sweep_i + 15, len(df) - 1)):
+                    _bk = df.iloc[-_k]
+                    if float(_bk['close']) < float(_bk['open']):
+                        _ob_lo = float(min(_bk['open'], _bk['close']))
+                        _ob_hi = float(max(_bk['open'], _bk['close']))
+                        break
+
+                # FVG（看多缺口：bar-1 low > bar+1 high）
+                _fvg_lo = _fvg_hi = None
+                for _f in range(2, min(bull_sweep_i + 8, len(df) - 2)):
+                    _b1 = df.iloc[-(_f + 1)]
+                    _b3 = df.iloc[-(_f - 1)]
+                    if float(_b1['low']) > float(_b3['high']):
+                        _fvg_lo = float(_b3['high'])
+                        _fvg_hi = float(_b1['low'])
+                        break
+
+                # Fib 回調區間（38.2%–78.6%）
+                _range   = _pre_high - bull_sweep_low
+                _ret_lo  = bull_sweep_low + _range * 0.382
+                _ret_hi  = bull_sweep_low + _range * 0.786
+
+                _in_ob  = bool(_ob_lo and _ob_lo * 0.995 <= current_price <= _ob_hi * 1.005)
+                _in_fvg = bool(_fvg_lo and _fvg_lo * 0.995 <= current_price <= _fvg_hi * 1.005)
+                _in_ret = bool(_ret_lo <= current_price <= _ret_hi)
+
+                if (_in_ob or _in_fvg or _in_ret) and \
+                   (c_ema200 <= 0 or current_price >= c_ema200 * 0.995):
+                    # ── 評分 ──
+                    sc = 0
+                    if current_adx >= 40: sc += 47
+                    elif current_adx >= 30: sc += 35
+                    elif current_adx >= 20: sc += 20
+                    else: sc += 5
+                    if 30 <= current_rsi <= 50: sc += 30
+                    elif current_rsi < 30: sc += 18
+                    elif 50 < current_rsi <= 65: sc += 10
+                    if _in_ob:  sc += 15
+                    if _in_fvg: sc += 12
+                    if _in_ret: sc += 8
+                    if macd_now > macd_sig: sc += 10
+                    if c_ema200 > 0 and current_price > c_ema200: sc += 8
+                    win_rate = score_to_win_rate(sc)
+                    leverage = score_to_leverage(win_rate, max_leverage)
+
+                    # ── SL / TP ──
+                    sl_price    = round_to_tick(bull_sweep_low * 0.997, asset)
+                    entry_price = round_to_tick(current_price, asset)
+                    _fib_ext = get_fibonacci_extension(df, float(entry_price), "多", float(sl_price))
+                    if _fib_ext:
+                        tp1, tp2, tp3, _ = _fib_ext
+                    else:
+                        _r = float(entry_price) - float(sl_price)
+                        tp1 = entry_price + _r * 1.5
+                        tp2 = entry_price + _r * 2.5
+                        tp3 = entry_price + _r * 3.5
+                    # R:R 最低 1.5
+                    if abs(float(tp1) - float(entry_price)) < abs(float(entry_price) - float(sl_price)) * 1.5:
+                        _r = abs(float(entry_price) - float(sl_price))
+                        tp1 = float(entry_price) + _r * 1.5
+                        tp2 = float(entry_price) + _r * 2.5
+                        tp3 = float(entry_price) + _r * 3.5
+                    tp1 = round_to_tick(tp1, asset)
+                    tp2 = round_to_tick(tp2, asset)
+                    tp3 = round_to_tick(tp3, asset)
+
+                    _loc = "OB回踩" if _in_ob else ("FVG回補" if _in_fvg else "Fib回調")
+                    _fvg_label = f"FVG:{format_price(_fvg_lo)}-{format_price(_fvg_hi)}" if _fvg_lo else ""
+                    return {
+                        "asset": asset.split('-')[0], "dir": "多",
+                        "leverage": leverage, "win_rate": win_rate,
+                        "tf": f"{tf_label}SMC", "order_type": "SMC流動性單",
+                        "score": sc, "entry": entry_price,
+                        "sl": sl_price, "tp1": tp1, "tp2": tp2, "tp3": tp3,
+                        "entry_type": f"🏦 {tf_label} SMC多｜掃低反轉｜{_loc}｜CHoCH確認",
+                        "sentiment_note": "", "ls_ratio": 1.0,
+                        "adx": round(current_adx, 1), "vol_confirmed": True,
+                        "tf_note": "", "entry_fr": 0.0,
+                        "fib_level": "", "fib_price": None, "fib_near": False, "fib_dist": None,
+                        "poc_price": None, "poc_label": "",
+                        "fvg_lo": _fvg_lo, "fvg_hi": _fvg_hi, "fvg_label": _fvg_label,
+                        "candle_pattern": "", "tp_source": "📐Fib擴展" if _fib_ext else "📊ATR",
+                        "tp_count": 3 if sc >= 65 else 2,
+                        "price": current_price, "is_market_entry": True,
+                    }
+
+        # ══════════════════════════════════════════════════════════════
+        # 空頭 SMC 掃描（對稱邏輯）
+        # ══════════════════════════════════════════════════════════════
+        bear_sweep_i    = None
+        bear_sweep_high = None
+
+        for _i in range(3, scan_window + 1):
+            if _i + 5 >= len(df):
+                break
+            bar = df.iloc[-_i]
+            _ref_end   = len(df) - _i
+            _ref_start = max(0, _ref_end - scan_window)
+            prev_high = float(df['high'].iloc[_ref_start:_ref_end].max())
+            if prev_high <= 0:
+                continue
+            # 流動性獵取：突破前高 ≥ 0.1%，但快速收回前高下方
+            if float(bar['high']) > prev_high * 1.001 and float(bar['close']) < prev_high * 1.002:
+                _body       = abs(float(bar['close']) - float(bar['open']))
+                _upper_wick = float(bar['high']) - max(float(bar['open']), float(bar['close']))
+                if _upper_wick >= _body * 1.2 or _upper_wick >= current_atr * 0.3:
+                    bear_sweep_i    = _i
+                    bear_sweep_high = float(bar['high'])
+                    break
+
+        if bear_sweep_i is not None:
+            _win_s = min(bear_sweep_i + 10, len(df) - 1)
+            _win_e = bear_sweep_i
+            _pre_low = float(df['low'].iloc[len(df) - _win_s:len(df) - _win_e].min()) \
+                       if _win_s > _win_e else current_price * 0.99
+
+            _choch_ok = any(
+                float(df.iloc[-_j]['close']) < _pre_low
+                for _j in range(1, bear_sweep_i)
+                if _j < len(df)
+            )
+
+            if _choch_ok and current_price > _pre_low:
+                _ob_lo = _ob_hi = None
+                for _k in range(bear_sweep_i, min(bear_sweep_i + 15, len(df) - 1)):
+                    _bk = df.iloc[-_k]
+                    if float(_bk['close']) > float(_bk['open']):
+                        _ob_lo = float(min(_bk['open'], _bk['close']))
+                        _ob_hi = float(max(_bk['open'], _bk['close']))
+                        break
+
+                _fvg_lo = _fvg_hi = None
+                for _f in range(2, min(bear_sweep_i + 8, len(df) - 2)):
+                    _b1 = df.iloc[-(_f + 1)]
+                    _b3 = df.iloc[-(_f - 1)]
+                    if float(_b3['low']) > float(_b1['high']):
+                        _fvg_lo = float(_b1['high'])
+                        _fvg_hi = float(_b3['low'])
+                        break
+
+                _range   = bear_sweep_high - _pre_low
+                _ret_lo  = bear_sweep_high - _range * 0.786
+                _ret_hi  = bear_sweep_high - _range * 0.382
+
+                _in_ob  = bool(_ob_lo and _ob_lo * 0.995 <= current_price <= _ob_hi * 1.005)
+                _in_fvg = bool(_fvg_lo and _fvg_lo * 0.995 <= current_price <= _fvg_hi * 1.005)
+                _in_ret = bool(_ret_lo <= current_price <= _ret_hi)
+
+                if (_in_ob or _in_fvg or _in_ret) and \
+                   (c_ema200 <= 0 or current_price <= c_ema200 * 1.005):
+                    sc = 0
+                    if current_adx >= 40: sc += 47
+                    elif current_adx >= 30: sc += 35
+                    elif current_adx >= 20: sc += 20
+                    else: sc += 5
+                    if 50 <= current_rsi <= 70: sc += 30
+                    elif current_rsi > 70: sc += 18
+                    elif 35 <= current_rsi < 50: sc += 10
+                    if _in_ob:  sc += 15
+                    if _in_fvg: sc += 12
+                    if _in_ret: sc += 8
+                    if macd_now < macd_sig: sc += 10
+                    if c_ema200 > 0 and current_price < c_ema200: sc += 8
+                    win_rate = score_to_win_rate(sc)
+                    leverage = score_to_leverage(win_rate, max_leverage)
+
+                    sl_price    = round_to_tick(bear_sweep_high * 1.003, asset)
+                    entry_price = round_to_tick(current_price, asset)
+                    _fib_ext = get_fibonacci_extension(df, float(entry_price), "空", float(sl_price))
+                    if _fib_ext:
+                        tp1, tp2, tp3, _ = _fib_ext
+                    else:
+                        _r = float(sl_price) - float(entry_price)
+                        tp1 = float(entry_price) - _r * 1.5
+                        tp2 = float(entry_price) - _r * 2.5
+                        tp3 = float(entry_price) - _r * 3.5
+                    if abs(float(tp1) - float(entry_price)) < abs(float(entry_price) - float(sl_price)) * 1.5:
+                        _r = abs(float(sl_price) - float(entry_price))
+                        tp1 = float(entry_price) - _r * 1.5
+                        tp2 = float(entry_price) - _r * 2.5
+                        tp3 = float(entry_price) - _r * 3.5
+                    tp1 = round_to_tick(tp1, asset)
+                    tp2 = round_to_tick(tp2, asset)
+                    tp3 = round_to_tick(tp3, asset)
+
+                    _loc = "OB回踩" if _in_ob else ("FVG回補" if _in_fvg else "Fib回調")
+                    _fvg_label = f"FVG:{format_price(_fvg_lo)}-{format_price(_fvg_hi)}" if _fvg_lo else ""
+                    return {
+                        "asset": asset.split('-')[0], "dir": "空",
+                        "leverage": leverage, "win_rate": win_rate,
+                        "tf": f"{tf_label}SMC", "order_type": "SMC流動性單",
+                        "score": sc, "entry": entry_price,
+                        "sl": sl_price, "tp1": tp1, "tp2": tp2, "tp3": tp3,
+                        "entry_type": f"🏦 {tf_label} SMC空｜掃高反轉｜{_loc}｜CHoCH確認",
+                        "sentiment_note": "", "ls_ratio": 1.0,
+                        "adx": round(current_adx, 1), "vol_confirmed": True,
+                        "tf_note": "", "entry_fr": 0.0,
+                        "fib_level": "", "fib_price": None, "fib_near": False, "fib_dist": None,
+                        "poc_price": None, "poc_label": "",
+                        "fvg_lo": _fvg_lo, "fvg_hi": _fvg_hi, "fvg_label": _fvg_label,
+                        "candle_pattern": "", "tp_source": "📐Fib擴展" if _fib_ext else "📊ATR",
+                        "tp_count": 3 if sc >= 65 else 2,
+                        "price": current_price, "is_market_entry": True,
+                    }
+    except Exception:
+        pass
+    return None
+
+
 def run_near_miss_scan():
     """掃描全市場接近通過訊號（交叉存在但被某過濾器擋下），回傳最多 5 筆"""
     all_assets, _ = get_all_okx_swap_assets()
@@ -2226,6 +2623,7 @@ def run_strategy_scan():
     trend_signals = []
     range_signals = []
     div_signals   = []
+    smc_signals   = []
     tasks = [(asset, tf) for asset in all_assets for tf in ["15m", "30m", "1h", "4h", "1d"]]
     total = len(tasks)
     completed = 0
@@ -2249,6 +2647,10 @@ def run_strategy_scan():
                                     ref_trends=ref_trends, market_fr=market_fr)
         if d:
             results.append(('divergence', d))
+        s = fetch_smc_signal(asset, tf, max_leverage=max_lev,
+                             ref_trends=ref_trends, market_fr=market_fr)
+        if s:
+            results.append(('smc', s))
         return results
 
     with ThreadPoolExecutor(max_workers=80) as executor:
@@ -2265,6 +2667,8 @@ def run_strategy_scan():
                             trend_signals.append(sig)
                         elif sig_type == 'range':
                             range_signals.append(sig)
+                        elif sig_type == 'smc':
+                            smc_signals.append(sig)
                         else:
                             div_signals.append(sig)
             except Exception:
@@ -2289,11 +2693,16 @@ def run_strategy_scan():
     div_signals_raw = div_signals[:]
     div_signals = [s for s in div_signals if s['win_rate'] >= 62]
 
-    print(f"   趨勢候選 {len(trend_signals)} 組 | 區間候選 {len(range_signals)} 組 | 背離候選 {len(div_signals)} 組")
+    # ── SMC 訊號品質門檻（技術分 ≥ 60，無 ADX 硬門檻——SMC 靠結構而非趨勢強度）──
+    smc_signals.sort(key=lambda x: x['score'], reverse=True)
+    smc_signals = [s for s in smc_signals if s['win_rate'] >= 60]
 
-    # ── 組合：趨勢前 2 + 背離前 1 + 區間前 1（最多 4 個）──
-    # 優先順序：趨勢 > 背離 > 區間
-    combined = trend_signals[:2] + div_signals[:1] + range_signals[:1]
+    print(f"   趨勢候選 {len(trend_signals)} 組 | 區間候選 {len(range_signals)} 組 | 背離候選 {len(div_signals)} 組 | SMC候選 {len(smc_signals)} 組")
+
+    # ── 組合：趨勢前 2 + SMC 前 1 + 背離前 1 + 區間前 1（最多 5 個）──
+    # 優先順序：趨勢 > SMC > 背離 > 區間
+    # SMC 策略補充趨勢策略沒有捕捉到的流動性獵取反轉機會
+    combined = trend_signals[:2] + smc_signals[:1] + div_signals[:1] + range_signals[:1]
 
     # ── 大幣保底名額（BTC / ETH 專屬第5槽，寬鬆門檻）──
     # BTC/ETH 走勢平滑，ADX 常在 30-38，被嚴格門檻直接淘汰。
