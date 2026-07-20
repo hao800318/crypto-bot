@@ -54,18 +54,23 @@ def get_all_okx_swap_assets():
 
             # ── 24h 成交額硬性過濾（流動性門檻）──
             # OKX market/tickers 一次返回全部合約，效率最高（無需循環請求）。
-            # volCcy24h = 24h 成交額（USDT-SWAP 以 USDT 計價）
+            # 注意：volCcy24h 對 USDT-SWAP 是「基礎幣數量」而非 USDT 金額。
+            # 必須乘以 last 價格才能得到真實 USDT 成交額。
+            # 例：ATH volCcy24h=482M ATH × last=0.00462 = 僅 2.2M USDT（遠低於門檻）。
             _MIN_VOL_USDT = 50_000_000   # 5000 萬 USDT
             try:
                 ticker_res = requests.get(
                     f"{BASE_URL}/api/v5/market/tickers?instType=SWAP", timeout=5
                 ).json()
                 if ticker_res.get('code') == '0':
-                    _vol_map = {
-                        t['instId']: float(t.get('volCcy24h', 0))
-                        for t in ticker_res['data']
-                        if t['instId'].endswith('-USDT-SWAP')
-                    }
+                    _vol_map = {}
+                    for t in ticker_res['data']:
+                        if not t['instId'].endswith('-USDT-SWAP'):
+                            continue
+                        vol_base  = float(t.get('volCcy24h', 0))   # 基礎幣數量
+                        last_px   = float(t.get('last', 0))         # 現價（USDT）
+                        vol_usdt  = vol_base * last_px              # 換算成 USDT 成交額
+                        _vol_map[t['instId']] = vol_usdt
                     _vol_cache.update(_vol_map)   # 更新全域快取，供 API 失敗時備援
                     before = len(assets)
                     assets       = [a for a in assets if _vol_map.get(a, 0) >= _MIN_VOL_USDT]
