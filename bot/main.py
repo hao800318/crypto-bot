@@ -2467,36 +2467,43 @@ def analyze_position(pos):
         #   多頭回調（進場 ≤ signal_price）→ 等價格「跌」到進場：low  ≤ entry
         #   空頭突破（進場 < signal_price）→ 等價格「跌」到進場：low  ≤ entry
         #   空頭回調（進場 ≥ signal_price）→ 等價格「漲」到進場：high ≥ entry
+        # ── 重要：回調型的「未成交」狀態本來就是現價在進場點另一側 ──
+        # 不可加 fallback（「現價已過進場點」），否則回調型一開始就誤判已成交。
         signal_price = pos.get('signal_price', entry)  # 無記錄時 fallback = entry
         if dir == "多":
-            if entry > signal_price:   # 突破多：等高點達到進場
+            if entry > signal_price:
+                # 突破多：等高點升到進場點才成交
                 filled_by_candle = (
                     (fill_eff_high is not None and fill_eff_high >= entry) or
                     current_price >= entry
                 )
-            else:                      # 回調多：等低點跌到進場
+                # 突破型額外保障：現價明顯高於進場點 → 必然已成交
+                if not filled_by_candle and current_price >= entry * 1.001:
+                    filled_by_candle = True
+            else:
+                # 回調多：等低點「跌」到進場點才成交
+                # 未成交狀態 = 現價高於進場點；不加 fallback 避免誤判
                 filled_by_candle = (
                     (fill_eff_low is not None and fill_eff_low <= entry) or
                     current_price <= entry
                 )
-            # ── 價格已明顯越過進場點（多頭）→ 限價單必然已成交 ──
-            # 適用：signal_price fallback 為 entry、或市價進場後價格持續上漲
-            if not filled_by_candle and current_price >= entry * 1.001:
-                filled_by_candle = True
         else:  # 空
-            if entry < signal_price:   # 突破空：等低點跌到進場
+            if entry < signal_price:
+                # 突破空：等低點跌到進場點才成交
                 filled_by_candle = (
                     (fill_eff_low is not None and fill_eff_low <= entry) or
                     current_price <= entry
                 )
-            else:                      # 回調空：等高點漲到進場
+                # 突破型額外保障：現價明顯低於進場點 → 必然已成交
+                if not filled_by_candle and current_price <= entry * 0.999:
+                    filled_by_candle = True
+            else:
+                # 回調空：等高點「漲」到進場點才成交
+                # 未成交狀態 = 現價低於進場點；不加 fallback 避免誤判
                 filled_by_candle = (
                     (fill_eff_high is not None and fill_eff_high >= entry) or
                     current_price >= entry
                 )
-            # ── 價格已明顯越過進場點（空頭）→ 限價單必然已成交 ──
-            if not filled_by_candle and current_price <= entry * 0.999:
-                filled_by_candle = True
         if filled_by_candle:
             pos['filled']          = True
             pos['fill_ts']         = time.time()   # 記錄成交時間，供 TP/SL K 線範圍保護使用
