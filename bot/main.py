@@ -4066,8 +4066,8 @@ def run_position_monitor():
         "🔴 止損觸發":         ("現價出場止損",   "🚪"),
         "🛡️ 回調至保本止損":   ("出場保本",       "🛡️"),
         "🟣 全部止盈":         ("全數出場",       "🎊"),
-        "🔵 止盈2達標":        ("平倉30%，持有剩餘", "📤"),
-        "🟢 止盈1達標":        ("平倉50%，持有剩餘", "📤"),
+        "🔵 止盈2達標":        ("平倉40%，剩20%啟動移動止盈", "📤"),
+        "🟢 止盈1達標":        ("平倉40%，止損移至保本", "📤"),
         "⚠️ 即將觸及保本止損": ("主動出場保本",   "⚠️"),
         "⚠️ 接近止損":         ("考慮現價出場",   "⚠️"),
         "🚨 局勢惡化":         ("建議現價出場",   "🚪"),
@@ -4516,7 +4516,7 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
 
         # ── 標題行 ──
         sig_type = item.get('signal_type', 'trend')
-        type_badge = {"trend": "📈趨勢", "range": "↔️區間", "divergence": "🔄背離"}.get(sig_type, "")
+        type_badge = {"trend": "📈趨勢", "range": "↔️區間", "divergence": "🔄背離", "smc": "🏦SMC"}.get(sig_type, "📈趨勢")
         html_message += (f"{medal} <b>{item['asset']}</b>  {dir_display}  "
                          f"⚡<b>{item['leverage']}</b>  {item['tf']}  "
                          f"{type_badge}  TA分<b>{win_rate}</b> {stars}\n")
@@ -4531,6 +4531,9 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         elif sig_type == 'divergence':
             ctx_label = "背離"
             ctx_extra = item.get('div_desc', '')
+        elif sig_type == 'smc':
+            ctx_label = "SMC"
+            ctx_extra = item.get('entry_type', '').replace(f"{item.get('tf','')} ", '')
         else:
             ctx_label = "趨勢"
             ctx_extra = item.get('tf_note', '')
