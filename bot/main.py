@@ -18,6 +18,7 @@ SCAN_INTERVAL_MINUTES = 30
 
 BASE_URL = "https://www.okx.com"
 _tick_size_map: dict = {}   # inst_id → tickSz float，由 get_all_okx_swap_assets() 填充
+_vol_cache:     dict = {}   # instId → volCcy24h（上次成功的快取，API 失敗時備援）
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("❌ 未設置 TELEGRAM_BOT_TOKEN 環境變數，請在 Secrets 中添加。")
@@ -53,7 +54,8 @@ def get_all_okx_swap_assets():
 
             # ── 24h 成交額硬性過濾（流動性門檻）──
             # OKX market/tickers 一次返回全部合約，效率最高（無需循環請求）。
-            # volCcy24h = 24h 成交額（以 USDT 計價）
+            # volCcy24h = 24h 成交額（USDT-SWAP 以 USDT 計價）
+            _MIN_VOL_USDT = 50_000_000   # 5000 萬 USDT
             try:
                 ticker_res = requests.get(
                     f"{BASE_URL}/api/v5/market/tickers?instType=SWAP", timeout=5
@@ -64,13 +66,34 @@ def get_all_okx_swap_assets():
                         for t in ticker_res['data']
                         if t['instId'].endswith('-USDT-SWAP')
                     }
-                    _MIN_VOL_USDT = 50_000_000   # 5000 萬 USDT
+                    _vol_cache.update(_vol_map)   # 更新全域快取，供 API 失敗時備援
                     before = len(assets)
                     assets       = [a for a in assets if _vol_map.get(a, 0) >= _MIN_VOL_USDT]
                     leverage_map = {k: v for k, v in leverage_map.items() if k in set(assets)}
                     print(f"   📊 成交額過濾（≥50M USDT）：{before} → {len(assets)} 支（剔除 {before - len(assets)} 支低流動性山寨）")
-            except Exception:
-                pass   # API 失敗時略過過濾（保守降級，不中斷掃描）
+                else:
+                    print(f"⚠️ 成交額 API 回傳錯誤碼 {ticker_res.get('code')}，嘗試使用快取過濾")
+                    raise RuntimeError("API 非 0 碼")
+            except Exception as _vol_err:
+                # API 失敗 → 優先用快取；無快取時保守只留主流幣
+                if _vol_cache:
+                    before = len(assets)
+                    assets       = [a for a in assets if _vol_cache.get(a, 0) >= _MIN_VOL_USDT]
+                    leverage_map = {k: v for k, v in leverage_map.items() if k in set(assets)}
+                    print(f"⚠️ 成交額 API 失敗（{_vol_err}），使用快取過濾：{before} → {len(assets)} 支")
+                else:
+                    # 完全無快取（第一次啟動即失敗）→ 只保留已知主流幣防止掃山寨
+                    _SAFE_FALLBACK = {
+                        "BTC-USDT-SWAP","ETH-USDT-SWAP","SOL-USDT-SWAP","BNB-USDT-SWAP",
+                        "XRP-USDT-SWAP","DOGE-USDT-SWAP","ADA-USDT-SWAP","AVAX-USDT-SWAP",
+                        "DOT-USDT-SWAP","LINK-USDT-SWAP","UNI-USDT-SWAP","MATIC-USDT-SWAP",
+                        "LTC-USDT-SWAP","TRX-USDT-SWAP","ATOM-USDT-SWAP","TON-USDT-SWAP",
+                        "ARB-USDT-SWAP","OP-USDT-SWAP","SUI-USDT-SWAP","APT-USDT-SWAP",
+                    }
+                    before = len(assets)
+                    assets       = [a for a in assets if a in _SAFE_FALLBACK]
+                    leverage_map = {k: v for k, v in leverage_map.items() if k in set(assets)}
+                    print(f"⚠️ 成交額 API 失敗且無快取，使用靜態主流幣白名單：{before} → {len(assets)} 支")
 
             print(f"📡 成功獲取全網合約資產庫，共計: {len(assets)} 支幣種")
             return assets, leverage_map
@@ -4941,6 +4964,29 @@ def handle_open_command(text, chat_id):
     direction = parts[2] if len(parts) >= 3 and parts[2] in ("多", "空") else None
     inst_id   = f"{symbol}-USDT-SWAP"
     now_ts    = time.time()
+
+    # ── 24h 成交額硬性門檻檢查（與掃描過濾一致：≥50M USDT）──
+    _MIN_VOL_USDT_OPEN = 50_000_000
+    _coin_vol = _vol_cache.get(inst_id, None)
+    if _coin_vol is None:
+        # 快取未有此幣 → 即時查詢
+        try:
+            _tv = requests.get(
+                f"{BASE_URL}/api/v5/market/ticker?instId={inst_id}", timeout=4
+            ).json()
+            if _tv.get('code') == '0' and _tv.get('data'):
+                _coin_vol = float(_tv['data'][0].get('volCcy24h', 0))
+                _vol_cache[inst_id] = _coin_vol
+        except Exception:
+            _coin_vol = None
+    if _coin_vol is not None and _coin_vol < _MIN_VOL_USDT_OPEN:
+        requests.post(send_url, json={"chat_id": chat_id, "parse_mode": "HTML",
+            "text": (
+                f"⛔ <b>{symbol}</b> 24h 成交額 <b>{_coin_vol/1_000_000:.1f}M USDT</b>，"
+                f"未達流動性門檻（50M USDT）。\n\n"
+                f"低流動性合約插針頻繁、實際難以成交，不建議操作。"
+            )})
+        return
 
     # ── 即時重算兩個時框，挑條件最多的 ──
     requests.post(send_url, json={"chat_id": chat_id,
