@@ -3479,7 +3479,7 @@ def analyze_position(pos):
                         # 頻率保護：30分鐘內只推一次，避免每輪監控都轟炸
                         _now_ts_tr = time.time()
                         _last_tr_push = pos.get('last_trail_push_ts', 0)
-                        if _now_ts_tr - _last_tr_push >= 1800:
+                        if _now_ts_tr - _last_tr_push >= 900:
                             pos['last_trail_push_ts'] = _now_ts_tr
                             status = "🔵 TP2已完成"
                             action = (f"📈 移動止損上移至 <code>{format_price(sl)}</code>（ATR×2.5）\n"
@@ -3679,7 +3679,7 @@ def analyze_position(pos):
                         # 頻率保護：30分鐘內只推一次，避免每輪監控都轟炸
                         _now_ts_tr_s = time.time()
                         _last_tr_push_s = pos.get('last_trail_push_ts', 0)
-                        if _now_ts_tr_s - _last_tr_push_s >= 1800:
+                        if _now_ts_tr_s - _last_tr_push_s >= 900:
                             pos['last_trail_push_ts'] = _now_ts_tr_s
                             status = "🔵 TP2已完成"
                             action = (f"📉 移動止損下移至 <code>{format_price(sl)}</code>（ATR×2.5）\n"
