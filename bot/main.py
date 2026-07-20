@@ -1587,6 +1587,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 "candle_pattern":   _candle_pat,
                 "tp_source":        _tp_source,
                 "tp_count":         tp_count,
+                "signal_type":      "trend",
                 "atr_trail":        round(float(current_atr) * 2.5, 8),  # TP3 移動止盈距離 = ATR×2.5
                 "price":            current_price,
                 "is_market_entry":  is_market_entry,
@@ -1947,6 +1948,7 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
             "fvg_lo":         _fvg_lo_r,
             "fvg_hi":         _fvg_hi_r,
             "fvg_label":      _fvg_label_r,
+            "atr_trail":      round(float(atr) * 2.5, 8),
         }
     except Exception:
         return None
@@ -2206,6 +2208,7 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             "fvg_lo":         _fvg_lo_d,
             "fvg_hi":         _fvg_hi_d,
             "fvg_label":      _fvg_label_d,
+            "atr_trail":      round(float(atr) * 2.5, 8),
         }
     except Exception:
         return None
@@ -2578,6 +2581,8 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
                         "fvg_lo": _fvg_lo, "fvg_hi": _fvg_hi, "fvg_label": _fvg_label,
                         "candle_pattern": "", "tp_source": "📐Fib擴展" if _fib_ext else "📊ATR",
                         "tp_count": 3 if sc >= 65 else 2,
+                        "signal_type": "smc",
+                        "atr_trail": round(float(current_atr) * 2.5, 8),
                         "price": current_price, "is_market_entry": True,
                     }
 
@@ -2697,6 +2702,8 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
                         "fvg_lo": _fvg_lo, "fvg_hi": _fvg_hi, "fvg_label": _fvg_label,
                         "candle_pattern": "", "tp_source": "📐Fib擴展" if _fib_ext else "📊ATR",
                         "tp_count": 3 if sc >= 65 else 2,
+                        "signal_type": "smc",
+                        "atr_trail": round(float(current_atr) * 2.5, 8),
                         "price": current_price, "is_market_entry": True,
                     }
     except Exception:
@@ -4965,6 +4972,7 @@ def handle_open_command(text, chat_id):
         'tp_count':        best.get('tp_count', 3),
         'signal_price':    best.get('price', entry),
         'signal_type':     best.get('signal_type', 'trend'),
+        'atr_trail':       best.get('atr_trail', 0),
         'adx':             best.get('adx', 0),
         'score':           best.get('score', 0),
         'win_rate':        best.get('win_rate', 0),
@@ -5825,6 +5833,7 @@ def handle_telegram_updates():
                                             'tp_count':       sig_cb.get('tp_count', 3),
                                             'signal_price':   _sp,
                                             'signal_type':    _sig_type,
+                                            'atr_trail':      sig_cb.get('atr_trail', 0),
                                             'reported_at': now_ts_cb,
                                             'last_checked_ts': now_ts_cb,
                                             'filled': _is_mkt_cb,  # 市價進場：立即視為已成交
