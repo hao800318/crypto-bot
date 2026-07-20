@@ -323,6 +323,160 @@ def get_fibonacci_context(df, entry, direction):
     return closest_lbl, closest_px, near_fib, round(dist_pct, 2)
 
 
+def get_fibonacci_extension(df, entry, direction, sl):
+    """
+    用最近擺動的 A→B 波段計算 Fibonacci 擴展線作為 TP 目標。
+
+    多頭：A = 最近擺動低點，B = 最近擺動高點（突破點）
+          擴展目標 = B + (B-A) × ratio
+          1.272 擴展 ≈ 保守 TP1
+          1.618 擴展 ≈ 積極 TP2
+
+    空頭：A = 最近擺動高點，B = 最近擺動低點（跌破點）
+          擴展目標 = B - (A-B) × ratio
+
+    回傳 (tp1_fib, tp2_fib, tp3_fib, fib_range) 或 None（找不到有效擺動時）
+    fib_range = 擺動幅度，用於訊號訊息顯示
+    """
+    N_CONFIRM = 3
+    LOOKBACK  = 60
+    highs = df['high'].values[-LOOKBACK:]
+    lows  = df['low'].values[-LOOKBACK:]
+
+    swing_highs, swing_lows = [], []
+    for i in range(N_CONFIRM, len(highs) - N_CONFIRM):
+        if highs[i] == max(highs[i - N_CONFIRM: i + N_CONFIRM + 1]):
+            swing_highs.append((i, float(highs[i])))
+        if lows[i] == min(lows[i - N_CONFIRM: i + N_CONFIRM + 1]):
+            swing_lows.append((i, float(lows[i])))
+
+    if not swing_highs or not swing_lows:
+        return None
+
+    try:
+        if direction == "多":
+            # A = 最近擺動低點，B = 最近擺動高點
+            a_idx, a_px = swing_lows[-1]
+            b_candidates = [(i, p) for i, p in swing_highs if i > a_idx]
+            if not b_candidates:
+                return None
+            b_idx, b_px = b_candidates[-1]
+            rng = b_px - a_px
+            if rng < entry * 0.005:   # 擺動幅度 < 0.5%，無意義
+                return None
+            # 擴展線：從 B 向上延伸
+            tp1_fib = round(b_px + rng * 0.272, 8)   # 1.272 擴展
+            tp2_fib = round(b_px + rng * 0.618, 8)   # 1.618 擴展
+            tp3_fib = round(b_px + rng * 1.000, 8)   # 2.0   擴展
+            # 確認 TP 在 entry 上方（防止擺動點選到進場點之前）
+            if tp1_fib <= entry or tp2_fib <= tp1_fib:
+                return None
+        else:
+            # A = 最近擺動高點，B = 最近擺動低點
+            a_idx, a_px = swing_highs[-1]
+            b_candidates = [(i, p) for i, p in swing_lows if i > a_idx]
+            if not b_candidates:
+                return None
+            b_idx, b_px = b_candidates[-1]
+            rng = a_px - b_px
+            if rng < entry * 0.005:
+                return None
+            # 擴展線：從 B 向下延伸
+            tp1_fib = round(b_px - rng * 0.272, 8)   # 1.272 擴展
+            tp2_fib = round(b_px - rng * 0.618, 8)   # 1.618 擴展
+            tp3_fib = round(b_px - rng * 1.000, 8)   # 2.0   擴展
+            if tp1_fib >= entry or tp2_fib >= tp1_fib:
+                return None
+
+        # 最終安全檢查：TP1 R:R 需 ≥ 1.5
+        _risk = abs(entry - sl)
+        _rew  = abs(tp1_fib - entry)
+        if _risk > 0 and _rew < _risk * 1.5:
+            # TP1 不夠，嘗試直接用 TP2（1.618）作為第一目標
+            _rew2 = abs(tp2_fib - entry)
+            if _rew2 >= _risk * 1.5:
+                tp1_fib, tp2_fib, tp3_fib = tp2_fib, tp3_fib, tp3_fib
+            else:
+                return None
+
+        return tp1_fib, tp2_fib, tp3_fib, round(rng, 8)
+
+    except Exception:
+        return None
+
+
+def detect_candle_pattern(df, direction, n_bars=3):
+    """
+    偵測最近 n_bars 根 K 棒中是否有確認進場的 K 線型態。
+
+    多頭型態（回踩支撐後反彈確認）：
+      - 釘頭錘 (Hammer/Pin Bar)：下影線 ≥ 2× 實體，上影線 ≤ 0.5× 實體，收陽
+      - 多頭吞沒 (Bullish Engulfing)：當根陽線完全包覆前根陰線（收盤 > 前開，開盤 < 前收）
+
+    空頭型態（回踩壓力後回落確認）：
+      - 流星錘 (Shooting Star)：上影線 ≥ 2× 實體，下影線 ≤ 0.5× 實體，收陰
+      - 空頭吞沒 (Bearish Engulfing)：當根陰線完全包覆前根陽線
+
+    回傳 (pattern_name: str | None, bonus: int)
+      pattern_name = None 表示無型態，bonus 用於評分
+    """
+    if len(df) < n_bars + 2:
+        return None, 0
+
+    best_pattern = None
+    best_bonus   = 0
+
+    for i in range(1, n_bars + 1):
+        curr = df.iloc[-i]
+        prev = df.iloc[-i - 1]
+
+        o, h, l, c = float(curr['open']), float(curr['high']), float(curr['low']), float(curr['close'])
+        body       = abs(c - o)
+        upper_wick = h - max(c, o)
+        lower_wick = min(c, o) - l
+        _min_body  = float(curr.get('ATR', body + 1e-10)) * 0.05   # 防零除
+
+        po, pc = float(prev['open']), float(prev['close'])
+
+        if direction == "多":
+            # 釘頭錘：長下影線 + 短上影線 + 陽線（或小陰線）
+            if (lower_wick >= max(body, _min_body) * 2.0
+                    and upper_wick <= max(body, _min_body) * 0.5
+                    and c >= o):
+                pat, bon = "🔨 釘頭錘", 12
+                if bon > best_bonus:
+                    best_pattern, best_bonus = pat, bon
+
+            # 多頭吞沒：當根陽線包覆前根陰線
+            if (c > o                       # 當根收陽
+                    and pc < po             # 前根收陰
+                    and c > po              # 當根收盤 > 前根開盤
+                    and o < pc):            # 當根開盤 < 前根收盤
+                pat, bon = "🕯️ 多頭吞沒", 15
+                if bon > best_bonus:
+                    best_pattern, best_bonus = pat, bon
+
+        else:  # 空頭
+            # 流星錘：長上影線 + 短下影線 + 陰線
+            if (upper_wick >= max(body, _min_body) * 2.0
+                    and lower_wick <= max(body, _min_body) * 0.5
+                    and c <= o):
+                pat, bon = "🌠 流星錘", 12
+                if bon > best_bonus:
+                    best_pattern, best_bonus = pat, bon
+
+            # 空頭吞沒：當根陰線包覆前根陽線
+            if (c < o                       # 當根收陰
+                    and pc > po             # 前根收陽
+                    and c < po              # 當根收盤 < 前根開盤
+                    and o > pc):            # 當根開盤 > 前根收盤
+                pat, bon = "🕯️ 空頭吞沒", 15
+                if bon > best_bonus:
+                    best_pattern, best_bonus = pat, bon
+
+    return best_pattern, best_bonus
+
+
 def find_range_bounds(df, n=2, tol=0.005, min_touches=2):
     """
     識別橫盤區間的支撐帶和壓力帶。
@@ -1068,32 +1222,45 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             entry_price  = current_ma8
             anchor_label = f"MA8={format_price(current_ma8)}"
 
-            # ⑦ SL / TP：從 K 線擺動結構推導，不用固定倍數百分比
-            #   SL  = entry 方向後方最近支撐/壓力（跌破代表訊號失效）
-            #   TP1/2/3 = entry 方向前方歷史壓力/支撐，由近到遠
-            #   找不到足夠水位時以 ATR 補全，保證永遠回傳有效數值
-            sl_price, tp1, tp2, tp3 = find_market_structure_levels(
+            # ⑦ SL：從 K 線擺動結構推導（entry 後方最近支撐/壓力，跌破訊號失效）
+            sl_price, _ms_tp1, _ms_tp2, _ms_tp3 = find_market_structure_levels(
                 df, entry_price, direction, current_atr)
 
-            # ── 盈虧比強制門檻：TP1 必須 ≥ 1.5× 風險距離 ──
-            # 問題根源：若 TP1 只有 0.7R，50% 平倉後 SL 移保本，
-            # 剩餘 50% 回到保本出場 → 全程利潤 = 0.5×0.7R - 費用 ≈ 接近零。
-            # 解法：先嘗試升格 TP2 作為第一目標；若 TP2 也不足，直接拒絕訊號。
-            _risk_dist = abs(entry_price - sl_price)
-            _tp1_dist  = abs(tp1 - entry_price)
-            if _tp1_dist < _risk_dist * 1.5:
-                _tp2_dist = abs(tp2 - entry_price)
-                if _tp2_dist >= _risk_dist * 1.5:
-                    # 跳過太近的壓力/支撐，改以 TP2 作為第一目標
-                    _ext = abs(tp3 - tp2) if abs(tp3 - tp2) > 0 else _risk_dist
-                    if direction == "多":
-                        tp1, tp2, tp3 = tp2, tp3, tp3 + _ext
+            # ── TP：優先使用 Fibonacci 擴展線（1.272 / 1.618 / 2.0）──
+            # 擺動結構 TP 目標往往是「最近壓力位」（0.5-1R），盈虧比偏低。
+            # Fib 擴展線從最近 A→B 擺動推算，自然落在 1.272R / 1.618R 以上，
+            # 符合「突破回踩」後的真實市場延伸目標。
+            _fib_ext = get_fibonacci_extension(df, entry_price, direction, sl_price)
+            _tp_source = ""
+            if _fib_ext is not None:
+                tp1, tp2, tp3, _fib_rng = _fib_ext
+                _tp_source = f"📐Fib擴展(1.272/1.618/2.0)"
+            else:
+                # Fib 擴展計算失敗（擺動點不足），降回擺動結構 TP
+                tp1, tp2, tp3 = _ms_tp1, _ms_tp2, _ms_tp3
+                _tp_source = "📊擺動結構"
+                # 保留舊版 R:R 硬門檻（Fib 無法計算時的安全網）
+                _risk_dist = abs(entry_price - sl_price)
+                _tp1_dist  = abs(tp1 - entry_price)
+                if _tp1_dist < _risk_dist * 1.5:
+                    _tp2_dist = abs(tp2 - entry_price)
+                    if _tp2_dist >= _risk_dist * 1.5:
+                        _ext = abs(tp3 - tp2) if abs(tp3 - tp2) > 0 else _risk_dist
+                        if direction == "多":
+                            tp1, tp2, tp3 = tp2, tp3, tp3 + _ext
+                        else:
+                            tp1, tp2, tp3 = tp2, tp3, tp3 - _ext
                     else:
-                        tp1, tp2, tp3 = tp2, tp3, tp3 - _ext
-                else:
-                    return None   # 近處無足夠 R:R 目標（TP1+TP2 皆 < 1.5R），拒絕
+                        return None   # 擺動結構也無足夠 R:R，拒絕
 
-            # ── 斐波那契回撤匯流：找最近擺動水位，判斷進場是否在 Fib 關鍵支撐/壓力 ──
+            # ── K 線型態確認（釘頭錘 / 吞沒形態）──
+            # 偵測最近 3 根 K 棒，有確認型態則加分 + 附加標籤到訊號訊息
+            _candle_pat, _candle_bonus = detect_candle_pattern(df, direction, n_bars=3)
+            if _candle_bonus > 0:
+                score += _candle_bonus
+            _candle_label = f" | {_candle_pat}" if _candle_pat else ""
+
+            # ── 斐波那契回撤匯流：判斷進場點是否在 Fib 關鍵回撤位 ──
             _fib_lbl, _fib_px, _fib_near, _fib_dist = get_fibonacci_context(
                 df, entry_price, direction)
             if _fib_near and _fib_lbl in ('0.382', '0.618'):
@@ -1136,8 +1303,6 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 else:              tp_count = 1
 
             # ── 手續費最低保本距離：TP1 < 0.25% 時「TP1後移至開倉止損」必虧 ──
-            # OKX taker fee ≈ 0.05%；開倉+TP1平倉+SL平倉 共 3 筆 = 0.15% 總費用
-            # TP1 需 ≥ 0.25% 才能讓 50% TP1利潤 > 全部費用，否則保本止損實為虧損
             _fee_min = entry_price * 0.0025
             if direction == "多":
                 tp1 = max(tp1, round(entry_price + _fee_min, 8))
@@ -1183,11 +1348,14 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                     entry_type = f"📌 {tf_tag}掛限價 {anchor_label}，止損={format_price(sl_price)}"
                     is_market_entry = False
 
-            # 將 POC / FVG 資訊附加到進場建議說明尾端（供訊號訊息顯示）
+            # 將 POC / FVG / K 線型態 / TP 來源附加到進場建議說明尾端
             if _poc_label:
                 entry_type += f"  |  {_poc_label}"
             if _fvg_label:
                 entry_type += f"  |  {_fvg_label}"
+            if _candle_label:
+                entry_type += _candle_label
+            entry_type += f"  |  {_tp_source}"
 
             entry_price = round_to_tick(entry_price, asset)
             sl_price    = round_to_tick(sl_price,    asset)
@@ -1213,7 +1381,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 "adx":            round(current_adx, 1),
                 "vol_confirmed":  cross_vol > avg_vol_20,
                 "tf_note":        tf_note,
-                "entry_fr":       round(funding_rate * 100, 4),  # 進場時資金費率（%）
+                "entry_fr":       round(funding_rate * 100, 4),
                 "fib_level":        _fib_lbl,
                 "fib_price":        _fib_px,
                 "fib_near":         _fib_near,
@@ -1223,9 +1391,11 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 "fvg_lo":           _fvg_lo,
                 "fvg_hi":           _fvg_hi,
                 "fvg_label":        _fvg_label,
+                "candle_pattern":   _candle_pat,
+                "tp_source":        _tp_source,
                 "tp_count":         tp_count,
-                "price":            current_price,      # 訊號發出時的市價（signal_price 用）
-                "is_market_entry":  is_market_entry,    # True=可直接市價進場，建倉即標為 filled
+                "price":            current_price,
+                "is_market_entry":  is_market_entry,
             }
     except:
         pass
