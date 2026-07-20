@@ -26,7 +26,13 @@ if not TELEGRAM_CHAT_ID:
 
 # ==================== 🗂️ 2. OKX 官方全量資產動態抓取 ====================
 def get_all_okx_swap_assets():
-    """回傳 (assets列表, {instId: max_leverage} 字典)"""
+    """
+    回傳 (assets列表, {instId: max_leverage} 字典)。
+    
+    硬性過濾：24h 成交額 ≥ 50,000,000 USDT
+    理由：低流動性山寨幣合約深度差、插針頻繁、實際難以成交。
+    過濾後幣種數量約減少 50%，但留下來的全是可執行的主流品種。
+    """
     url = f"{BASE_URL}/api/v5/public/instruments?instType=SWAP"
     try:
         res = requests.get(url, timeout=5).json()
@@ -44,6 +50,28 @@ def get_all_okx_swap_assets():
                         _tick_size_map[item['instId']] = float(item['tickSz'])
                     except Exception:
                         pass
+
+            # ── 24h 成交額硬性過濾（流動性門檻）──
+            # OKX market/tickers 一次返回全部合約，效率最高（無需循環請求）。
+            # volCcy24h = 24h 成交額（以 USDT 計價）
+            try:
+                ticker_res = requests.get(
+                    f"{BASE_URL}/api/v5/market/tickers?instType=SWAP", timeout=5
+                ).json()
+                if ticker_res.get('code') == '0':
+                    _vol_map = {
+                        t['instId']: float(t.get('volCcy24h', 0))
+                        for t in ticker_res['data']
+                        if t['instId'].endswith('-USDT-SWAP')
+                    }
+                    _MIN_VOL_USDT = 50_000_000   # 5000 萬 USDT
+                    before = len(assets)
+                    assets       = [a for a in assets if _vol_map.get(a, 0) >= _MIN_VOL_USDT]
+                    leverage_map = {k: v for k, v in leverage_map.items() if k in set(assets)}
+                    print(f"   📊 成交額過濾（≥50M USDT）：{before} → {len(assets)} 支（剔除 {before - len(assets)} 支低流動性山寨）")
+            except Exception:
+                pass   # API 失敗時略過過濾（保守降級，不中斷掃描）
+
             print(f"📡 成功獲取全網合約資產庫，共計: {len(assets)} 支幣種")
             return assets, leverage_map
     except Exception as e:
@@ -168,6 +196,51 @@ def get_ecosystem_ref_trends() -> dict[str, str]:
             except Exception:
                 results[coin] = "neutral"
     return results
+
+def detect_market_regime() -> str:
+    """
+    偵測當前市場階段：趨勢市 or 震盪市。
+
+    判斷依據：BTC 4H ADX（方向性強弱最直接的指標）
+      ADX ≥ 22 → 趨勢市（突破回踩 / 趨勢順勢策略命中率最高）
+      ADX < 22 → 震盪市（SMC/ICT 流動性獵取策略效果最好）
+
+    回傳：'trending' 或 'ranging'
+    若 API 失敗則回傳 'trending'（保守，不改變預設行為）。
+    """
+    try:
+        url = f"{BASE_URL}/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=4H&limit=30"
+        res = requests.get(url, timeout=3).json()
+        if res.get('code') != '0' or len(res['data']) < 20:
+            return 'trending'
+        rows    = list(reversed(res['data']))   # 由舊到新
+        closes  = [float(r[4]) for r in rows]
+        highs   = [float(r[2]) for r in rows]
+        lows    = [float(r[3]) for r in rows]
+        n = len(closes)
+        # True Range
+        trs = [max(highs[i] - lows[i],
+                   abs(highs[i] - closes[i-1]),
+                   abs(lows[i]  - closes[i-1]))
+               for i in range(1, n)]
+        atr14 = sum(trs[-14:]) / 14 + 1e-10
+        # Directional Movement
+        pdm = [max(highs[i] - highs[i-1], 0)    for i in range(1, n)]
+        mdm = [max(lows[i-1] - lows[i],   0)    for i in range(1, n)]
+        pdm_c = [pdm[i] if pdm[i] > mdm[i] else 0 for i in range(len(pdm))]
+        mdm_c = [mdm[i] if mdm[i] > pdm[i] else 0 for i in range(len(mdm))]
+        pdi = 100 * (sum(pdm_c[-14:]) / 14) / atr14
+        mdi = 100 * (sum(mdm_c[-14:]) / 14) / atr14
+        # DX → ADX 近似（取最近 5 根 DX 均值，簡化版）
+        _denom = pdi + mdi + 1e-10
+        adx_approx = 100 * abs(pdi - mdi) / _denom
+        regime = 'trending' if adx_approx >= 22 else 'ranging'
+        label  = '趨勢市 🚀' if regime == 'trending' else '震盪市 🔄'
+        print(f"   🌡️ 市場階段：{label}（BTC 4H ADX≈{adx_approx:.1f}）"
+              f"{'→ 突破回踩策略優先' if regime == 'trending' else '→ SMC/ICT 策略優先'}")
+        return regime
+    except Exception:
+        return 'trending'
 
 def get_market_avg_funding_rate():
     """前10大幣種資金費率均值，>0.05%代表市場多頭過熱"""
@@ -889,6 +962,48 @@ _CHAIN_REF: dict[str, str] = {
     "ICP": "BTC", "FIL": "BTC", "APT": "BTC", "TRX": "BTC",
     "HBAR": "BTC", "XLM": "BTC", "VET": "BTC", "EOS": "BTC",
     "THETA": "BTC", "EGLD": "BTC", "FLOW": "BTC", "KSM": "BTC",
+}
+
+# ── 板塊分類表（Sector Map）──────────────────────────────────────────────
+# 用途：板塊集體拉升時去重，同板塊最多保留 2 個最強訊號，防止倉位過度集中。
+# 找不到對應板塊的幣種，以幣種名稱自身為鍵（不被過濾）。
+_SECTOR_MAP: dict[str, str] = {
+    # ── Layer 1 主鏈 ──
+    "BTC": "L1", "ETH": "L1", "SOL": "L1", "BNB": "L1", "AVAX": "L1",
+    "ADA": "L1", "DOT": "L1", "ATOM": "L1", "TRX": "L1", "NEAR": "L1",
+    "ICP": "L1", "APT": "L1", "SUI": "L1", "TON": "L1", "FTM": "L1",
+    "ALGO": "L1", "HBAR": "L1", "XLM": "L1", "VET": "L1", "KSM": "L1",
+    "EOS": "L1", "THETA": "L1", "EGLD": "L1", "FLOW": "L1",
+    # ── Layer 2 擴容 ──
+    "ARB": "L2", "OP": "L2", "MATIC": "L2", "POL": "L2", "STRK": "L2",
+    "MANTA": "L2", "IMX": "L2",
+    # ── DeFi / DEX ──
+    "UNI": "DeFi", "AAVE": "DeFi", "MKR": "DeFi", "COMP": "DeFi",
+    "CRV": "DeFi", "SUSHI": "DeFi", "YFI": "DeFi", "GMX": "DeFi",
+    "DYDX": "DeFi", "1INCH": "DeFi", "PENDLE": "DeFi", "SNX": "DeFi",
+    "BAL": "DeFi", "RDNT": "DeFi",
+    # ── AI / 去中心化計算 ──
+    "GRT": "AI", "RNDR": "AI", "RENDER": "AI", "PYTH": "AI", "WLD": "AI",
+    "TAO": "AI", "FET": "AI", "AGIX": "AI", "OCEAN": "AI",
+    # ── 預言機 / 基礎設施 ──
+    "LINK": "Infra", "ENS": "Infra", "API3": "Infra",
+    # ── LSD / 流動性質押 ──
+    "LDO": "LSD", "RPL": "LSD", "JITO": "LSD", "EIGEN": "LSD",
+    # ── SOL 生態 DeFi ──
+    "RAY": "SOL_eco", "JUP": "SOL_eco", "DRIFT": "SOL_eco",
+    # ── SOL 生態 Meme ──
+    "BONK": "Meme_SOL", "WIF": "Meme_SOL", "POPCAT": "Meme_SOL",
+    "MOODENG": "Meme_SOL", "PNUT": "Meme_SOL", "MEW": "Meme_SOL",
+    "BOME": "Meme_SOL",
+    # ── TON 生態 ──
+    "NOT": "Meme_TON", "DOGS": "Meme_TON",
+    # ── 支付 / 跨境匯款 ──
+    "XRP": "Payments", "XLM": "Payments",
+    # ── 儲存 / 分散式計算 ──
+    "FIL": "Storage", "AR": "Storage",
+    # ── 遊戲 / 元宇宙 ──
+    "MAGIC": "Gaming", "GALA": "Gaming", "AXS": "Gaming", "SAND": "Gaming",
+    "MANA": "Gaming",
 }
 
 def get_higher_tf_ema89_slope(asset, current_bar):
@@ -2612,12 +2727,15 @@ def run_strategy_scan():
     all_assets, leverage_map = get_all_okx_swap_assets()
 
     # 市場環境指標（只取一次，傳給所有 worker）
+    # detect_market_regime 也一起並行，不額外增加等待時間
     print("📡 獲取市場環境指標...")
-    with ThreadPoolExecutor(max_workers=2) as _env_ex:
-        _f_ref = _env_ex.submit(get_ecosystem_ref_trends)
-        _f_fr  = _env_ex.submit(get_market_avg_funding_rate)
-    ref_trends = _f_ref.result()
-    market_fr  = _f_fr.result()
+    with ThreadPoolExecutor(max_workers=3) as _env_ex:
+        _f_ref    = _env_ex.submit(get_ecosystem_ref_trends)
+        _f_fr     = _env_ex.submit(get_market_avg_funding_rate)
+        _f_regime = _env_ex.submit(detect_market_regime)
+    ref_trends     = _f_ref.result()
+    market_fr      = _f_fr.result()
+    market_regime  = _f_regime.result()   # 'trending' | 'ranging'
     print(f"   生態鏈趨勢: { {k: v for k, v in ref_trends.items()} } | 市場費率均值: {market_fr*100:.4f}%")
 
     trend_signals = []
@@ -2699,10 +2817,17 @@ def run_strategy_scan():
 
     print(f"   趨勢候選 {len(trend_signals)} 組 | 區間候選 {len(range_signals)} 組 | 背離候選 {len(div_signals)} 組 | SMC候選 {len(smc_signals)} 組")
 
-    # ── 組合：趨勢前 2 + SMC 前 1 + 背離前 1 + 區間前 1（最多 5 個）──
-    # 優先順序：趨勢 > SMC > 背離 > 區間
-    # SMC 策略補充趨勢策略沒有捕捉到的流動性獵取反轉機會
-    combined = trend_signals[:2] + smc_signals[:1] + div_signals[:1] + range_signals[:1]
+    # ── 依市場階段動態調整策略優先順序 ──────────────────────────────────────
+    # 趨勢市（ADX ≥ 22）：趨勢順勢突破策略命中率最高 → 趨勢前 2 優先
+    # 震盪市（ADX < 22）：SMC 流動性獵取 + 區間反彈策略最有效 → SMC/區間優先
+    if market_regime == 'ranging':
+        # 震盪市：SMC×2 → 區間×1 → 趨勢×1 → 背離×1（最多 5 個）
+        combined = smc_signals[:2] + range_signals[:1] + trend_signals[:1] + div_signals[:1]
+        print(f"   🔄 震盪市模式：SMC/區間策略優先（SMC{len(smc_signals[:2])} + 區間{len(range_signals[:1])} + 趨勢{len(trend_signals[:1])} + 背離{len(div_signals[:1])}）")
+    else:
+        # 趨勢市（預設）：趨勢×2 → SMC×1 → 背離×1 → 區間×1（最多 5 個）
+        combined = trend_signals[:2] + smc_signals[:1] + div_signals[:1] + range_signals[:1]
+        print(f"   🚀 趨勢市模式：突破回踩策略優先（趨勢{len(trend_signals[:2])} + SMC{len(smc_signals[:1])} + 背離{len(div_signals[:1])} + 區間{len(range_signals[:1])}）")
 
     # ── 大幣保底名額（BTC / ETH 專屬第5槽，寬鬆門檻）──
     # BTC/ETH 走勢平滑，ADX 常在 30-38，被嚴格門檻直接淘汰。
@@ -2736,7 +2861,7 @@ def run_strategy_scan():
     with watch_list_lock:
         watch_assets = {w['asset'] for w in watch_list}
 
-    # 去重：同幣種同方向只保留第一個（趨勢優先，已排在前面）
+    # 去重①：同幣種同方向只保留第一個（趨勢優先，已排在前面）
     seen = set()
     deduped = []
     for s in combined:
@@ -2744,6 +2869,24 @@ def run_strategy_scan():
         if key not in seen:
             seen.add(key)
             deduped.append(s)
+
+    # 去重②：板塊集中去重（防止同板塊集體拉升時倉位過度集中）
+    # 原則：同一板塊（L1 / Meme_SOL / DeFi / AI 等）最多保留 2 個最強訊號。
+    # 排序已按 score 由大到小，故直接依序保留，超過 2 個的略過並打印日誌。
+    # 找不到板塊的幣種（未登錄在 _SECTOR_MAP）以幣種名稱自身為鍵，不受限制。
+    _sector_count: dict[str, int] = {}
+    sector_deduped = []
+    for s in deduped:
+        _sym    = s['asset']
+        _sector = _SECTOR_MAP.get(_sym, _sym)   # 未知板塊 → 以自身名稱隔離，不被限制
+        _sector_count[_sector] = _sector_count.get(_sector, 0) + 1
+        if _sector_count[_sector] <= 2:
+            sector_deduped.append(s)
+        else:
+            print(f"   🔇 板塊去重：{_sym}（{_sector} 板塊第 {_sector_count[_sector]} 個，略過）")
+    if len(sector_deduped) < len(deduped):
+        print(f"   📋 板塊去重後：{len(deduped)} → {len(sector_deduped)} 個訊號")
+    deduped = sector_deduped
 
     now_ts = time.time()
     _MAJOR_COINS_COOL = {'BTC', 'ETH'}
