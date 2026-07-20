@@ -3252,40 +3252,40 @@ def analyze_position(pos):
         # ── 重要：回調型的「未成交」狀態本來就是現價在進場點另一側 ──
         # 不可加 fallback（「現價已過進場點」），否則回調型一開始就誤判已成交。
         signal_price = pos.get('signal_price', entry)  # 無記錄時 fallback = entry
+        # ── 填單判定規則 ──
+        # 優先用 K 線極值（fill_eff_high/low）；K 線 API 失敗時才用現價 fallback。
+        # 不把 current_price 與 K 線資料並列 OR：K 線有資料時以 K 線為準，
+        # 避免現價短暫剛好踩到進場點就誤判成交。
         if dir == "多":
             if entry > signal_price:
-                # 突破多：等高點升到進場點才成交
-                filled_by_candle = (
-                    (fill_eff_high is not None and fill_eff_high >= entry) or
-                    current_price >= entry
-                )
-                # 突破型額外保障：現價明顯高於進場點 → 必然已成交
-                if not filled_by_candle and current_price >= entry * 1.001:
-                    filled_by_candle = True
+                # 突破多：等 K 線最高點升到進場點才成交
+                if fill_eff_high is not None:
+                    filled_by_candle = fill_eff_high >= entry
+                else:
+                    # K 線 API 失敗 → 用現價保底；需明顯高於進場點（+0.1%）才確認
+                    filled_by_candle = current_price >= entry * 1.001
             else:
-                # 回調多：等低點「跌」到進場點才成交
-                # 未成交狀態 = 現價高於進場點；不加 fallback 避免誤判
-                filled_by_candle = (
-                    (fill_eff_low is not None and fill_eff_low <= entry) or
-                    current_price <= entry
-                )
+                # 回調多：等 K 線最低點跌到進場點才成交
+                if fill_eff_low is not None:
+                    filled_by_candle = fill_eff_low <= entry
+                else:
+                    # K 線 API 失敗 → 用現價保底；需明顯低於進場點（-0.1%）才確認
+                    filled_by_candle = current_price <= entry * 0.999
         else:  # 空
             if entry < signal_price:
-                # 突破空：等低點跌到進場點才成交
-                filled_by_candle = (
-                    (fill_eff_low is not None and fill_eff_low <= entry) or
-                    current_price <= entry
-                )
-                # 突破型額外保障：現價明顯低於進場點 → 必然已成交
-                if not filled_by_candle and current_price <= entry * 0.999:
-                    filled_by_candle = True
+                # 突破空：等 K 線最低點跌到進場點才成交
+                if fill_eff_low is not None:
+                    filled_by_candle = fill_eff_low <= entry
+                else:
+                    # K 線 API 失敗 → 用現價保底；需明顯低於進場點（-0.1%）才確認
+                    filled_by_candle = current_price <= entry * 0.999
             else:
-                # 回調空：等高點「漲」到進場點才成交
-                # 未成交狀態 = 現價低於進場點；不加 fallback 避免誤判
-                filled_by_candle = (
-                    (fill_eff_high is not None and fill_eff_high >= entry) or
-                    current_price >= entry
-                )
+                # 回調空：等 K 線最高點漲到進場點才成交
+                if fill_eff_high is not None:
+                    filled_by_candle = fill_eff_high >= entry
+                else:
+                    # K 線 API 失敗 → 用現價保底；需明顯高於進場點（+0.1%）才確認
+                    filled_by_candle = current_price >= entry * 1.001
         if filled_by_candle:
             pos['filled']          = True
             pos['fill_ts']         = time.time()   # 記錄成交時間，供 TP/SL K 線範圍保護使用
@@ -3362,18 +3362,23 @@ def analyze_position(pos):
     # ── 已成交：取上次監控後的 K 線高低點，捕捉 TP/SL 觸碰事件 ──
     since_ts = pos.get('last_checked_ts', pos.get('reported_at', time.time() - 3600))
     fill_ts  = pos.get('fill_ts', 0)
+    # ── 關鍵保護：TP 時間窗口下界 = max(since_ts - 120, fill_ts) ──
+    # 問題根源：fill_ts 與 last_checked_ts 在確認成交時同步設為 time.time()，
+    # 下一輪監控 since_ts - 120 就會倒退進「成交那根 K 棒」，若那根 K 棒 wick 很長直接到 TP1，
+    # TP1 在用戶根本沒開倉的情況下立即觸發。fill_ts 作為硬性下界可防止這個問題。
+    _tp_since = int(max(since_ts - 120, fill_ts)) if fill_ts > 0 else int(since_ts - 120)
     # 以 1m K 線為主要 TP/SL 判定來源：精度最高，不受大時框 wick 誤差影響
-    # since_ts - 120：回溯多 2 分鐘，確保 fill 偵測與 TP 觸碰在同一個 1m 蠟燭的情況下不漏掉
-    effective_high, effective_low = get_candle_range_since(inst_id, since_ts - 120, '1m', no_margin=True)
+    effective_high, effective_low = get_candle_range_since(inst_id, _tp_since, '1m', no_margin=True)
     # ── 關鍵：只有 API 成功回傳資料才推進 last_checked_ts ──
     # 若 API 超時回傳 None，保留舊 since_ts，下一輪重新覆蓋同一時段，防止 TP 觸碰被永久跳過
     _candle_api_ok = effective_high is not None
     effective_high = max(effective_high, current_price) if effective_high is not None else current_price
     effective_low  = min(effective_low,  current_price) if effective_low  is not None else current_price
-    # 原始時框補充：只納入 since_ts 之後「新開盤」的 K 棒（no_margin=True，不往前抓舊棒）
+    # 原始時框補充：since_ts 與 fill_ts 取較晚者，同樣避免重抓成交 K 棒
     _bar_secs = {"15m": 900, "30m": 1800, "1H": 3600, "4H": 14400, "1D": 86400}
     _bar_dur  = _bar_secs.get(bar, 3600)
-    _rng_h, _rng_l = get_candle_range_since(inst_id, since_ts, bar, no_margin=True)
+    _tf_since = int(max(since_ts, fill_ts)) if fill_ts > 0 else int(since_ts)
+    _rng_h, _rng_l = get_candle_range_since(inst_id, _tf_since, bar, no_margin=True)
     if _rng_h is not None:
         effective_high = max(effective_high, _rng_h)
         _candle_api_ok = True
