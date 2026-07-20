@@ -4875,74 +4875,93 @@ def send_holding_summary(chat_id):
     except Exception as _pe:
         print(f"⚠️ holding 取現價失敗：{_pe}")
 
-    # ── 組裝每個資產的區塊，之後分段發送 ──
-    by_asset: dict = defaultdict(list)
-    for pos in positions:
-        by_asset[pos['asset']].append(pos)
+    # ── 分兩組：已成交持倉 / 等待進場掛單 ──
+    filled_pos  = [p for p in positions if p.get('filled', False)]
+    pending_pos = [p for p in positions if not p.get('filled', False)]
 
-    # 每個資產組成一個 block 字串，稍後依 4000 字元上限分頁
-    asset_blocks = []
-    for asset, group in by_asset.items():
-        cp        = price_cache.get(asset)
-        price_str = format_price(cp) if cp else "—"
-        blk  = f"<b>{asset}</b>  現價 <code>{price_str}</code>\n"
+    def _build_asset_blocks(pos_list):
+        """把持倉列表按資產分組，組出 block 字串列表"""
+        by_a: dict = defaultdict(list)
+        for pos in pos_list:
+            by_a[pos['asset']].append(pos)
+        blocks = []
+        for asset, group in by_a.items():
+            cp        = price_cache.get(asset)
+            price_str = format_price(cp) if cp else "—"
+            blk = f"<b>{asset}</b>  現價 <code>{price_str}</code>\n"
+            for i, pos in enumerate(group, 1):
+                status, action = _holding_quick_status(pos, cp)
+                age_h = (time.time() - pos['reported_at']) / 3600
+                d     = "🟩<b>多</b>" if pos['dir'] == "多" else "🟥<b>空</b>"
+                sub   = f"#{i} " if len(group) > 1 else ""
+                t1 = "✅" if pos.get('tp1_hit') else "  "
+                t2 = "✅" if pos.get('tp2_hit') else "  "
+                t3 = "✅" if pos.get('tp3_hit') else "  "
+                blk += f"{sub}{d}  {pos.get('tf','?')}  {status}  <i>({age_h:.1f}h前)</i>\n"
+                blk += "<pre>"
+                blk += f"進場  {format_price(pos['entry'])}\n"
+                blk += f"止損  {format_price(pos['sl'])}\n"
+                blk += f"TP1   {format_price(pos.get('tp1',0))} {t1}\n"
+                blk += f"TP2   {format_price(pos.get('tp2',0))} {t2}\n"
+                blk += f"TP3   {format_price(pos.get('tp3',0))} {t3}\n"
+                blk += "</pre>"
+                blk += f"▸ {action}\n"
+            blk += "─────────────────────────\n"
+            blocks.append(blk)
+        return blocks
 
-        for i, pos in enumerate(group, 1):
-            status, action = _holding_quick_status(pos, cp)
-            age_h = (time.time() - pos['reported_at']) / 3600
-            d     = "🟩<b>多</b>" if pos['dir'] == "多" else "🟥<b>空</b>"
-            sub   = f"#{i} " if len(group) > 1 else ""
-            t1 = "✅" if pos.get('tp1_hit') else "  "
-            t2 = "✅" if pos.get('tp2_hit') else "  "
-            t3 = "✅" if pos.get('tp3_hit') else "  "
-            blk += f"{sub}{d}  {pos.get('tf','?')}  {status}  <i>({age_h:.1f}h前)</i>\n"
-            blk += "<pre>"
-            blk += f"進場  {format_price(pos['entry'])}\n"
-            blk += f"止損  {format_price(pos['sl'])}\n"
-            blk += f"TP1   {format_price(pos.get('tp1',0))} {t1}\n"
-            blk += f"TP2   {format_price(pos.get('tp2',0))} {t2}\n"
-            blk += f"TP3   {format_price(pos.get('tp3',0))} {t3}\n"
-            blk += "</pre>"
-            blk += f"▸ {action}\n"
-
-        blk += "─────────────────────────\n"
-        asset_blocks.append(blk)
-
-    # ── 分頁發送（Telegram 上限 4096，保守用 3800）──
+    # ── 組裝兩大段落 ──
     _TG_LIMIT = 3800
-    header = (f"<b>【持倉監控總覽】</b>  <code>{now_str} PT</code>\n"
-              f"共追蹤 <b>{len(positions)}</b> 筆持倉\n"
-              f"─────────────────────────\n")
-    tracked = list(by_asset.keys())
-    _eg = tracked[0] if tracked else "ETH"
-    footer = (f"<i>📌 /open {_eg}  確認開倉\n"
-              f"🗑️ /close {_eg}  解除監控\n"
-              f"⚡ 警報僅在 TP/SL/市場惡化時推送</i>")
     holding_markup = {"inline_keyboard": [[
         {"text": "🔄 重新掃描", "callback_data": "cmd_scan"},
         {"text": "📊 查看勝率", "callback_data": "cmd_stats"}
     ]]}
+    tracked = list({p['asset'] for p in positions})
+    _eg = tracked[0] if tracked else "ETH"
+    footer = (f"<i>📌 /open {_eg}  確認開倉\n"
+              f"🗑️ /close {_eg}  解除監控\n"
+              f"⚡ 警報僅在 TP/SL/市場惡化時推送</i>")
 
-    pages = []
-    cur   = header
-    for blk in asset_blocks:
-        if len(cur) + len(blk) > _TG_LIMIT:
+    def _send_section(section_header, asset_blocks, is_last_section):
+        """把一組 asset_blocks 依字元上限分頁發送"""
+        if not asset_blocks:
+            return
+        pages = []
+        cur   = section_header
+        for blk in asset_blocks:
+            if len(cur) + len(blk) > _TG_LIMIT:
+                pages.append(cur)
+                cur = blk
+            else:
+                cur += blk
+        if cur.strip():
+            if is_last_section:
+                cur += footer
             pages.append(cur)
-            cur = blk          # 新頁從這個 blk 開始，不重印 header
-        else:
-            cur += blk
-    if cur.strip():
-        cur += footer
-        pages.append(cur)
+        for idx, page in enumerate(pages):
+            is_last_page = is_last_section and idx == len(pages) - 1
+            payload = {"chat_id": chat_id, "text": page, "parse_mode": "HTML"}
+            if is_last_page:
+                payload["reply_markup"] = holding_markup
+            resp = requests.post(text_url, json=payload)
+            if not resp.json().get("ok"):
+                print(f"⚠️ holding 訊息發送失敗：{resp.text[:200]}")
 
-    for idx, page in enumerate(pages):
-        markup = holding_markup if idx == len(pages) - 1 else None
-        payload = {"chat_id": chat_id, "text": page, "parse_mode": "HTML"}
-        if markup:
-            payload["reply_markup"] = markup
-        resp = requests.post(text_url, json=payload)
-        if not resp.json().get("ok"):
-            print(f"⚠️ holding 訊息發送失敗（頁{idx+1}）：{resp.text[:200]}")
+    # 第一頁：持倉中（已成交）
+    sec1_header = (f"<b>【持倉中】</b>  <code>{now_str} PT</code>\n"
+                   f"已成交 <b>{len(filled_pos)}</b> 筆  /  等待進場 <b>{len(pending_pos)}</b> 筆\n"
+                   f"─────────────────────────\n")
+    filled_blocks  = _build_asset_blocks(filled_pos)
+    pending_blocks = _build_asset_blocks(pending_pos)
+
+    has_pending = bool(pending_blocks)
+    _send_section(sec1_header, filled_blocks, is_last_section=not has_pending)
+
+    # 第二頁：等待進場（掛單中）
+    if has_pending:
+        sec2_header = (f"<b>【等待進場】</b>  掛單監控中\n"
+                       f"─────────────────────────\n")
+        _send_section(sec2_header, pending_blocks, is_last_section=True)
 
 # ==================== 📌 手動開倉/平倉指令 ====================
 def handle_open_command(text, chat_id):
