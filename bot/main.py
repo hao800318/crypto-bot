@@ -4809,132 +4809,104 @@ def _scan_worker_thread_impl(msg_title, target_chat_id, silent_on_empty=False, i
             if resp.json().get("ok"):
                 print(f"✅ 掃描結果發送成功（{'有' if near_misses else '無'}接近訊號）")
 
+def _holding_quick_status(pos, cp):
+    """
+    從 pos dict 直接判斷狀態，完全不呼叫任何 API。
+    背景監控每 5 分鐘會更新 pos 內的 sl/tp_hit 等欄位，summary 直接讀即可。
+    回傳 (status_label, one_line_action)
+    """
+    if not pos.get('filled', False):
+        return "⏳ 等待進場", f"掛單進場價 {format_price(pos['entry'])}"
+
+    dir   = pos['dir']
+    entry = pos['entry']
+    sl    = pos['sl']
+    tp1   = pos.get('tp1', 0)
+    tp2   = pos.get('tp2', 0)
+    tp3   = pos.get('tp3', 0)
+
+    # 現價快速損益估算
+    if cp:
+        pnl_pct = (cp - entry) / entry * 100 * (1 if dir == "多" else -1)
+        pnl_str = f"{'📈' if pnl_pct >= 0 else '📉'} {pnl_pct:+.2f}%"
+    else:
+        pnl_str = "現價取得失敗"
+
+    if pos.get('tp3_hit'):
+        return "🟣 TP3已達標", f"全部止盈完成  {pnl_str}"
+    if pos.get('tp2_hit'):
+        trail_sl = format_price(sl)
+        return "🔵 TP2已完成", f"移動止損 {trail_sl}  {pnl_str}  等TP3 {format_price(tp3)}"
+    if pos.get('tp1_hit'):
+        return "🟡 TP1已完成", f"止損鎖至 {format_price(sl)}  {pnl_str}  等TP2 {format_price(tp2)}"
+
+    # 未到任何 TP → 顯示與 SL/TP1 的距離
+    if cp:
+        sl_dist  = abs(cp - sl)  / cp * 100
+        tp1_dist = abs(tp1 - cp) / cp * 100
+        return "🟢 持倉中", f"距SL {sl_dist:.1f}%  距TP1 {tp1_dist:.1f}%  {pnl_str}"
+    return "🟢 持倉中", "—"
+
+
 def send_holding_summary(chat_id):
-    """發送目前所有活躍持倉的狀態總覽"""
+    """發送目前所有活躍持倉的狀態總覽（輕量快照版，不呼叫 K 線 API）"""
     with active_positions_lock:
         positions = list(active_positions)
 
     text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
     if not positions:
-        requests.post(text_url, json={"chat_id": chat_id, "text": "📭 目前沒有追蹤中的持倉。請先執行 /scan 產生訊號。"})
+        requests.post(text_url, json={"chat_id": chat_id,
+            "text": "📭 目前沒有追蹤中的持倉。請先執行 /scan 產生訊號。"})
         return
 
-    # ── 立即回覆「查詢中」，讓用戶知道指令已收到 ──
-    n = len(positions)
-    requests.post(text_url, json={"chat_id": chat_id,
-        "text": f"⏳ 正在查詢 {n} 筆持倉狀態，請稍候..."})
-
-    la_tz = pytz.timezone('America/Los_Angeles')
+    la_tz   = pytz.timezone('America/Los_Angeles')
     now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
 
-    # ── 並行呼叫 analyze_position，最多 30 秒整體 timeout ──
-    # 每個持倉需要 3+ 次 API（現價 + K線），串行等待容易超時；
-    # ThreadPoolExecutor 讓所有持倉同時查詢，等最慢的那一個即可。
-    def _analyze_one(pos):
-        try:
-            return pos, analyze_position(pos)
-        except Exception as _e:
-            print(f"⚠️ holding analyze_position 錯誤 [{pos.get('asset','?')}]：{_e}")
-            return pos, (None, "—", False)
-
-    results = {}   # pos id → (status, action, push)
-    with ThreadPoolExecutor(max_workers=min(n, 10)) as _hex:
-        futs = {_hex.submit(_analyze_one, pos): pos for pos in positions}
-        for fut in as_completed(futs, timeout=30):
-            try:
-                pos, (status, action, push) = fut.result()
-                results[id(pos)] = (status, action)
-            except Exception:
-                pos = futs[fut]
-                results[id(pos)] = (None, "—")
-
-    # ── 分類：終止狀態清除，活躍的留著顯示 ──
-    _TERMINAL = {"🚫 掛單已取消", "⏰ 掛單逾時取消",
-                 "🔴 止損觸發", "🟣 全部止盈", "🛡️ 回調至保本止損"}
-    _OUTCOME_MAP = {
-        "🟣 全部止盈":        "win",
-        "🛡️ 回調至保本止損":  "win",
-        "🔴 止損觸發":        "loss",
-    }
-    to_remove   = []
-    active_rows = []
-    for pos in positions:
-        status, action = results.get(id(pos), (None, "—"))
-        if status is None:
-            status, action = "❓ 無法取得現價", "—"
-        if status in _TERMINAL:
-            to_remove.append(pos)
-            if status in _OUTCOME_MAP and pos.get('filled', False):
-                record_trade_outcome(pos, _OUTCOME_MAP[status])
-            d_tag = "🟩多" if pos['dir'] == "多" else "🟥空"
-            icon  = "🚫" if "取消" in status else ("🔴" if "止損" in status else "🟣")
-            note  = (
-                f"{icon} <b>{status}</b>  <code>{now_str} PT</code>\n\n"
-                f"<b>{pos['asset']}</b>  {d_tag}  {pos['tf']}\n"
-                f"▸ {action}\n\n"
-                f"<i>（已自動從監控清單移除）</i>"
-            )
-            requests.post(text_url, json={"chat_id": str(TELEGRAM_CHAT_ID),
-                                          "text": note, "parse_mode": "HTML"})
-        else:
-            active_rows.append((pos, status, action))
-
-    with active_positions_lock:
-        for p in to_remove:
-            if p in active_positions:
-                active_positions.remove(p)
-        save_positions(active_positions)
-
-    if not active_rows:
-        requests.post(text_url, json={"chat_id": chat_id,
-            "text": "📭 目前沒有持倉中的追蹤記錄。"})
-        return
-
-    # ── 並行取得各幣現價（display 用，analyze_position 已查過但未回傳，再快速補一輪）──
-    unique_assets = list({pos['asset'] for pos, _, _ in active_rows})
-    price_cache = {}
-    def _fetch_price(asset):
+    # ── 僅取現價（每個資產 1 次 ticker 呼叫，全部並行）──
+    unique_assets = list({pos['asset'] for pos in positions})
+    price_cache: dict = {}
+    def _fp(asset):
         return asset, get_current_price(asset + '-USDT-SWAP')
-    with ThreadPoolExecutor(max_workers=min(len(unique_assets), 10)) as _pex:
-        for asset, cp in _pex.map(_fetch_price, unique_assets):
-            price_cache[asset] = cp
+    try:
+        with ThreadPoolExecutor(max_workers=min(len(unique_assets), 20)) as _pex:
+            for asset, cp in _pex.map(_fp, unique_assets, timeout=12):
+                price_cache[asset] = cp
+    except Exception as _pe:
+        print(f"⚠️ holding 取現價失敗：{_pe}")
 
-    # ── 組裝訊息 ──
+    # ── 組裝訊息（全部從 pos dict 讀，無額外 API）──
     msg = f"<b>【持倉監控總覽】</b>  <code>{now_str} PT</code>\n"
-    msg += f"共追蹤 <b>{len(active_rows)}</b> 筆持倉\n"
+    msg += f"共追蹤 <b>{len(positions)}</b> 筆持倉\n"
     msg += "─────────────────────────\n"
 
-    by_asset = defaultdict(list)
-    for pos, status, action in active_rows:
-        by_asset[pos['asset']].append((pos, status, action))
+    by_asset: dict = defaultdict(list)
+    for pos in positions:
+        by_asset[pos['asset']].append(pos)
 
     for asset, group in by_asset.items():
-        cp = price_cache.get(asset)
+        cp        = price_cache.get(asset)
         price_str = format_price(cp) if cp else "—"
         msg += f"<b>{asset}</b>  現價 <code>{price_str}</code>\n"
 
-        for i, (pos, status, action) in enumerate(group, 1):
+        for i, pos in enumerate(group, 1):
+            status, action = _holding_quick_status(pos, cp)
             age_h = (time.time() - pos['reported_at']) / 3600
             d     = "🟩<b>多</b>" if pos['dir'] == "多" else "🟥<b>空</b>"
             sub   = f"#{i} " if len(group) > 1 else ""
-            msg += f"{sub}{d}  {pos['tf']}  {status}  <i>({age_h:.1f}h前)</i>\n"
-            t1 = "✅" if pos.get('tp1_hit') else ""
-            t2 = "✅" if pos.get('tp2_hit') else ""
-            t3 = "✅" if pos.get('tp3_hit') else ""
+            t1 = "✅" if pos.get('tp1_hit') else "  "
+            t2 = "✅" if pos.get('tp2_hit') else "  "
+            t3 = "✅" if pos.get('tp3_hit') else "  "
+            msg += f"{sub}{d}  {pos.get('tf','?')}  {status}  <i>({age_h:.1f}h前)</i>\n"
             msg += "<pre>"
             msg += f"進場  {format_price(pos['entry'])}\n"
             msg += f"止損  {format_price(pos['sl'])}\n"
-            msg += f"TP1   {format_price(pos['tp1'])} {t1}\n"
-            msg += f"TP2   {format_price(pos['tp2'])} {t2}\n"
-            msg += f"TP3   {format_price(pos['tp3'])} {t3}\n"
+            msg += f"TP1   {format_price(pos.get('tp1',0))} {t1}\n"
+            msg += f"TP2   {format_price(pos.get('tp2',0))} {t2}\n"
+            msg += f"TP3   {format_price(pos.get('tp3',0))} {t3}\n"
             msg += "</pre>"
             msg += f"▸ {action}\n"
 
-        all_pos_in_asset = [r[0] for r in group]
-        conclusion = build_coin_conclusion(all_pos_in_asset, cp)
-        if conclusion:
-            msg += f"{conclusion}\n"
         msg += "─────────────────────────\n"
 
     tracked = list(by_asset.keys())
@@ -4944,7 +4916,8 @@ def send_holding_summary(chat_id):
         {"text": "🔄 重新掃描", "callback_data": "cmd_scan"},
         {"text": "📊 查看勝率", "callback_data": "cmd_stats"}
     ]]}
-    requests.post(text_url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "reply_markup": holding_markup})
+    requests.post(text_url, json={"chat_id": chat_id, "text": msg,
+                                  "parse_mode": "HTML", "reply_markup": holding_markup})
 
 # ==================== 📌 手動開倉/平倉指令 ====================
 def handle_open_command(text, chat_id):
