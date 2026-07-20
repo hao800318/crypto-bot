@@ -4203,6 +4203,130 @@ def run_position_monitor():
 
 # ==================== 🚀 6. 動態精度渲染發送引擎 ====================
 # ==================== 🔍 指定幣種即時分析 ====================
+def _build_strategy_entries(inst_id, s1, s4, s1d):
+    """
+    計算 4 大策略的進場點位（不依賴現價，依趨勢推算合理限價掛單位）。
+    回傳 dict，失敗回傳 None。
+    """
+    try:
+        url4h = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar=4H&limit=150"
+        r4h   = requests.get(url4h, timeout=5).json()
+        if r4h.get('code') != '0' or not r4h.get('data'):
+            return None
+        df = pd.DataFrame(r4h['data'],
+                          columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
+        for col in ['open','high','low','close']:
+            df[col] = df[col].astype(float)
+        df = df.iloc[::-1].reset_index(drop=True)
+    except Exception:
+        return None
+
+    # ── 基礎指標 ──
+    atr  = s4['atr']  if s4  else (s1['atr']  if s1 else df['close'].iloc[-1] * 0.01)
+    is_bull = bool(s4['ma_above']) if s4 else (bool(s1['ma_above']) if s1 else True)
+    recent_high = (s4 or s1)['recent_high']
+    recent_low  = (s4 or s1)['recent_low']
+
+    # ── 策略① 趨勢突破 EMA（4H MA8 回踩限價）──
+    ma8_4h  = s4['ma8']   if s4 else s1['ma8']
+    ema89_4h = s4['ema89'] if s4 else s1['ema89']
+    if is_bull:
+        ema_entry = round(ma8_4h, 8)            # 回踩 MA8 掛多
+        ema_sl    = ema_entry - atr * 1.5
+        ema_tp1   = ema_entry + atr * 2.0
+        ema_tp2   = ema_entry + atr * 4.0
+    else:
+        ema_entry = round(ma8_4h, 8)            # 反彈至 MA8 掛空
+        ema_sl    = ema_entry + atr * 1.5
+        ema_tp1   = ema_entry - atr * 2.0
+        ema_tp2   = ema_entry - atr * 4.0
+
+    # ── 策略② 區間反轉 RSI（近期高低點±緩衝）──
+    range_long_entry  = recent_low  + atr * 0.3
+    range_short_entry = recent_high - atr * 0.3
+    range_sl_buf      = atr * 1.2
+
+    # ── 策略③ 多因子 Fib + MACD ──
+    window     = min(60, len(df))
+    swing_high = df['high'].iloc[-window:].max()
+    swing_low  = df['low'].iloc[-window:].min()
+    sw_range   = swing_high - swing_low + 1e-10
+    fib236 = swing_high - 0.236 * sw_range
+    fib382 = swing_high - 0.382 * sw_range
+    fib500 = swing_high - 0.500 * sw_range
+    fib618 = swing_high - 0.618 * sw_range
+    fib786 = swing_high - 0.786 * sw_range
+
+    ema12  = df['close'].ewm(span=12, adjust=False).mean()
+    ema26  = df['close'].ewm(span=26, adjust=False).mean()
+    macd_l = ema12 - ema26
+    sig_l  = macd_l.ewm(span=9, adjust=False).mean()
+    hist   = macd_l - sig_l
+    macd_bull  = float(hist.iloc[-1]) > 0
+    macd_cross = float(hist.iloc[-1]) > 0 and float(hist.iloc[-2]) <= 0
+
+    if is_bull:
+        fib_entry = fib618 if fib618 > swing_low else fib500
+        fib_sl    = fib_entry - atr * 1.2
+        fib_tp1   = fib382
+        fib_tp2   = fib236
+    else:
+        fib_entry = fib236 if fib236 < swing_high else fib382
+        fib_sl    = fib_entry + atr * 1.2
+        fib_tp1   = fib500
+        fib_tp2   = fib618
+
+    # ── 策略④ SMC/ICT 訂單塊（OB）──
+    # 看漲OB：趨勢向上時，找最後一根下跌K（空方被消化前的最後抵抗）
+    # 看跌OB：趨勢向下時，找最後一根上漲K
+    recent_df = df.iloc[-20:-1]
+    if is_bull:
+        bear_c = recent_df[recent_df['close'] < recent_df['open']]
+        if not bear_c.empty:
+            obc     = bear_c.iloc[-1]
+            ob_low  = float(obc['low'])
+            ob_high = float(obc['open'])   # 下跌K開盤 = OB頂
+        else:
+            ob_low  = recent_low
+            ob_high = recent_low + atr * 0.5
+        ob_sl   = ob_low - atr * 0.5
+        ob_tp1  = ob_high + atr * 2.0
+    else:
+        bull_c = recent_df[recent_df['close'] > recent_df['open']]
+        if not bull_c.empty:
+            obc     = bull_c.iloc[-1]
+            ob_low  = float(obc['close'])  # 上漲K收盤 = OB底
+            ob_high = float(obc['high'])
+        else:
+            ob_low  = recent_high - atr * 0.5
+            ob_high = recent_high
+        ob_sl   = ob_high + atr * 0.5
+        ob_tp1  = ob_low - atr * 2.0
+
+    return {
+        'is_bull': is_bull,
+        'atr': atr,
+        # S1
+        'ema_entry': ema_entry, 'ema_sl': ema_sl,
+        'ema_tp1': ema_tp1, 'ema_tp2': ema_tp2,
+        # S2
+        'range_long_entry': range_long_entry,
+        'range_short_entry': range_short_entry,
+        'range_sl_buf': range_sl_buf,
+        'recent_high': recent_high, 'recent_low': recent_low,
+        # S3
+        'swing_high': swing_high, 'swing_low': swing_low,
+        'fib236': fib236, 'fib382': fib382, 'fib500': fib500,
+        'fib618': fib618, 'fib786': fib786,
+        'fib_entry': fib_entry, 'fib_sl': fib_sl,
+        'fib_tp1': fib_tp1, 'fib_tp2': fib_tp2,
+        'macd_bull': macd_bull, 'macd_cross': macd_cross,
+        # S4
+        'ob_low': ob_low, 'ob_high': ob_high,
+        'ob_sl': ob_sl, 'ob_tp1': ob_tp1,
+    }
+
+
 def analyze_coin_snapshot(inst_id, bar_param="1H"):
     """分析指定幣種當前狀態（不需要發生交叉），回傳完整快照"""
     url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar_param}&limit=100"
@@ -4468,9 +4592,62 @@ def send_coin_analysis(asset_input, chat_id):
         expire_time = next_1d
         expire_note = f"下根1D收盤 {next_1d.strftime('%m/%d %H:%M')} PT（三框高度一致）"
 
+    # ── 4 大策略進場參考 ──
+    se = _build_strategy_entries(inst_id, s1, s4, s1d)
+    if se:
+        bull       = se['is_bull']
+        d_long     = "🟩多" if bull else "🟥空"
+        d_short    = "🟥空" if bull else "🟩多"
+        macd_tag   = ("🟩金叉↑" if se['macd_cross'] else
+                      "🟩看漲"  if se['macd_bull']  else "🟥看跌")
+        ob_type    = "看漲OB" if bull else "看跌OB"
+
+        msg += "\n<b>── 4 大策略進場參考（4H趨勢基準）──</b>\n"
+
+        # ① 趨勢突破 EMA
+        msg += f"\n①<b>趨勢突破 EMA</b>  {d_long}  回踩4H MA8限價\n<pre>"
+        msg += f"進場  {format_price(se['ema_entry'])}\n"
+        msg += f"止損  {format_price(se['ema_sl'])}\n"
+        msg += f"TP1   {format_price(se['ema_tp1'])}  TP2  {format_price(se['ema_tp2'])}\n"
+        msg += "</pre>"
+
+        # ② 區間反轉 RSI
+        msg += f"\n②<b>區間反轉 RSI</b>  高低點邊界\n<pre>"
+        msg += f"做多  {format_price(se['range_long_entry'])}（近期低 {format_price(se['recent_low'])}）RSI≤30\n"
+        msg += f"做空  {format_price(se['range_short_entry'])}（近期高 {format_price(se['recent_high'])}）RSI≥70\n"
+        msg += f"止損  進場後 ±{format_price(se['range_sl_buf'])}（ATR×1.2）\n"
+        msg += "</pre>"
+
+        # ③ 多因子 Fib + MACD
+        msg += f"\n③<b>多因子 Fib+MACD</b>  {macd_tag}\n<pre>"
+        msg += f"波段高  {format_price(se['swing_high'])}  波段低  {format_price(se['swing_low'])}\n"
+        msg += f"0.236   {format_price(se['fib236'])}  0.382  {format_price(se['fib382'])}\n"
+        msg += f"0.500   {format_price(se['fib500'])}  0.618  {format_price(se['fib618'])}\n"
+        msg += f"建議進場  {format_price(se['fib_entry'])}（{d_long} Fib回踩）\n"
+        msg += f"止損  {format_price(se['fib_sl'])}\n"
+        msg += f"TP1   {format_price(se['fib_tp1'])}  TP2  {format_price(se['fib_tp2'])}\n"
+        msg += "</pre>"
+
+        # ④ SMC/ICT 訂單塊
+        msg += f"\n④<b>SMC/ICT 訂單塊</b>\n<pre>"
+        msg += f"{ob_type}  {format_price(se['ob_low'])} ~ {format_price(se['ob_high'])}\n"
+        msg += f"進場  等回測OB後出現確認K（吞噬/針形）\n"
+        msg += f"止損  {format_price(se['ob_sl'])}\n"
+        msg += f"TP1   {format_price(se['ob_tp1'])}\n"
+        msg += "</pre>"
+
     msg += "\n"
     msg += f"<i>🕐 分析時間：{now_la.strftime('%m/%d %H:%M')} PT</i>\n"
     msg += f"<i>⏰ 有效至：{expire_note}，超時請重新輸入 /{symbol} 更新</i>\n"
+
+    # 若訊息超過 Telegram 4096 限制，截斷策略區段後補末尾
+    _TG_MAX = 4000
+    if len(msg) > _TG_MAX:
+        cut = msg.rfind("\n\n<b>──", 0, _TG_MAX)
+        if cut == -1:
+            cut = _TG_MAX
+        tail = f"\n\n<i>🕐 {now_la.strftime('%m/%d %H:%M')} PT  |  ⏰ {expire_note}</i>"
+        msg = msg[:cut] + tail
 
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
