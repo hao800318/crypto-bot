@@ -404,23 +404,27 @@ def poc_check(poc, entry, atr):
     bonus：正數加分、負數扣分（納入 score/win_rate 計算）。
     label：顯示在訊號訊息的說明文字。
     距離標準（以 entry 百分比）：
-      ≤0.3%  → POC 匯流，強確認  +10
-      ≤1.0%  → 靠近 POC，有支撐  +5
-      ≤2.5%  → 參考距離，中性     0
-      >2.5%  → 偏離 POC，訊號較弱 -5
+      ≤0.3%  → POC 匯流，強確認          +10
+      ≤1.0%  → 靠近 POC，有支撐          +5
+      ≤2.5%  → 參考距離，中性             0
+      ≤4.0%  → 偏離 POC，訊號較弱        -8
+      >4.0%  → 嚴重偏離 POC，遠離成交密集區 -15
+    原設定 >2.5% 只扣 5 分懲罰太輕，對遠離機構成交密集區的進場點應大幅扣分。
     """
     if poc is None:
         return 0, ""
     dist_pct = abs(entry - poc) / max(entry, 1e-10) * 100
     poc_str  = format_price(poc)
     if dist_pct <= 0.3:
-        return 10, f"✅ POC匯流 <code>{poc_str}</code>（差{dist_pct:.2f}%）"
+        return 10,  f"✅ POC匯流 <code>{poc_str}</code>（差{dist_pct:.2f}%）"
     elif dist_pct <= 1.0:
-        return 5,  f"📊 近POC <code>{poc_str}</code>（差{dist_pct:.1f}%）"
+        return 5,   f"📊 近POC <code>{poc_str}</code>（差{dist_pct:.1f}%）"
     elif dist_pct <= 2.5:
-        return 0,  f"📊 POC <code>{poc_str}</code>（差{dist_pct:.1f}%）"
+        return 0,   f"📊 POC <code>{poc_str}</code>（差{dist_pct:.1f}%）"
+    elif dist_pct <= 4.0:
+        return -8,  f"⚠️ 偏離POC <code>{poc_str}</code>（差{dist_pct:.1f}%）"
     else:
-        return -5, f"⚠️ 偏離POC <code>{poc_str}</code>（差{dist_pct:.1f}%）"
+        return -15, f"🚫 嚴重偏離POC <code>{poc_str}</code>（差{dist_pct:.1f}%）"
 
 
 def detect_fvg(df, entry, direction, n_lookback=30):
@@ -643,14 +647,14 @@ def get_higher_tf_alignment(asset, direction, higher_bar="4H"):
             aligned = (direction == "多" and last['MA8'] > last['EMA89']) or \
                       (direction == "空" and last['MA8'] < last['EMA89'])
 
-            # ── 近中性容忍（±0.5%）──
-            # MA8 與 EMA89 差距 ≤ 0.5% 時，1H 實際上是盤整轉折期，
-            # 不應視為明確反向；此時 BTC/ETH 15m 的突破訊號往往先於 1H 切換，
-            # 嚴格二元擋掉會錯過所有初段行情。
+            # ── 近中性容忍（±0.25%）──
+            # MA8 與 EMA89 差距 ≤ 0.25% 時，視為轉折中性區，放行。
+            # 原設定 0.5% 過於寬鬆——方向正在切換的 HTF 最容易出現假突破，
+            # 縮小至 0.25% 只讓「幾乎貼合」的 MA 通過，真正逆向的 HTF 仍硬擋。
             if not aligned:
                 gap_pct = abs(last['MA8'] - last['EMA89']) / (last['EMA89'] + 1e-10) * 100
-                if gap_pct <= 0.5:
-                    aligned = True   # 差距 ≤ 0.5%：視為中性，放行
+                if gap_pct <= 0.25:
+                    aligned = True   # 差距 ≤ 0.25%：視為中性，放行
 
             htf_adx = float(last['ADX']) if pd.notna(last['ADX']) else 0.0
             return aligned, htf_adx
@@ -886,8 +890,10 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             current_adx   = c_last['ADX']
             current_atr   = c_last['ATR14']
 
-            # ① ADX 過濾：< 20 表示盤整市場，MA 交叉失誤率高
-            if current_adx < 20:
+            # ① ADX 過濾：< 25 表示趨勢不明確，MA 交叉失誤率高
+            # 原門檻 20 過低——ADX 20-24 僅代表「微弱」趨勢，噪訊假突破多；
+            # 提高至 25 為業界標準「趨勢確立」分界線。
+            if current_adx < 25:
                 return None
 
             # ② 成交量確認：極低量（< 40% 均量）才硬擋，其餘進入評分懲罰
@@ -992,7 +998,10 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             #              門檻 ≥ 25 會把所有初段突破訊號都攔掉；降至 20 兼顧初段與防噪。
             #   1h+    → HTF=4H/1D，等待更強確認，維持 ≥ 25。
             # ──────────────────────────────────────────────────
-            _htf_adx_min = 20 if tf in ("15m", "30m") else 25
+            # 15m/30m → HTF=1H：原門檻 20，提高至 23。
+            # 1H ADX 20-22 屬於極弱趨勢，此時 15m 的交叉極易是假突破。
+            # 1h+ → HTF=4H/1D：維持 25（業界標準）。
+            _htf_adx_min = 23 if tf in ("15m", "30m") else 25
             if not aligned:
                 return None   # 逆 HTF 趨勢，硬擋
             if htf_adx < _htf_adx_min:
