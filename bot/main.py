@@ -3449,12 +3449,12 @@ def analyze_position(pos):
             push = True
         elif effective_high >= tp2 * TP_CONFIRM:
             if pos.get('tp2_hit'):
-                # TP2 已完成（tp_count==3），ATR×2.5 追蹤止損繼續鎖利剩餘 20%
-                # 優先使用 atr_trail（ATR×2.5），fallback 到原始 trail_dist
+                # TP2 已完成（tp_count==3），ATR×2.5 追蹤止損繼續鎖利剩餘 20%（多頭）
                 _t_dist = pos.get('atr_trail', 0) or pos.get('trail_dist', entry * 0.015)
                 trail_dist = _t_dist
                 new_trail_sl = current_price - trail_dist
-                if new_trail_sl > sl:
+                _trail_moved = new_trail_sl > sl
+                if _trail_moved:
                     pos['sl'] = new_trail_sl
                     sl = new_trail_sl
                 status = "🔵 TP2已完成"
@@ -3474,6 +3474,21 @@ def analyze_position(pos):
                         pos['deteri_alerted'] = False
                         action += "\n✅ 市場局勢已恢復，持倉方向重新與趨勢一致"
                         push = True
+                    elif _trail_moved:
+                        # 追蹤止損收緊 → 推播一次，建議用戶考慮立即出場鎖利
+                        # 頻率保護：30分鐘內只推一次，避免每輪監控都轟炸
+                        _now_ts_tr = time.time()
+                        _last_tr_push = pos.get('last_trail_push_ts', 0)
+                        if _now_ts_tr - _last_tr_push >= 1800:
+                            pos['last_trail_push_ts'] = _now_ts_tr
+                            status = "🔵 TP2已完成"
+                            action = (f"📈 移動止損上移至 <code>{format_price(sl)}</code>（ATR×2.5）\n"
+                                      f"現價 <code>{format_price(current_price)}</code>，距TP3 <code>{format_price(tp3)}</code> 還差 "
+                                      f"{abs(tp3 - current_price) / current_price * 100:.2f}%\n"
+                                      f"▸ <b>建議現在出場鎖定利潤</b>，或繼續持有等TP3（止損已鎖利）")
+                            push = True
+                        else:
+                            push = False
                     else:
                         push = False
             else:
@@ -3632,7 +3647,8 @@ def analyze_position(pos):
                 _t_dist_s = pos.get('atr_trail', 0) or pos.get('trail_dist', entry * 0.015)
                 trail_dist = _t_dist_s
                 new_trail_sl = current_price + trail_dist
-                if new_trail_sl < sl:
+                _trail_moved_s = new_trail_sl < sl
+                if _trail_moved_s:
                     pos['sl'] = new_trail_sl
                     sl = new_trail_sl
                 status = "🔵 TP2已完成"
@@ -3652,6 +3668,21 @@ def analyze_position(pos):
                         pos['deteri_alerted'] = False
                         action += "\n✅ 市場局勢已恢復，持倉方向重新與趨勢一致"
                         push = True
+                    elif _trail_moved_s:
+                        # 追蹤止損下移收緊 → 推播一次，建議用戶考慮立即出場鎖利（空頭）
+                        # 頻率保護：30分鐘內只推一次，避免每輪監控都轟炸
+                        _now_ts_tr_s = time.time()
+                        _last_tr_push_s = pos.get('last_trail_push_ts', 0)
+                        if _now_ts_tr_s - _last_tr_push_s >= 1800:
+                            pos['last_trail_push_ts'] = _now_ts_tr_s
+                            status = "🔵 TP2已完成"
+                            action = (f"📉 移動止損下移至 <code>{format_price(sl)}</code>（ATR×2.5）\n"
+                                      f"現價 <code>{format_price(current_price)}</code>，距TP3 <code>{format_price(tp3)}</code> 還差 "
+                                      f"{abs(current_price - tp3) / current_price * 100:.2f}%\n"
+                                      f"▸ <b>建議現在出場鎖定利潤</b>，或繼續持有等TP3（止損已鎖利）")
+                            push = True
+                        else:
+                            push = False
                     else:
                         push = False
             else:
