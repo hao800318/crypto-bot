@@ -1075,6 +1075,24 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             sl_price, tp1, tp2, tp3 = find_market_structure_levels(
                 df, entry_price, direction, current_atr)
 
+            # ── 盈虧比強制門檻：TP1 必須 ≥ 1.5× 風險距離 ──
+            # 問題根源：若 TP1 只有 0.7R，50% 平倉後 SL 移保本，
+            # 剩餘 50% 回到保本出場 → 全程利潤 = 0.5×0.7R - 費用 ≈ 接近零。
+            # 解法：先嘗試升格 TP2 作為第一目標；若 TP2 也不足，直接拒絕訊號。
+            _risk_dist = abs(entry_price - sl_price)
+            _tp1_dist  = abs(tp1 - entry_price)
+            if _tp1_dist < _risk_dist * 1.5:
+                _tp2_dist = abs(tp2 - entry_price)
+                if _tp2_dist >= _risk_dist * 1.5:
+                    # 跳過太近的壓力/支撐，改以 TP2 作為第一目標
+                    _ext = abs(tp3 - tp2) if abs(tp3 - tp2) > 0 else _risk_dist
+                    if direction == "多":
+                        tp1, tp2, tp3 = tp2, tp3, tp3 + _ext
+                    else:
+                        tp1, tp2, tp3 = tp2, tp3, tp3 - _ext
+                else:
+                    return None   # 近處無足夠 R:R 目標（TP1+TP2 皆 < 1.5R），拒絕
+
             # ── 斐波那契回撤匯流：找最近擺動水位，判斷進場是否在 Fib 關鍵支撐/壓力 ──
             _fib_lbl, _fib_px, _fib_near, _fib_dist = get_fibonacci_context(
                 df, entry_price, direction)
@@ -1465,6 +1483,14 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
             tp2      = sup_hi
             tp3      = sup_lo
 
+        # ── 盈虧比保護：區間策略最低 1.2:1 ──
+        # 區間單進場在邊界，TP1=中線，TP2=對側，天然結構比趨勢更緊。
+        # 若區間太窄（TP1 < 1.2× 風險），TP1 後保本幾乎沒有獲利可言。
+        _risk_r   = abs(price - sl_price)
+        _reward_r = abs(tp1 - price)
+        if _risk_r > 0 and _reward_r < _risk_r * 1.2:
+            return None   # 區間太窄 R:R 不達標，跳過
+
         # 區間策略評分（與趨勢策略評分完全獨立）
         if direction == "多":
             rsi_score  = max(0, 45 - rsi) * 2          # RSI 越低越理想（最高 ~90分）
@@ -1705,6 +1731,23 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
 
         # ⑥ SL/TP 使用 K 線結構水位
         sl_price, tp1, tp2, tp3 = find_market_structure_levels(df, price, direction, atr)
+
+        # ── 盈虧比強制門檻：背離策略最低 1.5:1 ──
+        # 背離是逆勢進場，止損通常放在結構高/低點之上，距離較大。
+        # TP1 若不足 1.5R，整筆交易期望值接近負值。
+        # 同樣策略：先嘗試升格 TP2；仍不足則拒絕。
+        _risk_d = abs(price - sl_price)
+        _tp1_d  = abs(tp1 - price)
+        if _tp1_d < _risk_d * 1.5:
+            _tp2_d = abs(tp2 - price)
+            if _tp2_d >= _risk_d * 1.5:
+                _ext_d = abs(tp3 - tp2) if abs(tp3 - tp2) > 0 else _risk_d
+                if direction == "多":
+                    tp1, tp2, tp3 = tp2, tp3, tp3 + _ext_d
+                else:
+                    tp1, tp2, tp3 = tp2, tp3, tp3 - _ext_d
+            else:
+                return None   # 背離訊號 R:R 不足，拒絕
 
         # ── 評分 ──
         # RSI 背離幅度（越大越確信）
