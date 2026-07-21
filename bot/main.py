@@ -4930,19 +4930,8 @@ def _fib_structural_swings(df, is_bull, atr, lookback=150, min_move_atr=1.5):
     pairs = list(zip(confirmed[:-1], confirmed[1:]))
 
     if is_bull:
-        # 當前正在反彈 → 找最近一個已確認的 H→L（上一次大跌的完整結構）
-        hl_pairs = [(p1, p2) for p1, p2 in pairs if p1[2] == 'H' and p2[2] == 'L']
-        if hl_pairs:
-            (sh_idx, sh_val, _), (sl_idx, sl_val, _) = hl_pairs[-1]
-        else:
-            # fallback：用最後兩個確認點
-            p1, p2 = confirmed[-2], confirmed[-1]
-            if p1[2] == 'H':
-                sh_idx, sh_val, sl_idx, sl_val = p1[0], p1[1], p2[0], p2[1]
-            else:
-                sh_idx, sh_val, sl_idx, sl_val = p2[0], p2[1], p1[0], p1[1]
-    else:
-        # 當前正在下跌 → 找最近一個已確認的 L→H（上一次大漲的完整結構）
+        # 多頭主趨勢 L→H（低點→高點上漲段），Fib 從 H 往下量 = 回撤支撐位
+        # 取最近一個已確認的 L→H pair（若當前上漲段還在跑未確認，就拿上一個已完成的）
         lh_pairs = [(p1, p2) for p1, p2 in pairs if p1[2] == 'L' and p2[2] == 'H']
         if lh_pairs:
             (sl_idx, sl_val, _), (sh_idx, sh_val, _) = lh_pairs[-1]
@@ -4953,6 +4942,19 @@ def _fib_structural_swings(df, is_bull, atr, lookback=150, min_move_atr=1.5):
                 sl_idx, sl_val, sh_idx, sh_val = p1[0], p1[1], p2[0], p2[1]
             else:
                 sl_idx, sl_val, sh_idx, sh_val = p2[0], p2[1], p1[0], p1[1]
+    else:
+        # 空頭主趨勢 H→L（高點→低點下跌段），Fib 從 L 往上量 = 反彈阻力位
+        # 取最近一個已確認的 H→L pair
+        hl_pairs = [(p1, p2) for p1, p2 in pairs if p1[2] == 'H' and p2[2] == 'L']
+        if hl_pairs:
+            (sh_idx, sh_val, _), (sl_idx, sl_val, _) = hl_pairs[-1]
+        else:
+            # fallback：用最後兩個確認點
+            p1, p2 = confirmed[-2], confirmed[-1]
+            if p1[2] == 'H':
+                sh_idx, sh_val, sl_idx, sl_val = p1[0], p1[1], p2[0], p2[1]
+            else:
+                sh_idx, sh_val, sl_idx, sl_val = p2[0], p2[1], p1[0], p1[1]
 
     if sh_idx == sl_idx:
         return None
