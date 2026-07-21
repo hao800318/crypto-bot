@@ -4939,8 +4939,8 @@ def _fib_all_levels_check(inst_id, bar_param="4H"):
         'f786': (0.786, 2.5),
     }
     try:
-        url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar_param}&limit=100"
-        r   = requests.get(url, timeout=5).json()
+        url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar_param}&limit=300"
+        r   = requests.get(url, timeout=8).json()
         if r.get('code') != '0' or len(r.get('data', [])) < 40:
             return None
         df = pd.DataFrame(r['data'],
@@ -5188,8 +5188,8 @@ def send_fibcheck_report(raw_text, chat_id):
     inst_id = f"{coin}-USDT-SWAP"
 
     try:
-        url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar}&limit=100"
-        r   = requests.get(url, timeout=8).json()
+        url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar}&limit=300"
+        r   = requests.get(url, timeout=10).json()
         if r.get('code') != '0':
             _reply(f"❌ OKX API 錯誤：{r.get('msg','未知')}（合約 {inst_id} 可能不存在）")
             return
