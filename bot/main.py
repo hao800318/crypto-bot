@@ -5062,17 +5062,11 @@ def _fib_all_levels_check(inst_id, bar_param="4H"):
                 best_key  = key
                 best_dist = dist_pct
 
-        if best_key is None:
-            return None
-
         symbol = inst_id.replace('-USDT-SWAP', '')
-        return {
+        base = {
             'inst_id':    inst_id,
             'symbol':     symbol,
             'price':      price,
-            'level':      best_key,           # 'f382'/'f500'/'f618'/'f786'
-            'fib_val':    fibs[best_key],
-            'dist_pct':   best_dist,
             'is_bull':    is_bull,
             'macd_bull':  macd_bull,
             'rsi':        rsi,
@@ -5080,13 +5074,28 @@ def _fib_all_levels_check(inst_id, bar_param="4H"):
             'swing_low':  swing_low,
             'atr':        atr,
         }
+
+        if best_key is not None:
+            return {**base, 'level': best_key, 'fib_val': fibs[best_key], 'dist_pct': best_dist}
+
+        # ── 無近距命中 → 檢查是否已跌破/突破 0.786 防線 ──
+        f786_val = fibs['f786']
+        if is_bull:
+            dist_786 = (f786_val - price) / f786_val * 100   # 正值 = 跌破
+        else:
+            dist_786 = (price - f786_val) / f786_val * 100   # 正值 = 突破
+
+        if dist_786 > 2.5:          # 超過 ±2.5% 門檻才算確認破位
+            return {**base, 'level': 'broken', 'fib_val': f786_val, 'dist_pct': dist_786}
+
+        return None
     except Exception:
         return None
 
 
 def _build_fib_msg(tf_label, tf_bar, assets, now_str):
     """對單一時框掃描並組裝 Fib 回撤訊息字串。"""
-    buckets: dict = {'f382': [], 'f500': [], 'f618': [], 'f786': []}
+    buckets: dict = {'f382': [], 'f500': [], 'f618': [], 'f786': [], 'broken': []}
 
     with ThreadPoolExecutor(max_workers=60) as ex:
         futs = {ex.submit(_fib_all_levels_check, a, tf_bar): a for a in assets}
@@ -5167,6 +5176,19 @@ def _build_fib_msg(tf_label, tf_bar, assets, now_str):
             hold_note = "撐住" if h['is_bull'] else "壓住"
             msg += (f"  {_dir(h)} <b>{h['symbol']}</b>  距{h['dist_pct']:.1f}%  "
                     f"RSI {h['rsi']:.0f}  {hold_note}  {_macd(h)}\n")
+    else:
+        msg += "  — 暫無\n"
+
+    # ── 結構已破壞：跌破/突破 0.786 超過 2.5% ──
+    b_broken = buckets['broken']
+    msg += f"\n⛔ <b>結構已破壞（0.786 防線失守）</b>  {len(b_broken)} 支\n"
+    if b_broken:
+        msg += "<i>已確認跌破/突破0.786，趨勢結構受損，建議清倉或反向觀察</i>\n"
+        for h in b_broken:
+            direction = "跌破" if h['is_bull'] else "突破"
+            flip      = "⚠️ 考慮翻空" if h['is_bull'] else "⚠️ 考慮翻多"
+            msg += (f"  {_dir(h)} <b>{h['symbol']}</b>  {direction}0.786  "
+                    f"距{h['dist_pct']:.1f}%  RSI {h['rsi']:.0f}  {flip}  {_macd(h)}\n")
     else:
         msg += "  — 暫無\n"
 
