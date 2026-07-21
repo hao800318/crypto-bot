@@ -4879,6 +4879,53 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         print(f"❌ 報告發送失敗：{result}")
 
 # ==================== 📐 Fib 多級別全市場掃描（附掛 /scan）====================
+
+def _fib_structural_swings(df, is_bull, n=3):
+    """
+    用分形結構（fractal）找最近的擺動高低點，而非固定窗口極值。
+    - 多頭：找最近的分形低點（趨勢起點）→ 之後的最高 high（趨勢終點）
+    - 空頭：找最近的分形高點（趨勢起點）→ 之後的最低 low（趨勢終點）
+    n = 兩側各需幾根確認（預設 3）。
+    回傳 (swing_low_idx, swing_low, swing_high_idx, swing_high) 或 None。
+    """
+    highs, lows = [], []
+    # 最後 n 根尚未有右側確認，從 n 開始到 len-n 才是已確認的分形
+    for i in range(n, len(df) - n):
+        h = float(df['high'].iloc[i])
+        l = float(df['low'].iloc[i])
+        if all(h >= float(df['high'].iloc[i - j]) for j in range(1, n + 1)) and \
+           all(h >= float(df['high'].iloc[i + j]) for j in range(1, n + 1)):
+            highs.append((i, h))
+        if all(l <= float(df['low'].iloc[i - j]) for j in range(1, n + 1)) and \
+           all(l <= float(df['low'].iloc[i + j]) for j in range(1, n + 1)):
+            lows.append((i, l))
+
+    if is_bull:
+        if not lows:
+            return None
+        # 最近一個分形低點 → 趨勢起點
+        sl_idx, sl_val = lows[-1]
+        # 從那之後到現在的最高 high
+        sub_after = df.iloc[sl_idx:]
+        sh_idx = int(sub_after['high'].idxmax())
+        sh_val = float(sub_after.loc[sh_idx, 'high'])
+        if sh_idx <= sl_idx:
+            return None
+        return sl_idx, sl_val, sh_idx, sh_val
+    else:
+        if not highs:
+            return None
+        # 最近一個分形高點 → 趨勢起點
+        sh_idx, sh_val = highs[-1]
+        # 從那之後到現在的最低 low
+        sub_after = df.iloc[sh_idx:]
+        sl_idx = int(sub_after['low'].idxmin())
+        sl_val = float(sub_after.loc[sl_idx, 'low'])
+        if sl_idx <= sh_idx:
+            return None
+        return sl_idx, sl_val, sh_idx, sh_val
+
+
 def _fib_all_levels_check(inst_id, bar_param="4H"):
     """
     取指定時框 K線，計算 Fib 0.382 / 0.500 / 0.618 / 0.786 四個回撤位，
@@ -4929,25 +4976,17 @@ def _fib_all_levels_check(inst_id, bar_param="4H"):
         )[['hl','hc','lc']].max(axis=1)
         atr = float(df['TR'].rolling(14).mean().iloc[-1])
 
-        # ── 擺動高低點（方向性） ──
-        window = min(80, len(df))
-        sub    = df.iloc[-window:]
-        if is_bull:
-            sl_idx = int(sub['low'].idxmin())
-            sh_idx = int(sub.loc[sl_idx:, 'high'].idxmax())
-            swing_low  = float(sub.loc[sl_idx, 'low'])
-            swing_high = float(sub.loc[sh_idx, 'high'])
-        else:
-            sh_idx = int(sub['high'].idxmax())
-            sl_idx = int(sub.loc[sh_idx:, 'low'].idxmin())
-            swing_high = float(sub.loc[sh_idx, 'high'])
-            swing_low  = float(sub.loc[sl_idx, 'low'])
+        # ── 分形擺動高低點 ──
+        swings = _fib_structural_swings(df, is_bull, n=3)
+        if swings is None:
+            return None
+        sl_idx, swing_low, sh_idx, swing_high = swings
 
         sw_range = swing_high - swing_low
         if sw_range < atr * 0.5:
             return None
 
-        # 多頭：測回踩支撐（從高點往下）；空頭：測反彈阻力（從低點往上）
+        # 多頭：從趨勢低點量到高點，回撤算支撐；空頭：從趨勢高點量到低點，反彈算阻力
         if is_bull:
             fibs = {
                 'f382': swing_high - 0.382 * sw_range,
@@ -5193,20 +5232,15 @@ def send_fibcheck_report(raw_text, chat_id):
         )[['hl','hc','lc']].max(axis=1)
         atr = float(df['TR'].rolling(14).mean().iloc[-1])
 
-        # 高低點
-        window = min(80, len(df))
-        sub    = df.iloc[-window:]
-        if is_bull:
-            sl_idx = int(sub['low'].idxmin())
-            sh_idx = int(sub.loc[sl_idx:, 'high'].idxmax())
-        else:
-            sh_idx = int(sub['high'].idxmax())
-            sl_idx = int(sub.loc[sh_idx:, 'low'].idxmin())
+        # ── 分形結構高低點 ──
+        swings = _fib_structural_swings(df, is_bull, n=3)
+        if swings is None:
+            _reply(f"❌ {coin} {bar}：找不到分形擺動結構（資料不足或趨勢極弱），請換時框再試")
+            return
+        sl_idx, swing_low, sh_idx, swing_high = swings
 
-        swing_low  = float(sub.loc[sl_idx, 'low'])
-        swing_high = float(sub.loc[sh_idx, 'high'])
-        sl_ts      = sub.loc[sl_idx, 'ts']
-        sh_ts      = sub.loc[sh_idx, 'ts']
+        sl_ts = df.loc[sl_idx, 'ts']
+        sh_ts = df.loc[sh_idx, 'ts']
         total_rows = len(df)
         sh_bars_ago = total_rows - 1 - sh_idx
         sl_bars_ago = total_rows - 1 - sl_idx
@@ -5249,7 +5283,7 @@ def send_fibcheck_report(raw_text, chat_id):
         msg += f"   時間：{sl_time} PT（{sl_bars_ago} 根前）\n"
         msg += f"📏 振幅：{format_price(sw_range)}  （ATR 的 {sw_range/atr:.1f}x）\n"
         msg += "─────────────────────\n"
-        msg += f"<b>Fib 回撤位</b>（掃描範圍：窗口 {window} 根）\n"
+        msg += f"<b>Fib 回撤位</b>（分形擺動結構，n=3 確認）\n"
         for ratio, fval in fibs.items():
             dist = abs(price - fval) / fval * 100
             arrow = " ◀ 現價在此" if dist <= 2.5 else ""
