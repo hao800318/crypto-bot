@@ -4882,20 +4882,23 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
 
 def _fib_structural_swings(df, is_bull, atr, lookback=150, min_move_atr=1.5):
     """
-    Zigzag 結構算法：以「夠大的擺動」定義結構高低點，對應圖表上可見的大波段轉折。
-    price 必須從當前極值反轉超過 min_move_atr * ATR 才確認一個新的結構點。
+    Zigzag 結構算法，專門抓「上一個兩端都已確認的完整波段」作為 Fib 參考。
 
-    - 多頭：取最近的結構低點（Zigzag L）→ 之後的最高 high（量回撤支撐）
-    - 空頭：取最近的結構高點（Zigzag H）→ 之後的最低 low（量反彈阻力）
+    邏輯：
+      - price 從當前極值反轉 ≥ min_move_atr × ATR 才確認一個結構轉折點
+      - 只用「已確認」的 pivot（不含仍在跑的最新段）
+      - 多頭：抓最近一個已確認 H→L（上一段大跌），Fib 量那段 → 反彈能到哪
+      - 空頭：抓最近一個已確認 L→H（上一段大漲），Fib 量那段 → 回落能到哪
+      - 若找不到反向結構，fallback 用最後兩個已確認 pivot
 
     回傳 (sl_idx, swing_low, sh_idx, swing_high) 或 None。
     """
     threshold = atr * min_move_atr
     start     = max(0, len(df) - lookback)
     sub       = df.iloc[start:].reset_index(drop=True)
-    offset    = start           # sub 的 index 0 對應原 df 的 offset
+    offset    = start
 
-    pivots: list = []           # (df_idx, price, 'H'|'L')
+    confirmed: list = []        # 兩端都已確認的結構點 (df_idx, price, 'H'|'L')
     cur_type  = 'H'
     cur_val   = float(sub['high'].iloc[0])
     cur_sub_i = 0
@@ -4904,52 +4907,56 @@ def _fib_structural_swings(df, is_bull, atr, lookback=150, min_move_atr=1.5):
         h = float(sub['high'].iloc[i])
         l = float(sub['low'].iloc[i])
         if cur_type == 'H':
-            if h >= cur_val:            # 新高，更新當前極值
+            if h >= cur_val:
                 cur_val, cur_sub_i = h, i
-            elif cur_val - l >= threshold:   # 反轉夠大，確認結構高點
-                pivots.append((offset + cur_sub_i, cur_val, 'H'))
+            elif cur_val - l >= threshold:      # 下跌夠大 → 確認這個結構高點
+                confirmed.append((offset + cur_sub_i, cur_val, 'H'))
                 cur_type, cur_val, cur_sub_i = 'L', l, i
         else:
-            if l <= cur_val:            # 新低，更新當前極值
+            if l <= cur_val:
                 cur_val, cur_sub_i = l, i
-            elif h - cur_val >= threshold:   # 反轉夠大，確認結構低點
-                pivots.append((offset + cur_sub_i, cur_val, 'L'))
+            elif h - cur_val >= threshold:      # 上漲夠大 → 確認這個結構低點
+                confirmed.append((offset + cur_sub_i, cur_val, 'L'))
                 cur_type, cur_val, cur_sub_i = 'H', h, i
+    # cur_type/cur_val/cur_sub_i 是目前還在跑、尚未確認的段 → 不納入
 
-    # 把最後尚未確認的擺動也加入（作為參考）
-    pivots.append((offset + cur_sub_i, cur_val, cur_type))
+    if len(confirmed) < 2:
+        # 已確認點不足，把當前在跑的段也加進來勉強撐一下
+        confirmed.append((offset + cur_sub_i, cur_val, cur_type))
+        if len(confirmed) < 2:
+            return None
 
-    if len(pivots) < 2:
-        return None
+    # 相鄰 pair 列表：[(p_older, p_newer), ...]
+    pairs = list(zip(confirmed[:-1], confirmed[1:]))
 
     if is_bull:
-        # 最近一個結構低點（Zigzag L）→ 之後到現在的最高 high
-        low_pivots = [(idx, v) for idx, v, t in pivots if t == 'L']
-        if not low_pivots:
-            return None
-        sl_idx, sl_val = low_pivots[-1]
-        sub_after = df.iloc[sl_idx:]
-        if sub_after.empty:
-            return None
-        sh_idx = int(sub_after['high'].idxmax())
-        sh_val = float(sub_after.loc[sh_idx, 'high'])
-        if sh_idx <= sl_idx:
-            return None
-        return sl_idx, sl_val, sh_idx, sh_val
+        # 當前正在反彈 → 找最近一個已確認的 H→L（上一次大跌的完整結構）
+        hl_pairs = [(p1, p2) for p1, p2 in pairs if p1[2] == 'H' and p2[2] == 'L']
+        if hl_pairs:
+            (sh_idx, sh_val, _), (sl_idx, sl_val, _) = hl_pairs[-1]
+        else:
+            # fallback：用最後兩個確認點
+            p1, p2 = confirmed[-2], confirmed[-1]
+            if p1[2] == 'H':
+                sh_idx, sh_val, sl_idx, sl_val = p1[0], p1[1], p2[0], p2[1]
+            else:
+                sh_idx, sh_val, sl_idx, sl_val = p2[0], p2[1], p1[0], p1[1]
     else:
-        # 最近一個結構高點（Zigzag H）→ 之後到現在的最低 low
-        high_pivots = [(idx, v) for idx, v, t in pivots if t == 'H']
-        if not high_pivots:
-            return None
-        sh_idx, sh_val = high_pivots[-1]
-        sub_after = df.iloc[sh_idx:]
-        if sub_after.empty:
-            return None
-        sl_idx = int(sub_after['low'].idxmin())
-        sl_val = float(sub_after.loc[sl_idx, 'low'])
-        if sl_idx <= sh_idx:
-            return None
-        return sl_idx, sl_val, sh_idx, sh_val
+        # 當前正在下跌 → 找最近一個已確認的 L→H（上一次大漲的完整結構）
+        lh_pairs = [(p1, p2) for p1, p2 in pairs if p1[2] == 'L' and p2[2] == 'H']
+        if lh_pairs:
+            (sl_idx, sl_val, _), (sh_idx, sh_val, _) = lh_pairs[-1]
+        else:
+            # fallback：用最後兩個確認點
+            p1, p2 = confirmed[-2], confirmed[-1]
+            if p1[2] == 'L':
+                sl_idx, sl_val, sh_idx, sh_val = p1[0], p1[1], p2[0], p2[1]
+            else:
+                sl_idx, sl_val, sh_idx, sh_val = p2[0], p2[1], p1[0], p1[1]
+
+    if sh_idx == sl_idx:
+        return None
+    return sl_idx, sl_val, sh_idx, sh_val
 
 
 def _fib_all_levels_check(inst_id, bar_param="4H"):
