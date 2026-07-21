@@ -4879,9 +4879,9 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         print(f"❌ 報告發送失敗：{result}")
 
 # ==================== 📐 Fib 多級別全市場掃描（附掛 /scan）====================
-def _fib_all_levels_check(inst_id):
+def _fib_all_levels_check(inst_id, bar_param="4H"):
     """
-    取 4H K線，計算 Fib 0.382 / 0.500 / 0.618 / 0.786 四個回撤位，
+    取指定時框 K線，計算 Fib 0.382 / 0.500 / 0.618 / 0.786 四個回撤位，
     判斷現價落在哪一個 ±2% 區間（同時只取最近一個）。
     回傳 dict 或 None。
     """
@@ -4892,7 +4892,7 @@ def _fib_all_levels_check(inst_id):
         'f786': (0.786, 2.5),
     }
     try:
-        url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar=4H&limit=100"
+        url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar_param}&limit=100"
         r   = requests.get(url, timeout=5).json()
         if r.get('code') != '0' or len(r.get('data', [])) < 40:
             return None
@@ -4985,17 +4985,12 @@ def _fib_all_levels_check(inst_id):
         return None
 
 
-def send_fib_scan_report(target_chat_id):
-    """掃描全市場 4H Fib 回撤級別，發送分組報告（附在 /scan 之後）。"""
-    la_tz   = pytz.timezone('America/Los_Angeles')
-    now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
-    text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-
-    assets, _ = get_all_okx_swap_assets()
+def _build_fib_msg(tf_label, tf_bar, assets, now_str):
+    """對單一時框掃描並組裝 Fib 回撤訊息字串。"""
     buckets: dict = {'f382': [], 'f500': [], 'f618': [], 'f786': []}
 
     with ThreadPoolExecutor(max_workers=60) as ex:
-        futs = {ex.submit(_fib_all_levels_check, a): a for a in assets}
+        futs = {ex.submit(_fib_all_levels_check, a, tf_bar): a for a in assets}
         for fut in as_completed(futs):
             try:
                 hit = fut.result()
@@ -5004,14 +4999,8 @@ def send_fib_scan_report(target_chat_id):
             except Exception:
                 pass
 
-    # 每桶按距離由近到遠
     for k in buckets:
         buckets[k].sort(key=lambda x: x['dist_pct'])
-
-    # ── 組裝訊息 ──
-    msg  = f"📐 <b>【Fib 回撤指數掃描】</b>  <code>{now_str} PT</code>\n"
-    msg += f"流動性合約 {len(assets)} 支  4H 週期基準\n"
-    msg += "═════════════════════════\n"
 
     def _dir(h):
         return "🟩多" if h['is_bull'] else "🟥空"
@@ -5019,11 +5008,16 @@ def send_fib_scan_report(target_chat_id):
         ok = (h['macd_bull'] and h['is_bull']) or (not h['macd_bull'] and not h['is_bull'])
         return "MACD✅" if ok else "MACD⚠️"
 
+    total = sum(len(v) for v in buckets.values())
+    msg  = f"📐 <b>【Fib 回撤指數 — {tf_label}】</b>  <code>{now_str} PT</code>\n"
+    msg += f"流動性合約 {len(assets)} 支 | 命中 {total} 支（±2%）\n"
+    msg += "═════════════════════════\n"
+
     # ── 0.382：強勢格局 ──
     b382 = buckets['f382']
-    msg += f"\n🟢 <b>0.382 — 強勢格局（淺回踩）</b>  共 {len(b382)} 支\n"
+    msg += f"\n🟢 <b>0.382 — 強勢格局（淺回踩）</b>  {len(b382)} 支\n"
     if b382:
-        msg += "<i>趨勢方向明確，僅淺回踩，多空依然強勢</i>\n"
+        msg += "<i>趨勢完整，僅淺回踩，多空依然強勢</i>\n"
         for h in b382:
             msg += (f"  {_dir(h)} <b>{h['symbol']}</b>  距{h['dist_pct']:.1f}%  "
                     f"RSI {h['rsi']:.0f}  {_macd(h)}\n")
@@ -5032,34 +5026,34 @@ def send_fib_scan_report(target_chat_id):
 
     # ── 0.500：多空交戰 ──
     b500 = buckets['f500']
-    msg += f"\n⚖️ <b>0.500 — 多空交戰（需等確認）</b>  共 {len(b500)} 支\n"
+    msg += f"\n⚖️ <b>0.500 — 多空交戰（需等確認）</b>  {len(b500)} 支\n"
     if b500:
         msg += "<i>黃金中點，方向未定，需等 K 線確認突破或跌破</i>\n"
         for h in b500:
-            d    = _dir(h)
-            adv  = "多方優勢" if h['is_bull'] else "空方優勢"
+            d   = _dir(h)
+            adv = "多方優勢" if h['is_bull'] else "空方優勢"
             macd_align = (h['macd_bull'] and h['is_bull']) or (not h['macd_bull'] and not h['is_bull'])
-            macd_note  = "MACD 同向確認" if macd_align else "MACD 背離，需謹慎"
+            macd_note  = "MACD同向" if macd_align else "MACD背離⚠️"
             if h['is_bull']:
-                long_note  = f"守住 {format_price(h['fib_val'])} 可偏多，跌破轉空"
-                short_note = f"需跌破 {format_price(h['fib_val'])} 才確立空方"
+                long_note  = f"守 {format_price(h['fib_val'])} 偏多，跌破轉空"
+                short_note = f"跌破 {format_price(h['fib_val'])} 才確立空方"
             else:
-                long_note  = f"需突破 {format_price(h['fib_val'])} 才確立多方"
-                short_note = f"壓在 {format_price(h['fib_val'])} 下方可偏空，突破轉多"
+                long_note  = f"突破 {format_price(h['fib_val'])} 才確立多方"
+                short_note = f"壓於 {format_price(h['fib_val'])} 偏空，突破轉多"
             msg += (f"  {d} <b>{h['symbol']}</b>  距{h['dist_pct']:.1f}%  "
                     f"RSI {h['rsi']:.0f}  <b>{adv}</b>（{macd_note}）\n"
-                    f"    ▸ 多：{long_note}\n"
-                    f"    ▸ 空：{short_note}\n")
+                    f"    多：{long_note}\n"
+                    f"    空：{short_note}\n")
     else:
         msg += "  — 暫無\n"
 
     # ── 0.618：黃金進場區 ──
     b618 = buckets['f618']
-    msg += f"\n✅ <b>0.618 — 黃金回踩（可尋機進場）</b>  共 {len(b618)} 支\n"
+    msg += f"\n✅ <b>0.618 — 黃金回踩（可尋機進場）</b>  {len(b618)} 支\n"
     if b618:
         msg += "<i>黃金回撤比例，趨勢方向進場的經典位置</i>\n"
         for h in b618:
-            macd_str = "MACD✅ 可直接找進場K" if _macd(h) == "MACD✅" else "MACD⚠️ 等 K 線確認再進"
+            macd_str = "MACD✅ 可找進場K" if _macd(h) == "MACD✅" else "MACD⚠️ 等確認K"
             msg += (f"  {_dir(h)} <b>{h['symbol']}</b>  距{h['dist_pct']:.1f}%  "
                     f"RSI {h['rsi']:.0f}  {macd_str}\n")
     else:
@@ -5067,37 +5061,58 @@ def send_fib_scan_report(target_chat_id):
 
     # ── 0.786：深度回踩仍撐 ──
     b786 = buckets['f786']
-    msg += f"\n🔴 <b>0.786 — 深度回踩（最後支撐/壓力）</b>  共 {len(b786)} 支\n"
+    msg += f"\n🔴 <b>0.786 — 深度回踩（最後防線）</b>  {len(b786)} 支\n"
     if b786:
-        msg += "<i>深度回撤仍未破位，止損宜嚴控，等確認K再進</i>\n"
+        msg += "<i>深度回撤仍未破位，嚴控止損，等確認K再進</i>\n"
         for h in b786:
             hold_note = "撐住" if h['is_bull'] else "壓住"
             msg += (f"  {_dir(h)} <b>{h['symbol']}</b>  距{h['dist_pct']:.1f}%  "
-                    f"RSI {h['rsi']:.0f}  {hold_note}中  {_macd(h)}\n")
+                    f"RSI {h['rsi']:.0f}  {hold_note}  {_macd(h)}\n")
     else:
         msg += "  — 暫無\n"
 
-    total = sum(len(v) for v in buckets.values())
-    msg += f"\n<i>共 {total} 支合約落在 Fib 回撤位附近（±2%）  ⚠️ 僅供技術參考</i>"
+    msg += "\n<i>⚠️ 僅供技術參考，請結合 K 線形態確認</i>"
+    return msg
 
-    # 若超過 Telegram 4096 限制，分頁發送
+
+def _send_long_msg(text_url, chat_id, msg):
+    """超過 3800 字元時按段落分頁發送。"""
     _TG_LIMIT = 3800
     if len(msg) <= _TG_LIMIT:
-        requests.post(text_url, json={"chat_id": target_chat_id, "text": msg, "parse_mode": "HTML"})
-    else:
-        # 按段落切割
-        sections = msg.split('\n\n')
-        page, pages = '', []
-        for sec in sections:
-            if len(page) + len(sec) + 2 > _TG_LIMIT:
-                pages.append(page)
-                page = sec
-            else:
-                page += ('\n\n' if page else '') + sec
-        if page:
+        requests.post(text_url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"})
+        return
+    sections = msg.split('\n\n')
+    page, pages = '', []
+    for sec in sections:
+        if len(page) + len(sec) + 2 > _TG_LIMIT:
             pages.append(page)
-        for pg in pages:
-            requests.post(text_url, json={"chat_id": target_chat_id, "text": pg, "parse_mode": "HTML"})
+            page = sec
+        else:
+            page += ('\n\n' if page else '') + sec
+    if page:
+        pages.append(page)
+    for pg in pages:
+        requests.post(text_url, json={"chat_id": chat_id, "text": pg, "parse_mode": "HTML"})
+
+
+def send_fib_scan_report(target_chat_id):
+    """
+    掃描全市場 1H / 4H / 1D 三個時框的 Fib 回撤位，
+    各發一則獨立訊息（共 3 則）。
+    """
+    la_tz    = pytz.timezone('America/Los_Angeles')
+    now_str  = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
+    text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    assets, _ = get_all_okx_swap_assets()
+
+    for tf_label, tf_bar in [("1H 短線", "1H"), ("4H 波段", "4H"), ("1D 中線", "1D")]:
+        try:
+            msg = _build_fib_msg(tf_label, tf_bar, assets, now_str)
+            _send_long_msg(text_url, target_chat_id, msg)
+            print(f"📐 Fib {tf_label} 報告發送完成")
+        except Exception as _fe:
+            print(f"⚠️ Fib {tf_label} 報告失敗：{_fe}")
 
 
 # ==================== 📡 7. 原生無衝突監聽引擎 ====================
@@ -5164,54 +5179,7 @@ def _scan_worker_thread_impl(msg_title, target_chat_id, silent_on_empty=False, i
         else:
             print(f"📦 訊號已快取 {len(valid_signals)} 筆，等待 /open 指令確認")
     else:
-        if silent_on_empty:
-            print(f"📭 定時掃描無訊號，靜默略過（{msg_title}）")
-        else:
-            # 無主訊號 → 跑接近訊號掃描
-            print("🔍 無主訊號，掃描接近訊號中...")
-            near_misses = run_near_miss_scan()
-            if near_misses:
-                dir_map = {"多": "🟩多", "空": "🟥空"}
-                lines = ["📭 <b>全網掃描完畢，暫無完整訊號</b>\n\n<b>── 接近訊號 Top 3（供參考）──</b>"]
-                for nm in near_misses:
-                    bar = "■" * nm['filters_passed'] + "□" * (4 - nm['filters_passed'])
-                    d = dir_map.get(nm['dir'], nm['dir'])
-                    lines.append(
-                        f"⚡ <b>{nm['asset']}</b>  {d}  {nm['tf']}  "
-                        f"通過 {nm['filters_passed']}/4 關  [{bar}]\n"
-                        f"<pre>"
-                        f"進場  {nm['entry_label'].split('=')[-1]}\n"
-                        f"止損  {format_price(nm['sl'])}\n"
-                        f"TP1   {format_price(nm['tp1'])}\n"
-                        f"TP2   {format_price(nm['tp2'])}\n"
-                        f"TP3   {format_price(nm['tp3'])}"
-                        f"</pre>"
-                        f"⚠️ 卡在：{nm['failed_at']}　ADX={nm['adx']}　RSI={nm['rsi']}"
-                    )
-                lines.append("\n<i>接近訊號未通過所有過濾條件，請自行評估進場風險。</i>")
-                text = "\n\n".join(lines)
-                # 快取接近訊號供按鈕回調查詢
-                with near_miss_lock:
-                    near_miss_cache.clear()
-                    for nm in near_misses:
-                        near_miss_cache[nm['asset']] = {**nm, 'cached_at': time.time()}
-                # 每個接近訊號一個追蹤按鈕（標注「自選」提示風險）
-                buttons = [
-                    [{"text": f"👁 自選追蹤 {nm['asset']}{nm['dir']} ({nm['filters_passed']}/4)",
-                      "callback_data": f"open_{nm['asset']}_{nm['dir']}"}]
-                    for nm in near_misses
-                ]
-                reply_markup = {"inline_keyboard": buttons}
-            else:
-                text = "📭 全網通掃完畢，當前盤面極其冷靜，暫無達到技術篩選門檻的訊號（趨勢/區間/背離均未通過）。"
-                reply_markup = None
-            text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {"chat_id": str(target_chat_id), "text": text, "parse_mode": "HTML"}
-            if reply_markup:
-                payload["reply_markup"] = reply_markup
-            resp = requests.post(text_url, json=payload)
-            if resp.json().get("ok"):
-                print(f"✅ 掃描結果發送成功（{'有' if near_misses else '無'}接近訊號）")
+        print(f"📭 掃描無訊號（{msg_title}）")
 
     # ── 每次掃描結束都附送 Fib 回撤指數報告 ──
     try:
