@@ -5116,14 +5116,14 @@ def send_fib_scan_report(target_chat_id):
 
 
 # ==================== 📡 7. 原生無衝突監聽引擎 ====================
-def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False, include_news=False, auto_track=False):
+def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False, include_news=False, auto_track=False, include_fib=False):
     try:
-     _scan_worker_thread_impl(msg_title, target_chat_id, silent_on_empty, include_news, auto_track)
+     _scan_worker_thread_impl(msg_title, target_chat_id, silent_on_empty, include_news, auto_track, include_fib)
     except Exception as _swe:
         print(f"❌ scan_worker_thread 未捕獲例外：{_swe}")
         import traceback; traceback.print_exc()
 
-def _scan_worker_thread_impl(msg_title, target_chat_id, silent_on_empty=False, include_news=False, auto_track=False):
+def _scan_worker_thread_impl(msg_title, target_chat_id, silent_on_empty=False, include_news=False, auto_track=False, include_fib=False):
     valid_signals = run_strategy_scan()
     if valid_signals:
         send_html_report_via_requests(valid_signals, mode_title=msg_title,
@@ -5181,13 +5181,14 @@ def _scan_worker_thread_impl(msg_title, target_chat_id, silent_on_empty=False, i
     else:
         print(f"📭 掃描無訊號（{msg_title}）")
 
-    # ── 每次掃描結束都附送 Fib 回撤指數報告 ──
-    try:
-        print("📐 開始 Fib 回撤指數掃描...")
-        send_fib_scan_report(target_chat_id)
-        print("📐 Fib 報告發送完成")
-    except Exception as _fe:
-        print(f"⚠️ Fib 報告發送失敗：{_fe}")
+    # ── 手動 /scan 才附送 Fib 回撤指數報告（定時自動速報不發）──
+    if include_fib:
+        try:
+            print("📐 開始 Fib 回撤指數掃描（1H/4H/1D）...")
+            send_fib_scan_report(target_chat_id)
+            print("📐 Fib 報告全部發送完成")
+        except Exception as _fe:
+            print(f"⚠️ Fib 報告發送失敗：{_fe}")
 
 def _holding_quick_status(pos, cp):
     """
@@ -6557,7 +6558,7 @@ def handle_telegram_updates():
 
                         elif cb_data == "cmd_scan":
                             answer_callback(cb_id, "⚡ 開始掃描，請稍候約 15 秒...", alert=False)
-                            t = threading.Thread(target=scan_worker_thread, args=("手動現場突擊播報", cb_chat))
+                            t = threading.Thread(target=scan_worker_thread, args=("手動現場突擊播報", cb_chat), kwargs={"include_fib": True})
                             t.daemon = True
                             t.start()
 
@@ -6605,7 +6606,7 @@ def handle_telegram_updates():
                             print(f"⚡ 收到 /scan 指令")
                             confirm_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
                             requests.post(confirm_url, json={"chat_id": chat_id, "text": "⚡ 收到指令！正在進行全網掃描 + 主力動向確認，精選最高技術分訊號（趨勢/區間/背離），請稍候約 15 秒..."})
-                            t = threading.Thread(target=scan_worker_thread, args=("手動現場突擊播報", chat_id))
+                            t = threading.Thread(target=scan_worker_thread, args=("手動現場突擊播報", chat_id), kwargs={"include_fib": True})
                             t.daemon = True
                             t.start()
 
