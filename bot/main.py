@@ -4880,17 +4880,19 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
 
 # ==================== 📐 Fib 多級別全市場掃描（附掛 /scan）====================
 
-def _fib_structural_swings(df, is_bull, n=5):
+def _fib_structural_swings(df, is_bull, n=3, lookback=120):
     """
-    用分形結構（fractal）找最顯著的擺動高低點，定義當前趨勢 leg。
-    - 多頭：找「最低的」分形低點（整段上升趨勢起點）→ 之後的最高 high
-    - 空頭：找「最高的」分形高點（整段下跌趨勢起點）→ 之後的最低 low
-    n = 兩側各需確認根數（預設 5，過濾微小雜訊）。
+    用分形結構找當前趨勢 leg 的高低點。
+    - 300 根資料只用來精確計算指標（EMA89/RSI/ATR），偵測高低點只看最近 lookback 根。
+    - 多頭：在最近 lookback 根找「最低的」分形低點（趨勢起點）→ 之後最高 high
+    - 空頭：在最近 lookback 根找「最高的」分形高點（趨勢起點）→ 之後最低 low
+    n = 分形確認根數（左右各 n 根），lookback = 擺動偵測窗口。
     回傳 (swing_low_idx, swing_low, swing_high_idx, swing_high) 或 None。
     """
+    # 只在最近 lookback 根裡偵測分形，避免追溯到與當前趨勢無關的遠古高低點
+    start = max(n, len(df) - lookback)
     highs, lows = [], []
-    # 最後 n 根右側未確認，範圍 [n, len-n)
-    for i in range(n, len(df) - n):
+    for i in range(start, len(df) - n):
         h = float(df['high'].iloc[i])
         l = float(df['low'].iloc[i])
         if all(h >= float(df['high'].iloc[i - j]) for j in range(1, n + 1)) and \
@@ -4903,9 +4905,9 @@ def _fib_structural_swings(df, is_bull, n=5):
     if is_bull:
         if not lows:
             return None
-        # 取最低的分形低點 → 整段上升趨勢的真正起點
+        # 最低的分形低點 → 當前上升趨勢起點
         sl_idx, sl_val = min(lows, key=lambda x: x[1])
-        # 從那之後的最高 high → 趨勢高點
+        # 從那之後到現在的最高 high
         sub_after = df.iloc[sl_idx:]
         sh_idx = int(sub_after['high'].idxmax())
         sh_val = float(sub_after.loc[sh_idx, 'high'])
@@ -4915,9 +4917,9 @@ def _fib_structural_swings(df, is_bull, n=5):
     else:
         if not highs:
             return None
-        # 取最高的分形高點 → 整段下跌趨勢的真正起點
+        # 最高的分形高點 → 當前下跌趨勢起點
         sh_idx, sh_val = max(highs, key=lambda x: x[1])
-        # 從那之後的最低 low → 趨勢低點
+        # 從那之後到現在的最低 low
         sub_after = df.iloc[sh_idx:]
         sl_idx = int(sub_after['low'].idxmin())
         sl_val = float(sub_after.loc[sl_idx, 'low'])
