@@ -4929,27 +4929,43 @@ def _fib_structural_swings(df, is_bull, atr, lookback=150, min_move_atr=1.5):
     # 相鄰 pair 列表：[(p_older, p_newer), ...]
     pairs = list(zip(confirmed[:-1], confirmed[1:]))
 
+    # 結構性波段最小振幅門檻：range 須 ≥ 3×ATR 才算有效結構段
+    # 避免抓到大趨勢內部的微小 sub-swing
+    min_struct_range = atr * 3.0
+
+    def _pick_lh(pair_list):
+        """從 L→H pair 清單挑選：優先最近的結構性（≥ 3×ATR）pair；
+        若全部都太小，退而選 range 最大的那個。"""
+        structural = [(p1, p2) for p1, p2 in pair_list
+                      if (p2[1] - p1[1]) >= min_struct_range]
+        chosen = structural[-1] if structural else max(pair_list, key=lambda x: x[1][1] - x[0][1])
+        return chosen
+
+    def _pick_hl(pair_list):
+        """從 H→L pair 清單挑選：優先最近的結構性（≥ 3×ATR）pair；
+        若全部都太小，退而選 range 最大的那個。"""
+        structural = [(p1, p2) for p1, p2 in pair_list
+                      if (p1[1] - p2[1]) >= min_struct_range]
+        chosen = structural[-1] if structural else max(pair_list, key=lambda x: x[0][1] - x[1][1])
+        return chosen
+
     if is_bull:
-        # 多頭主趨勢 L→H（低點→高點上漲段），Fib 從 H 往下量 = 回撤支撐位
-        # 取最近一個已確認的 L→H pair（若當前上漲段還在跑未確認，就拿上一個已完成的）
+        # 多頭主趨勢 L→H：Fib 從頂點往下量回撤支撐位
         lh_pairs = [(p1, p2) for p1, p2 in pairs if p1[2] == 'L' and p2[2] == 'H']
         if lh_pairs:
-            (sl_idx, sl_val, _), (sh_idx, sh_val, _) = lh_pairs[-1]
+            (sl_idx, sl_val, _), (sh_idx, sh_val, _) = _pick_lh(lh_pairs)
         else:
-            # fallback：用最後兩個確認點
             p1, p2 = confirmed[-2], confirmed[-1]
             if p1[2] == 'L':
                 sl_idx, sl_val, sh_idx, sh_val = p1[0], p1[1], p2[0], p2[1]
             else:
                 sl_idx, sl_val, sh_idx, sh_val = p2[0], p2[1], p1[0], p1[1]
     else:
-        # 空頭主趨勢 H→L（高點→低點下跌段），Fib 從 L 往上量 = 反彈阻力位
-        # 取最近一個已確認的 H→L pair
+        # 空頭主趨勢 H→L：Fib 從底點往上量反彈阻力位
         hl_pairs = [(p1, p2) for p1, p2 in pairs if p1[2] == 'H' and p2[2] == 'L']
         if hl_pairs:
-            (sh_idx, sh_val, _), (sl_idx, sl_val, _) = hl_pairs[-1]
+            (sh_idx, sh_val, _), (sl_idx, sl_val, _) = _pick_hl(hl_pairs)
         else:
-            # fallback：用最後兩個確認點
             p1, p2 = confirmed[-2], confirmed[-1]
             if p1[2] == 'H':
                 sh_idx, sh_val, sl_idx, sl_val = p1[0], p1[1], p2[0], p2[1]
