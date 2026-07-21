@@ -5145,6 +5145,165 @@ def send_holding_summary(chat_id):
                        f"─────────────────────────\n")
         _send_section(sec2_header, pending_blocks, is_last_section=True)
 
+# ==================== 📐 Fib 0.618 全市場掃描 ====================
+def _fib618_check_asset(inst_id):
+    """
+    取單一合約的4H K線，計算 Fib 0.618 並判斷現價是否在附近（±2%）。
+    回傳 dict 或 None。
+    """
+    try:
+        url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar=4H&limit=100"
+        r   = requests.get(url, timeout=5).json()
+        if r.get('code') != '0' or len(r.get('data', [])) < 40:
+            return None
+        df = pd.DataFrame(r['data'],
+                          columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
+        for col in ['open','high','low','close']:
+            df[col] = df[col].astype(float)
+        df = df.iloc[::-1].reset_index(drop=True)
+
+        price = float(df['close'].iloc[-1])
+
+        # ── EMA + ADX（判斷趨勢方向）──
+        df['MA8']   = df['close'].rolling(8).mean()
+        df['EMA89'] = df['close'].ewm(span=89, adjust=False).mean()
+        is_bull = float(df['MA8'].iloc[-1]) > float(df['EMA89'].iloc[-1])
+
+        # ── ATR ──
+        df['TR'] = (df[['high','low','close']].assign(
+            hl=df['high']-df['low'],
+            hc=(df['high']-df['close'].shift(1)).abs(),
+            lc=(df['low'] -df['close'].shift(1)).abs()
+        )[['hl','hc','lc']].max(axis=1))
+        atr = float(df['TR'].rolling(14).mean().iloc[-1])
+
+        # ── 尋找最近一波擺動：漲勢找「最低→最高」，跌勢找「最高→最低」──
+        window = min(80, len(df))
+        sub    = df.iloc[-window:]
+
+        if is_bull:
+            # 看多：找近期擺動低點（先低後高），計算回踩 Fib
+            swing_low_idx  = int(sub['low'].idxmin())
+            swing_high_idx = int(sub.loc[swing_low_idx:, 'high'].idxmax())
+            swing_low   = float(sub.loc[swing_low_idx, 'low'])
+            swing_high  = float(sub.loc[swing_high_idx, 'high'])
+        else:
+            # 看空：找近期擺動高點（先高後低），計算反彈 Fib
+            swing_high_idx = int(sub['high'].idxmax())
+            swing_low_idx  = int(sub.loc[swing_high_idx:, 'low'].idxmin())
+            swing_high  = float(sub.loc[swing_high_idx, 'high'])
+            swing_low   = float(sub.loc[swing_low_idx, 'low'])
+
+        sw_range = swing_high - swing_low
+        if sw_range < atr * 0.5:          # 擺動幅度太小，跳過
+            return None
+
+        fib618 = swing_high - 0.618 * sw_range
+        fib500 = swing_high - 0.500 * sw_range
+        fib382 = swing_high - 0.382 * sw_range
+
+        # ── 現價是否在 Fib 0.618 ± 2% 以內 ──
+        dist_pct = abs(price - fib618) / fib618 * 100
+        if dist_pct > 2.0:
+            return None
+
+        # ── MACD 方向確認 ──
+        ema12  = df['close'].ewm(span=12, adjust=False).mean()
+        ema26  = df['close'].ewm(span=26, adjust=False).mean()
+        hist   = (ema12 - ema26) - (ema12 - ema26).ewm(span=9, adjust=False).mean()
+        macd_ok = (float(hist.iloc[-1]) > 0) if is_bull else (float(hist.iloc[-1]) < 0)
+
+        return {
+            'inst_id':    inst_id,
+            'symbol':     inst_id.replace('-USDT-SWAP',''),
+            'price':      price,
+            'fib618':     fib618,
+            'fib500':     fib500,
+            'fib382':     fib382,
+            'swing_high': swing_high,
+            'swing_low':  swing_low,
+            'dist_pct':   dist_pct,
+            'is_bull':    is_bull,
+            'atr':        atr,
+            'macd_ok':    macd_ok,
+            'sl':         fib618 - atr * 1.2 if is_bull else fib618 + atr * 1.2,
+            'tp1':        fib382,
+            'tp2':        swing_high if is_bull else swing_low,
+        }
+    except Exception:
+        return None
+
+
+def scan_fib618_setups(chat_id):
+    """全市場掃描 Fib 0.618 回踩機會，發送結果到 Telegram。"""
+    text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    requests.post(text_url, json={
+        "chat_id": chat_id,
+        "text": "📐 正在掃描全市場 Fib 0.618 回踩點，約需 15~30 秒..."
+    })
+
+    assets, _ = get_all_okx_swap_assets()
+    results   = []
+
+    with ThreadPoolExecutor(max_workers=60) as ex:
+        futs = {ex.submit(_fib618_check_asset, a): a for a in assets}
+        for fut in as_completed(futs):
+            try:
+                hit = fut.result()
+                if hit:
+                    results.append(hit)
+            except Exception:
+                pass
+
+    la_tz   = pytz.timezone('America/Los_Angeles')
+    now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
+
+    if not results:
+        requests.post(text_url, json={
+            "chat_id": chat_id,
+            "text": f"📐 <b>Fib 0.618 掃描結果</b>  <code>{now_str} PT</code>\n\n目前無合約現價落在 Fib 0.618 ±2% 區間內。\n可稍後再試，或調大容差後重新掃描。",
+            "parse_mode": "HTML"
+        })
+        return
+
+    # 排序：MACD 確認優先，再按距 0.618 距離由近到遠
+    results.sort(key=lambda x: (not x['macd_ok'], x['dist_pct']))
+
+    _TG_LIMIT = 3800
+    header = (f"📐 <b>Fib 0.618 回踩掃描</b>  <code>{now_str} PT</code>\n"
+              f"共 <b>{len(results)}</b> 個合約現價在 Fib 0.618 ±2% 以內\n"
+              f"（✅ = MACD 方向吻合，排序優先）\n"
+              f"─────────────────────────\n")
+
+    pages   = []
+    cur     = header
+    for hit in results:
+        d    = "🟩多" if hit['is_bull'] else "🟥空"
+        macd = "✅MACD" if hit['macd_ok'] else "⚠️MACD反"
+        blk  = (f"{d}  <b>{hit['symbol']}</b>  現價 <code>{format_price(hit['price'])}</code>"
+                f"  {macd}  距0.618 <b>{hit['dist_pct']:.1f}%</b>\n"
+                f"<pre>"
+                f"Fib 0.618  {format_price(hit['fib618'])}  ← 進場區\n"
+                f"Fib 0.500  {format_price(hit['fib500'])}\n"
+                f"Fib 0.382  {format_price(hit['fib382'])}  ← TP1\n"
+                f"止損       {format_price(hit['sl'])}\n"
+                f"波段高     {format_price(hit['swing_high'])}  波段低  {format_price(hit['swing_low'])}\n"
+                f"</pre>")
+        if len(cur) + len(blk) > _TG_LIMIT:
+            pages.append(cur)
+            cur = blk
+        else:
+            cur += blk
+
+    footer = f"\n<i>⚠️ 僅供技術參考，請結合 K 線形態確認後再進場</i>"
+    if cur.strip():
+        cur += footer
+        pages.append(cur)
+
+    for page in pages:
+        requests.post(text_url, json={"chat_id": chat_id, "text": page, "parse_mode": "HTML"})
+
+
 # ==================== 📌 手動開倉/平倉指令 ====================
 def handle_open_command(text, chat_id):
     """
@@ -6329,10 +6488,16 @@ def handle_telegram_updates():
                                       "parse_mode": "HTML"}
                             )
 
+                        elif text.lower().startswith("/fib618") or text.lower().startswith("/fib"):
+                            print(f"📐 收到 /fib618 指令")
+                            t = threading.Thread(target=scan_fib618_setups, args=(chat_id,))
+                            t.daemon = True
+                            t.start()
+
                         elif text.startswith("/") and len(text) > 1:
                             # 通用幣種查詢：/eth /btc /sol /doge 等
                             coin_cmd = text.split()[0].lstrip("/").split("@")[0]
-                            if coin_cmd and coin_cmd.isalpha() and coin_cmd.lower() not in ("open","close","scan","holding","watch","unwatch","watching","stats","resetstats","help"):
+                            if coin_cmd and coin_cmd.isalpha() and coin_cmd.lower() not in ("open","close","scan","holding","watch","unwatch","watching","stats","resetstats","help","fib618","fib"):
                                 print(f"🔍 收到幣種查詢指令：/{coin_cmd.upper()}")
                                 requests.post(
                                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
