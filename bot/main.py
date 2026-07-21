@@ -4880,47 +4880,71 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
 
 # ==================== 📐 Fib 多級別全市場掃描（附掛 /scan）====================
 
-def _fib_structural_swings(df, is_bull, n=3, lookback=120):
+def _fib_structural_swings(df, is_bull, atr, lookback=150, min_move_atr=1.5):
     """
-    用分形結構找當前趨勢 leg 的高低點。
-    - 300 根資料只用來精確計算指標（EMA89/RSI/ATR），偵測高低點只看最近 lookback 根。
-    - 多頭：在最近 lookback 根找「最低的」分形低點（趨勢起點）→ 之後最高 high
-    - 空頭：在最近 lookback 根找「最高的」分形高點（趨勢起點）→ 之後最低 low
-    n = 分形確認根數（左右各 n 根），lookback = 擺動偵測窗口。
-    回傳 (swing_low_idx, swing_low, swing_high_idx, swing_high) 或 None。
+    Zigzag 結構算法：以「夠大的擺動」定義結構高低點，對應圖表上可見的大波段轉折。
+    price 必須從當前極值反轉超過 min_move_atr * ATR 才確認一個新的結構點。
+
+    - 多頭：取最近的結構低點（Zigzag L）→ 之後的最高 high（量回撤支撐）
+    - 空頭：取最近的結構高點（Zigzag H）→ 之後的最低 low（量反彈阻力）
+
+    回傳 (sl_idx, swing_low, sh_idx, swing_high) 或 None。
     """
-    # 只在最近 lookback 根裡偵測分形，避免追溯到與當前趨勢無關的遠古高低點
-    start = max(n, len(df) - lookback)
-    highs, lows = [], []
-    for i in range(start, len(df) - n):
-        h = float(df['high'].iloc[i])
-        l = float(df['low'].iloc[i])
-        if all(h >= float(df['high'].iloc[i - j]) for j in range(1, n + 1)) and \
-           all(h >= float(df['high'].iloc[i + j]) for j in range(1, n + 1)):
-            highs.append((i, h))
-        if all(l <= float(df['low'].iloc[i - j]) for j in range(1, n + 1)) and \
-           all(l <= float(df['low'].iloc[i + j]) for j in range(1, n + 1)):
-            lows.append((i, l))
+    threshold = atr * min_move_atr
+    start     = max(0, len(df) - lookback)
+    sub       = df.iloc[start:].reset_index(drop=True)
+    offset    = start           # sub 的 index 0 對應原 df 的 offset
+
+    pivots: list = []           # (df_idx, price, 'H'|'L')
+    cur_type  = 'H'
+    cur_val   = float(sub['high'].iloc[0])
+    cur_sub_i = 0
+
+    for i in range(len(sub)):
+        h = float(sub['high'].iloc[i])
+        l = float(sub['low'].iloc[i])
+        if cur_type == 'H':
+            if h >= cur_val:            # 新高，更新當前極值
+                cur_val, cur_sub_i = h, i
+            elif cur_val - l >= threshold:   # 反轉夠大，確認結構高點
+                pivots.append((offset + cur_sub_i, cur_val, 'H'))
+                cur_type, cur_val, cur_sub_i = 'L', l, i
+        else:
+            if l <= cur_val:            # 新低，更新當前極值
+                cur_val, cur_sub_i = l, i
+            elif h - cur_val >= threshold:   # 反轉夠大，確認結構低點
+                pivots.append((offset + cur_sub_i, cur_val, 'L'))
+                cur_type, cur_val, cur_sub_i = 'H', h, i
+
+    # 把最後尚未確認的擺動也加入（作為參考）
+    pivots.append((offset + cur_sub_i, cur_val, cur_type))
+
+    if len(pivots) < 2:
+        return None
 
     if is_bull:
-        if not lows:
+        # 最近一個結構低點（Zigzag L）→ 之後到現在的最高 high
+        low_pivots = [(idx, v) for idx, v, t in pivots if t == 'L']
+        if not low_pivots:
             return None
-        # 最低的分形低點 → 當前上升趨勢起點
-        sl_idx, sl_val = min(lows, key=lambda x: x[1])
-        # 從那之後到現在的最高 high
+        sl_idx, sl_val = low_pivots[-1]
         sub_after = df.iloc[sl_idx:]
+        if sub_after.empty:
+            return None
         sh_idx = int(sub_after['high'].idxmax())
         sh_val = float(sub_after.loc[sh_idx, 'high'])
         if sh_idx <= sl_idx:
             return None
         return sl_idx, sl_val, sh_idx, sh_val
     else:
-        if not highs:
+        # 最近一個結構高點（Zigzag H）→ 之後到現在的最低 low
+        high_pivots = [(idx, v) for idx, v, t in pivots if t == 'H']
+        if not high_pivots:
             return None
-        # 最高的分形高點 → 當前下跌趨勢起點
-        sh_idx, sh_val = max(highs, key=lambda x: x[1])
-        # 從那之後到現在的最低 low
+        sh_idx, sh_val = high_pivots[-1]
         sub_after = df.iloc[sh_idx:]
+        if sub_after.empty:
+            return None
         sl_idx = int(sub_after['low'].idxmin())
         sl_val = float(sub_after.loc[sl_idx, 'low'])
         if sl_idx <= sh_idx:
@@ -4979,7 +5003,7 @@ def _fib_all_levels_check(inst_id, bar_param="4H"):
         atr = float(df['TR'].rolling(14).mean().iloc[-1])
 
         # ── 分形擺動高低點 ──
-        swings = _fib_structural_swings(df, is_bull, n=3)
+        swings = _fib_structural_swings(df, is_bull, atr)
         if swings is None:
             return None
         sl_idx, swing_low, sh_idx, swing_high = swings
@@ -5235,9 +5259,9 @@ def send_fibcheck_report(raw_text, chat_id):
         atr = float(df['TR'].rolling(14).mean().iloc[-1])
 
         # ── 分形結構高低點 ──
-        swings = _fib_structural_swings(df, is_bull, n=3)
+        swings = _fib_structural_swings(df, is_bull, atr)
         if swings is None:
-            _reply(f"❌ {coin} {bar}：找不到分形擺動結構（資料不足或趨勢極弱），請換時框再試")
+            _reply(f"❌ {coin} {bar}：找不到 Zigzag 結構擺動（波動太小或趨勢太新），請換時框再試")
             return
         sl_idx, swing_low, sh_idx, swing_high = swings
 
