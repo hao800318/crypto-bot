@@ -5306,19 +5306,36 @@ def send_fibcheck_report(raw_text, chat_id):
             }
             direction = "🟥 空頭（反彈阻力）"
 
+        # 按時間順序排列起訖點（讓方向一目瞭然）
+        if is_bull:
+            # 多頭：L→H，低點是起點（較早），高點是終點（較近）
+            start_label = "📍 趨勢起點（Swing Low）"
+            start_price, start_time, start_bars = swing_low, sl_time, sl_bars_ago
+            end_label   = "🏁 趨勢頂點（Swing High）"
+            end_price,   end_time,   end_bars   = swing_high, sh_time, sh_bars_ago
+            fib_title   = "Fib 回撤位（從頂點往下量，尋找回踩支撐）"
+        else:
+            # 空頭：H→L，高點是起點（較早），低點是終點（較近）
+            start_label = "📍 趨勢起點（Swing High）"
+            start_price, start_time, start_bars = swing_high, sh_time, sh_bars_ago
+            end_label   = "🏁 趨勢底點（Swing Low）"
+            end_price,   end_time,   end_bars   = swing_low, sl_time, sl_bars_ago
+            fib_title   = "Fib 回撤位（從底點往上量，尋找反彈阻力）"
+
         # 組裝訊息
         msg  = f"📐 <b>Fib 高低點診斷 — {coin} {bar}</b>\n"
         msg += f"趨勢：{direction}\n"
         msg += f"MA8={format_price(float(df['MA8'].iloc[-1]))}  EMA89={format_price(float(df['EMA89'].iloc[-1]))}\n"
         msg += f"RSI {rsi:.1f}  MACD {'↑多' if macd_bull else '↓空'}  ATR {format_price(atr)}\n"
         msg += "─────────────────────\n"
-        msg += f"🔺 Swing High：<b>{format_price(swing_high)}</b>\n"
-        msg += f"   時間：{sh_time} PT（{sh_bars_ago} 根前）\n"
-        msg += f"🔻 Swing Low ：<b>{format_price(swing_low)}</b>\n"
-        msg += f"   時間：{sl_time} PT（{sl_bars_ago} 根前）\n"
+        msg += f"{start_label}：<b>{format_price(start_price)}</b>\n"
+        msg += f"   時間：{start_time} PT（{start_bars} 根前）\n"
+        msg += f"   　↓\n"
+        msg += f"{end_label}：<b>{format_price(end_price)}</b>\n"
+        msg += f"   時間：{end_time} PT（{end_bars} 根前）\n"
         msg += f"📏 振幅：{format_price(sw_range)}  （ATR 的 {sw_range/atr:.1f}x）\n"
         msg += "─────────────────────\n"
-        msg += f"<b>Fib 回撤位</b>（分形擺動結構，n=3 確認）\n"
+        msg += f"<b>{fib_title}</b>\n"
         for ratio, fval in fibs.items():
             dist = abs(price - fval) / fval * 100
             arrow = " ◀ 現價在此" if dist <= 2.5 else ""
