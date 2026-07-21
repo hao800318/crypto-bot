@@ -4878,6 +4878,228 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
     else:
         print(f"❌ 報告發送失敗：{result}")
 
+# ==================== 📐 Fib 多級別全市場掃描（附掛 /scan）====================
+def _fib_all_levels_check(inst_id):
+    """
+    取 4H K線，計算 Fib 0.382 / 0.500 / 0.618 / 0.786 四個回撤位，
+    判斷現價落在哪一個 ±2% 區間（同時只取最近一個）。
+    回傳 dict 或 None。
+    """
+    _THRESH = {
+        'f382': (0.382, 2.0),
+        'f500': (0.500, 2.0),
+        'f618': (0.618, 2.0),
+        'f786': (0.786, 2.5),
+    }
+    try:
+        url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar=4H&limit=100"
+        r   = requests.get(url, timeout=5).json()
+        if r.get('code') != '0' or len(r.get('data', [])) < 40:
+            return None
+        df = pd.DataFrame(r['data'],
+                          columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
+        for col in ['open','high','low','close']:
+            df[col] = df[col].astype(float)
+        df = df.iloc[::-1].reset_index(drop=True)
+
+        price = float(df['close'].iloc[-1])
+
+        # ── 趨勢方向 ──
+        df['MA8']   = df['close'].rolling(8).mean()
+        df['EMA89'] = df['close'].ewm(span=89, adjust=False).mean()
+        is_bull = float(df['MA8'].iloc[-1]) > float(df['EMA89'].iloc[-1])
+
+        # ── RSI ──
+        delta = df['close'].diff()
+        gain  = delta.where(delta > 0, 0).rolling(14).mean()
+        loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rsi   = float((100 - (100 / (1 + gain / (loss + 1e-10)))).iloc[-1])
+
+        # ── MACD histogram ──
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
+        hist  = (ema12 - ema26) - (ema12 - ema26).ewm(span=9, adjust=False).mean()
+        macd_bull = float(hist.iloc[-1]) > 0
+
+        # ── ATR ──
+        df['TR'] = df[['high','low','close']].assign(
+            hl=df['high']-df['low'],
+            hc=(df['high']-df['close'].shift(1)).abs(),
+            lc=(df['low'] -df['close'].shift(1)).abs()
+        )[['hl','hc','lc']].max(axis=1)
+        atr = float(df['TR'].rolling(14).mean().iloc[-1])
+
+        # ── 擺動高低點（方向性） ──
+        window = min(80, len(df))
+        sub    = df.iloc[-window:]
+        if is_bull:
+            sl_idx = int(sub['low'].idxmin())
+            sh_idx = int(sub.loc[sl_idx:, 'high'].idxmax())
+            swing_low  = float(sub.loc[sl_idx, 'low'])
+            swing_high = float(sub.loc[sh_idx, 'high'])
+        else:
+            sh_idx = int(sub['high'].idxmax())
+            sl_idx = int(sub.loc[sh_idx:, 'low'].idxmin())
+            swing_high = float(sub.loc[sh_idx, 'high'])
+            swing_low  = float(sub.loc[sl_idx, 'low'])
+
+        sw_range = swing_high - swing_low
+        if sw_range < atr * 0.5:
+            return None
+
+        fibs = {
+            'f382': swing_high - 0.382 * sw_range,
+            'f500': swing_high - 0.500 * sw_range,
+            'f618': swing_high - 0.618 * sw_range,
+            'f786': swing_high - 0.786 * sw_range,
+        }
+
+        # ── 找最近的 Fib 級別（在門檻內才算） ──
+        best_key, best_dist = None, 999
+        for key, (ratio, thresh) in _THRESH.items():
+            fib_val = fibs[key]
+            dist_pct = abs(price - fib_val) / fib_val * 100
+            if dist_pct <= thresh and dist_pct < best_dist:
+                best_key  = key
+                best_dist = dist_pct
+
+        if best_key is None:
+            return None
+
+        symbol = inst_id.replace('-USDT-SWAP', '')
+        return {
+            'inst_id':    inst_id,
+            'symbol':     symbol,
+            'price':      price,
+            'level':      best_key,           # 'f382'/'f500'/'f618'/'f786'
+            'fib_val':    fibs[best_key],
+            'dist_pct':   best_dist,
+            'is_bull':    is_bull,
+            'macd_bull':  macd_bull,
+            'rsi':        rsi,
+            'swing_high': swing_high,
+            'swing_low':  swing_low,
+            'atr':        atr,
+        }
+    except Exception:
+        return None
+
+
+def send_fib_scan_report(target_chat_id):
+    """掃描全市場 4H Fib 回撤級別，發送分組報告（附在 /scan 之後）。"""
+    la_tz   = pytz.timezone('America/Los_Angeles')
+    now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
+    text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    assets, _ = get_all_okx_swap_assets()
+    buckets: dict = {'f382': [], 'f500': [], 'f618': [], 'f786': []}
+
+    with ThreadPoolExecutor(max_workers=60) as ex:
+        futs = {ex.submit(_fib_all_levels_check, a): a for a in assets}
+        for fut in as_completed(futs):
+            try:
+                hit = fut.result()
+                if hit:
+                    buckets[hit['level']].append(hit)
+            except Exception:
+                pass
+
+    # 每桶按距離由近到遠
+    for k in buckets:
+        buckets[k].sort(key=lambda x: x['dist_pct'])
+
+    # ── 組裝訊息 ──
+    msg  = f"📐 <b>【Fib 回撤指數掃描】</b>  <code>{now_str} PT</code>\n"
+    msg += f"流動性合約 {len(assets)} 支  4H 週期基準\n"
+    msg += "═════════════════════════\n"
+
+    def _dir(h):
+        return "🟩多" if h['is_bull'] else "🟥空"
+    def _macd(h):
+        ok = (h['macd_bull'] and h['is_bull']) or (not h['macd_bull'] and not h['is_bull'])
+        return "MACD✅" if ok else "MACD⚠️"
+
+    # ── 0.382：強勢格局 ──
+    b382 = buckets['f382']
+    msg += f"\n🟢 <b>0.382 — 強勢格局（淺回踩）</b>  共 {len(b382)} 支\n"
+    if b382:
+        msg += "<i>趨勢方向明確，僅淺回踩，多空依然強勢</i>\n"
+        for h in b382:
+            msg += (f"  {_dir(h)} <b>{h['symbol']}</b>  距{h['dist_pct']:.1f}%  "
+                    f"RSI {h['rsi']:.0f}  {_macd(h)}\n")
+    else:
+        msg += "  — 暫無\n"
+
+    # ── 0.500：多空交戰 ──
+    b500 = buckets['f500']
+    msg += f"\n⚖️ <b>0.500 — 多空交戰（需等確認）</b>  共 {len(b500)} 支\n"
+    if b500:
+        msg += "<i>黃金中點，方向未定，需等 K 線確認突破或跌破</i>\n"
+        for h in b500:
+            d    = _dir(h)
+            adv  = "多方優勢" if h['is_bull'] else "空方優勢"
+            macd_align = (h['macd_bull'] and h['is_bull']) or (not h['macd_bull'] and not h['is_bull'])
+            macd_note  = "MACD 同向確認" if macd_align else "MACD 背離，需謹慎"
+            if h['is_bull']:
+                long_note  = f"守住 {format_price(h['fib_val'])} 可偏多，跌破轉空"
+                short_note = f"需跌破 {format_price(h['fib_val'])} 才確立空方"
+            else:
+                long_note  = f"需突破 {format_price(h['fib_val'])} 才確立多方"
+                short_note = f"壓在 {format_price(h['fib_val'])} 下方可偏空，突破轉多"
+            msg += (f"  {d} <b>{h['symbol']}</b>  距{h['dist_pct']:.1f}%  "
+                    f"RSI {h['rsi']:.0f}  <b>{adv}</b>（{macd_note}）\n"
+                    f"    ▸ 多：{long_note}\n"
+                    f"    ▸ 空：{short_note}\n")
+    else:
+        msg += "  — 暫無\n"
+
+    # ── 0.618：黃金進場區 ──
+    b618 = buckets['f618']
+    msg += f"\n✅ <b>0.618 — 黃金回踩（可尋機進場）</b>  共 {len(b618)} 支\n"
+    if b618:
+        msg += "<i>黃金回撤比例，趨勢方向進場的經典位置</i>\n"
+        for h in b618:
+            macd_str = "MACD✅ 可直接找進場K" if _macd(h) == "MACD✅" else "MACD⚠️ 等 K 線確認再進"
+            msg += (f"  {_dir(h)} <b>{h['symbol']}</b>  距{h['dist_pct']:.1f}%  "
+                    f"RSI {h['rsi']:.0f}  {macd_str}\n")
+    else:
+        msg += "  — 暫無\n"
+
+    # ── 0.786：深度回踩仍撐 ──
+    b786 = buckets['f786']
+    msg += f"\n🔴 <b>0.786 — 深度回踩（最後支撐/壓力）</b>  共 {len(b786)} 支\n"
+    if b786:
+        msg += "<i>深度回撤仍未破位，止損宜嚴控，等確認K再進</i>\n"
+        for h in b786:
+            hold_note = "撐住" if h['is_bull'] else "壓住"
+            msg += (f"  {_dir(h)} <b>{h['symbol']}</b>  距{h['dist_pct']:.1f}%  "
+                    f"RSI {h['rsi']:.0f}  {hold_note}中  {_macd(h)}\n")
+    else:
+        msg += "  — 暫無\n"
+
+    total = sum(len(v) for v in buckets.values())
+    msg += f"\n<i>共 {total} 支合約落在 Fib 回撤位附近（±2%）  ⚠️ 僅供技術參考</i>"
+
+    # 若超過 Telegram 4096 限制，分頁發送
+    _TG_LIMIT = 3800
+    if len(msg) <= _TG_LIMIT:
+        requests.post(text_url, json={"chat_id": target_chat_id, "text": msg, "parse_mode": "HTML"})
+    else:
+        # 按段落切割
+        sections = msg.split('\n\n')
+        page, pages = '', []
+        for sec in sections:
+            if len(page) + len(sec) + 2 > _TG_LIMIT:
+                pages.append(page)
+                page = sec
+            else:
+                page += ('\n\n' if page else '') + sec
+        if page:
+            pages.append(page)
+        for pg in pages:
+            requests.post(text_url, json={"chat_id": target_chat_id, "text": pg, "parse_mode": "HTML"})
+
+
 # ==================== 📡 7. 原生無衝突監聽引擎 ====================
 def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False, include_news=False, auto_track=False):
     try:
@@ -4990,6 +5212,14 @@ def _scan_worker_thread_impl(msg_title, target_chat_id, silent_on_empty=False, i
             resp = requests.post(text_url, json=payload)
             if resp.json().get("ok"):
                 print(f"✅ 掃描結果發送成功（{'有' if near_misses else '無'}接近訊號）")
+
+    # ── 每次掃描結束都附送 Fib 回撤指數報告 ──
+    try:
+        print("📐 開始 Fib 回撤指數掃描...")
+        send_fib_scan_report(target_chat_id)
+        print("📐 Fib 報告發送完成")
+    except Exception as _fe:
+        print(f"⚠️ Fib 報告發送失敗：{_fe}")
 
 def _holding_quick_status(pos, cp):
     """
