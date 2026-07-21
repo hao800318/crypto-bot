@@ -4929,9 +4929,9 @@ def _fib_structural_swings(df, is_bull, atr, lookback=150, min_move_atr=1.5):
     # 相鄰 pair 列表：[(p_older, p_newer), ...]
     pairs = list(zip(confirmed[:-1], confirmed[1:]))
 
-    # 結構性波段最小振幅門檻：range 須 ≥ 3×ATR 才算有效結構段
-    # 避免抓到大趨勢內部的微小 sub-swing
-    min_struct_range = atr * 3.0
+    # 結構性波段最小振幅門檻：range 須 ≥ 5×ATR 才算有效結構段
+    # 3×ATR 仍可能讓大趨勢內的 sub-swing 混入；5×ATR 才能確保真正的主結構
+    min_struct_range = atr * 5.0
 
     def _pick_lh(pair_list):
         """從 L→H pair 清單挑選：優先最近的結構性（≥ 3×ATR）pair；
@@ -5034,7 +5034,7 @@ def _fib_all_levels_check(inst_id, bar_param="4H"):
         sl_idx, swing_low, sh_idx, swing_high = swings
 
         sw_range = swing_high - swing_low
-        if sw_range < atr * 0.5:
+        if sw_range < atr * 4.0:    # 振幅太小（< 4×ATR）不足以作為結構性 Fib 參考
             return None
 
         # 多頭：從趨勢低點量到高點，回撤算支撐；空頭：從趨勢高點量到低點，反彈算阻力
@@ -5374,9 +5374,11 @@ def send_fibcheck_report(raw_text, chat_id):
         msg += f"📏 振幅：{format_price(sw_range)}  （ATR 的 {sw_range/atr:.1f}x）\n"
         msg += "─────────────────────\n"
         msg += f"<b>{fib_title}</b>\n"
+        # 只標記距離現價最近的那一個 Fib 位（避免 swing 太小時多個都標）
+        closest_ratio = min(fibs, key=lambda r: abs(price - fibs[r]))
         for ratio, fval in fibs.items():
             dist = abs(price - fval) / fval * 100
-            arrow = " ◀ 現價在此" if dist <= 2.5 else ""
+            arrow = " ◀ 現價最近" if ratio == closest_ratio and dist <= 5.0 else ""
             msg += f"  {ratio}：<b>{format_price(fval)}</b>  距 {dist:.1f}%{arrow}\n"
         msg += "─────────────────────\n"
         msg += f"現價：<b>{format_price(price)}</b>\n"
@@ -5668,7 +5670,7 @@ def _fib618_check_asset(inst_id):
             swing_low   = float(sub.loc[swing_low_idx, 'low'])
 
         sw_range = swing_high - swing_low
-        if sw_range < atr * 0.5:          # 擺動幅度太小，跳過
+        if sw_range < atr * 4.0:          # 擺動幅度太小，跳過（< 4×ATR 不構成結構性參考）
             return None
 
         fib618 = swing_high - 0.618 * sw_range
