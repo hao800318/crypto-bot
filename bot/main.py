@@ -5124,6 +5124,147 @@ def send_fib_scan_report(target_chat_id):
             print(f"⚠️ Fib {tf_label} 報告失敗：{_fe}")
 
 
+def send_fibcheck_report(raw_text, chat_id):
+    """
+    /fibcheck BTC [1H|4H|1D]
+    顯示機器人實際抓取的 Fib 高低點、四個回撤位、現價距離，供使用者核對。
+    """
+    text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    def _reply(msg):
+        requests.post(text_url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"})
+
+    parts = raw_text.strip().split()
+    if len(parts) < 2:
+        _reply("❌ 用法：<code>/fibcheck BTC</code> 或 <code>/fibcheck BTC 4H</code>")
+        return
+
+    coin   = parts[1].upper().replace("USDT", "").replace("-", "").replace("SWAP", "")
+    bar    = parts[2].upper() if len(parts) >= 3 else "4H"
+    valid_bars = {"1H", "4H", "1D", "15M", "30M"}
+    if bar not in valid_bars:
+        _reply(f"❌ 時框無效，請使用：{', '.join(sorted(valid_bars))}")
+        return
+
+    inst_id = f"{coin}-USDT-SWAP"
+
+    try:
+        url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar}&limit=100"
+        r   = requests.get(url, timeout=8).json()
+        if r.get('code') != '0':
+            _reply(f"❌ OKX API 錯誤：{r.get('msg','未知')}（合約 {inst_id} 可能不存在）")
+            return
+        data = r.get('data', [])
+        if len(data) < 40:
+            _reply(f"❌ K 線資料不足（{len(data)} 根），無法計算")
+            return
+
+        df = pd.DataFrame(data,
+                          columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
+        for col in ['open','high','low','close']:
+            df[col] = df[col].astype(float)
+        df['ts'] = pd.to_datetime(df['ts'].astype(int), unit='ms', utc=True)
+        df = df.iloc[::-1].reset_index(drop=True)   # 舊→新
+
+        price = float(df['close'].iloc[-1])
+
+        # 趨勢
+        df['MA8']   = df['close'].rolling(8).mean()
+        df['EMA89'] = df['close'].ewm(span=89, adjust=False).mean()
+        is_bull = float(df['MA8'].iloc[-1]) > float(df['EMA89'].iloc[-1])
+
+        # RSI
+        delta = df['close'].diff()
+        gain  = delta.where(delta > 0, 0).rolling(14).mean()
+        loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rsi   = float((100 - (100 / (1 + gain / (loss + 1e-10)))).iloc[-1])
+
+        # MACD
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
+        hist  = (ema12 - ema26) - (ema12 - ema26).ewm(span=9, adjust=False).mean()
+        macd_bull = float(hist.iloc[-1]) > 0
+
+        # ATR
+        df['TR'] = df[['high','low','close']].assign(
+            hl=df['high']-df['low'],
+            hc=(df['high']-df['close'].shift(1)).abs(),
+            lc=(df['low'] -df['close'].shift(1)).abs()
+        )[['hl','hc','lc']].max(axis=1)
+        atr = float(df['TR'].rolling(14).mean().iloc[-1])
+
+        # 高低點
+        window = min(80, len(df))
+        sub    = df.iloc[-window:]
+        if is_bull:
+            sl_idx = int(sub['low'].idxmin())
+            sh_idx = int(sub.loc[sl_idx:, 'high'].idxmax())
+        else:
+            sh_idx = int(sub['high'].idxmax())
+            sl_idx = int(sub.loc[sh_idx:, 'low'].idxmin())
+
+        swing_low  = float(sub.loc[sl_idx, 'low'])
+        swing_high = float(sub.loc[sh_idx, 'high'])
+        sl_ts      = sub.loc[sl_idx, 'ts']
+        sh_ts      = sub.loc[sh_idx, 'ts']
+        total_rows = len(df)
+        sh_bars_ago = total_rows - 1 - sh_idx
+        sl_bars_ago = total_rows - 1 - sl_idx
+
+        la_tz   = pytz.timezone('America/Los_Angeles')
+        sh_time = pd.Timestamp(sh_ts).tz_convert(la_tz).strftime('%m/%d %H:%M')
+        sl_time = pd.Timestamp(sl_ts).tz_convert(la_tz).strftime('%m/%d %H:%M')
+
+        sw_range = swing_high - swing_low
+
+        # Fib 位階
+        if is_bull:
+            fibs = {
+                '0.236': swing_high - 0.236 * sw_range,
+                '0.382': swing_high - 0.382 * sw_range,
+                '0.500': swing_high - 0.500 * sw_range,
+                '0.618': swing_high - 0.618 * sw_range,
+                '0.786': swing_high - 0.786 * sw_range,
+            }
+            direction = "🟩 多頭（回踩支撐）"
+        else:
+            fibs = {
+                '0.236': swing_low + 0.236 * sw_range,
+                '0.382': swing_low + 0.382 * sw_range,
+                '0.500': swing_low + 0.500 * sw_range,
+                '0.618': swing_low + 0.618 * sw_range,
+                '0.786': swing_low + 0.786 * sw_range,
+            }
+            direction = "🟥 空頭（反彈阻力）"
+
+        # 組裝訊息
+        msg  = f"📐 <b>Fib 高低點診斷 — {coin} {bar}</b>\n"
+        msg += f"趨勢：{direction}\n"
+        msg += f"MA8={format_price(float(df['MA8'].iloc[-1]))}  EMA89={format_price(float(df['EMA89'].iloc[-1]))}\n"
+        msg += f"RSI {rsi:.1f}  MACD {'↑多' if macd_bull else '↓空'}  ATR {format_price(atr)}\n"
+        msg += "─────────────────────\n"
+        msg += f"🔺 Swing High：<b>{format_price(swing_high)}</b>\n"
+        msg += f"   時間：{sh_time} PT（{sh_bars_ago} 根前）\n"
+        msg += f"🔻 Swing Low ：<b>{format_price(swing_low)}</b>\n"
+        msg += f"   時間：{sl_time} PT（{sl_bars_ago} 根前）\n"
+        msg += f"📏 振幅：{format_price(sw_range)}  （ATR 的 {sw_range/atr:.1f}x）\n"
+        msg += "─────────────────────\n"
+        msg += f"<b>Fib 回撤位</b>（掃描範圍：窗口 {window} 根）\n"
+        for ratio, fval in fibs.items():
+            dist = abs(price - fval) / fval * 100
+            arrow = " ◀ 現價在此" if dist <= 2.5 else ""
+            msg += f"  {ratio}：<b>{format_price(fval)}</b>  距 {dist:.1f}%{arrow}\n"
+        msg += "─────────────────────\n"
+        msg += f"現價：<b>{format_price(price)}</b>\n"
+        msg += f"<i>（掃描時 ±2% 內才會出現在 Fib 報告，±2.5% 限 0.786）</i>"
+
+        _reply(msg)
+
+    except Exception as e:
+        _reply(f"❌ 計算失敗：{e}")
+        import traceback; print(traceback.format_exc())
+
+
 # ==================== 📡 7. 原生無衝突監聽引擎 ====================
 def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False, include_news=False, auto_track=False, include_fib=False):
     try:
@@ -6616,6 +6757,12 @@ def handle_telegram_updates():
                             confirm_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
                             requests.post(confirm_url, json={"chat_id": chat_id, "text": "⚡ 收到指令！正在進行全網掃描 + 主力動向確認，精選最高技術分訊號（趨勢/區間/背離），請稍候約 15 秒..."})
                             t = threading.Thread(target=scan_worker_thread, args=("手動現場突擊播報", chat_id), kwargs={"include_fib": True})
+                            t.daemon = True
+                            t.start()
+
+                        elif text.lower().startswith("/fibcheck"):
+                            print(f"📐 收到 /fibcheck 指令：{text}")
+                            t = threading.Thread(target=send_fibcheck_report, args=(text, chat_id))
                             t.daemon = True
                             t.start()
 
