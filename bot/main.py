@@ -4947,12 +4947,21 @@ def _fib_all_levels_check(inst_id, bar_param="4H"):
         if sw_range < atr * 0.5:
             return None
 
-        fibs = {
-            'f382': swing_high - 0.382 * sw_range,
-            'f500': swing_high - 0.500 * sw_range,
-            'f618': swing_high - 0.618 * sw_range,
-            'f786': swing_high - 0.786 * sw_range,
-        }
+        # 多頭：測回踩支撐（從高點往下）；空頭：測反彈阻力（從低點往上）
+        if is_bull:
+            fibs = {
+                'f382': swing_high - 0.382 * sw_range,
+                'f500': swing_high - 0.500 * sw_range,
+                'f618': swing_high - 0.618 * sw_range,
+                'f786': swing_high - 0.786 * sw_range,
+            }
+        else:
+            fibs = {
+                'f382': swing_low + 0.382 * sw_range,
+                'f500': swing_low + 0.500 * sw_range,
+                'f618': swing_low + 0.618 * sw_range,
+                'f786': swing_low + 0.786 * sw_range,
+            }
 
         # ── 找最近的 Fib 級別（在門檻內才算） ──
         best_key, best_dist = None, 999
