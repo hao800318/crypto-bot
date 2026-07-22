@@ -1231,10 +1231,11 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             current_adx   = c_last['ADX']
             current_atr   = c_last['ATR14']
 
-            # ① ADX 過濾：< 25 表示趨勢不明確，MA 交叉失誤率高
-            # 原門檻 20 過低——ADX 20-24 僅代表「微弱」趨勢，噪訊假突破多；
-            # 提高至 25 為業界標準「趨勢確立」分界線。
-            if current_adx < 25:
+            # ① ADX 過濾：趨勢不夠強時拒絕進場
+            # 15M 雜訊最多：日誌反覆出現 ADX 25-29 失敗，提高至 28（週期越短門檻越嚴）
+            # 其他時框：25 為業界標準「趨勢確立」分界線
+            _adx_entry_min = 28 if tf == "15m" else 25
+            if current_adx < _adx_entry_min:
                 return None
 
             # ② 成交量確認：極低量（< 40% 均量）才硬擋，其餘進入評分懲罰
@@ -1367,10 +1368,10 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             #              門檻 ≥ 25 會把所有初段突破訊號都攔掉；降至 20 兼顧初段與防噪。
             #   1h+    → HTF=4H/1D，等待更強確認，維持 ≥ 25。
             # ──────────────────────────────────────────────────
-            # 15m/30m → HTF=1H：原門檻 20，提高至 23。
-            # 1H ADX 20-22 屬於極弱趨勢，此時 15m 的交叉極易是假突破。
-            # 1h+ → HTF=4H/1D：維持 25（業界標準）。
-            _htf_adx_min = 23 if tf in ("15m", "30m") else 25
+            # 所有時框統一 HTF ADX 門檻 ≥ 25（業界標準）。
+            # 15m/30m 之前降至 23，但日誌顯示 1H ADX 23-24 時小週期假突破率仍高，
+            # 提回 25 讓大週期進入明確趨勢後才允許小週期進場。
+            _htf_adx_min = 25
             if not aligned:
                 return None   # 逆 HTF 趨勢，硬擋
             if htf_adx < _htf_adx_min:
@@ -1804,8 +1805,9 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
         atr     = float(c['ATR'])
         avg_vol = float(df['vol'].iloc[-22:-2].mean())
 
-        # ① ADX 必須在盤整範圍（15-28）；太亂 < 15 不做，趨勢 > 28 改走趨勢策略
-        if adx < 15 or adx > 28:
+        # ① ADX 必須在盤整範圍（18-28）；太亂 < 18 不做，趨勢 > 28 改走趨勢策略
+        # 原下限 15 過低：ADX 15-17 屬於過渡期市場，支撐/壓力位不穩定，假反彈多
+        if adx < 18 or adx > 28:
             return None
 
         # ② 識別區間邊界（需多次觸及確認）
@@ -2039,8 +2041,9 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         ema89   = float(c['EMA89'])
         avg_vol = float(df['vol'].iloc[-22:-2].mean())
 
-        # ① ADX 20-40：趨勢末段；太弱（盤整）由區間策略處理，太強（趨勢中）由趨勢策略處理
-        if adx < 20 or adx > 40:
+        # ① ADX 20-36：趨勢末段；太弱（盤整）由區間策略處理，太強（趨勢中）由趨勢策略處理
+        # 原上限 40→36：日誌顯示 ADX > 35 的背離幾乎全是假反轉，強趨勢會直接繼續延伸
+        if adx < 20 or adx > 36:
             return None
 
         # ② 找最近兩個擺動高點 / 兩個擺動低點（在最近 40 根裡，n=2 側翼確認）
@@ -2072,7 +2075,7 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         if sh:
             old_h, new_h = sh[0], sh[1]
             price_higher = new_h[1] > old_h[1] * 1.002          # 價格確實更高
-            rsi_lower    = new_h[2] < old_h[2] - 2.0            # RSI 卻更低（背離至少 2pt）
+            rsi_lower    = new_h[2] < old_h[2] - 3.0            # RSI 卻更低（背離至少 3pt，2pt 易是雜訊）
             vol_shrink   = new_h[3] < old_h[3] * 0.92           # 量縮 8% 以上
             if price_higher and rsi_lower and vol_shrink:
                 direction = "空"
@@ -2083,7 +2086,7 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         if sl_pts and direction is None:
             old_l, new_l = sl_pts[0], sl_pts[1]
             price_lower  = new_l[1] < old_l[1] * 0.998
-            rsi_higher   = new_l[2] > old_l[2] + 2.0
+            rsi_higher   = new_l[2] > old_l[2] + 3.0  # 背離至少 3pt，2pt 易是雜訊
             vol_shrink   = new_l[3] < old_l[3] * 0.92
             if price_lower and rsi_higher and vol_shrink:
                 direction = "多"
@@ -2167,7 +2170,7 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
 
         # 映射（背離策略上限 82）
         win_rate = min(82, max(0, int(raw * 0.9)))
-        if win_rate < 62:
+        if win_rate < 64:    # 原 62→64：背離本是逆勢，低品質訊號期望值接近負值
             return None
 
         leverage = score_to_leverage(win_rate, max_leverage, signal_type='divergence')
@@ -3233,10 +3236,13 @@ def analyze_position(pos):
     entry = pos['entry']
     sl    = pos['sl']
     tp1   = pos['tp1']
-    # 安全取值：tp2/tp3 可能因舊持倉或 tp_count=1 而為 None，fallback 到合理估算值
-    _tp1  = tp1
-    tp2   = pos.get('tp2') or (_tp1 + (_tp1 - entry) * 1.5)
-    tp3   = pos.get('tp3') or (_tp1 + (_tp1 - entry) * 2.5)
+    # 安全取值：tp2/tp3 可能因舊持倉或 tp_count=1 而為 None
+    # fallback 改用 SL 距離（= 實際風險單位）推算，比任意乘以 TP1 距離更有結構意義
+    _tp1     = tp1
+    _sl_risk = abs(entry - sl)   # 一個風險單位 R
+    _dir_m   = 1 if dir == "多" else -1
+    tp2   = pos.get('tp2') or round(_tp1 + _dir_m * _sl_risk * 1.0, 8)   # TP1 + 1R
+    tp3   = pos.get('tp3') or round(_tp1 + _dir_m * _sl_risk * 2.0, 8)   # TP1 + 2R
 
     _tf_str = pos.get('tf', '1H')
     if "15M" in _tf_str:
