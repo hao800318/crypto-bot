@@ -1920,6 +1920,49 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
         win_rate  = min(80, max(0, int(raw * 0.8)))
         leverage  = score_to_leverage(win_rate, max_leverage, signal_type='range')
 
+        # ── 微時框斐波那契匯流確認 ──
+        # 區間邊界觸及後，用更細時框（5m/15m）的 Fib 回撤位確認進場點是否有結構依據。
+        # 支撐觸及 + 小時框 Fib 0.618 → 進場位有雙重結構共鳴，品質大幅提升。
+        # 注意：這裡是評分加成，不是硬過濾，避免區間訊號因 Fib 計算失敗而大量流失。
+        _MICRO_TF_MAP = {"15m": "5m", "30m": "5m", "1h": "15m", "4h": "15m", "1d": "30m"}
+        _micro_tf_key = _MICRO_TF_MAP.get(tf, "15m")
+        _micro_bar    = _TF_BAR.get(_micro_tf_key, "15m")
+        _fib_lbl_r    = None
+        _fib_near_r   = False
+        _fib_bonus_r  = 0
+        _fib_label_r  = ""
+        try:
+            _m_url = (f"{BASE_URL}/api/v5/market/candles"
+                      f"?instId={asset}&bar={_micro_bar}&limit=100")
+            _m_res = requests.get(_m_url, timeout=2.0).json()
+            if _m_res.get('code') == '0' and len(_m_res.get('data', [])) >= 50:
+                df_m = pd.DataFrame(_m_res['data'],
+                                    columns=['ts','open','high','low','close',
+                                             'vol','volCcy','volCcyQuote','state'])
+                for _mc in ['open','high','low','close','vol']:
+                    df_m[_mc] = df_m[_mc].astype(float)
+                df_m = df_m.iloc[::-1].reset_index(drop=True)
+                _fib_lbl_r, _, _fib_near_r, _ = get_fibonacci_context(
+                    df_m, price, direction)
+                if _fib_near_r and _fib_lbl_r in ('0.382', '0.618'):
+                    _fib_bonus_r = 10
+                    _fib_label_r = f"📐Fib{_fib_lbl_r}({_micro_tf_key.upper()})匯流"
+                elif _fib_near_r and _fib_lbl_r == '0.500':
+                    _fib_bonus_r = 7
+                    _fib_label_r = f"📐Fib{_fib_lbl_r}({_micro_tf_key.upper()})匯流"
+                elif _fib_near_r and _fib_lbl_r == '0.786':
+                    _fib_bonus_r = 5
+                    _fib_label_r = f"📐Fib{_fib_lbl_r}({_micro_tf_key.upper()})匯流"
+                elif _fib_near_r:
+                    _fib_bonus_r = 2
+                    _fib_label_r = f"📐Fib{_fib_lbl_r}({_micro_tf_key.upper()})附近"
+        except Exception:
+            _fib_bonus_r = 0
+        if _fib_bonus_r:
+            raw      += _fib_bonus_r
+            win_rate  = min(80, max(0, int(raw * 0.8)))
+            leverage  = score_to_leverage(win_rate, max_leverage, signal_type='range')
+
         tf_label = _TF_LABEL.get(tf, tf.upper())
         dir_tag  = "支撐做多" if direction == "多" else "壓力做空"
         tf_tag   = f"{tf_label}區間{dir_tag}"
@@ -1938,6 +1981,8 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
             entry_desc += f"  |  {_poc_label_r}"
         if _fvg_label_r:
             entry_desc += f"  |  {_fvg_label_r}"
+        if _fib_label_r:
+            entry_desc += f"  |  {_fib_label_r}"
 
         # 主力動向（輕量取得，用於推播顯示完整度）
         try:
@@ -2126,8 +2171,18 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         if float(c['vol']) > avg_vol * 1.8:
             return None
 
-        # ⑥ SL/TP 使用 K 線結構水位
+        # ⑥ SL/TP：先用 K 線結構水位定基礎，再嘗試 Fib 擴展線覆蓋
         sl_price, tp1, tp2, tp3 = find_market_structure_levels(df, price, direction, atr)
+
+        # ── 優先使用 Fib 擴展線設定 TP（背離→轉折後延伸目標更有結構依據）──
+        # 市場結構 TP 通常只量到前一個支撐/壓力位（距離偏短，盈虧比偏低）。
+        # Fib 擴展線（1.272 / 1.618 / 2.0）從最近 A→B 擺動推算，
+        # 背離後的反轉往往能追蹤到這些延伸位，大幅提升期望盈虧比。
+        _fib_ext_d = get_fibonacci_extension(df, price, direction, sl_price)
+        _tp_src_d  = ""
+        if _fib_ext_d is not None:
+            tp1, tp2, tp3, _ = _fib_ext_d
+            _tp_src_d = "📐Fib擴展(1.272/1.618/2.0)"
 
         # ── 盈虧比強制門檻：背離策略最低 1.5:1 ──
         # 背離是逆勢進場，止損通常放在結構高/低點之上，距離較大。
@@ -2145,6 +2200,25 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
                     tp1, tp2, tp3 = tp2, tp3, tp3 - _ext_d
             else:
                 return None   # 背離訊號 R:R 不足，拒絕
+
+        # ── 斐波那契進場區間確認（硬過濾）──
+        # 背離必須發生在 Fib 關鍵回撤位附近，否則反轉沒有結構依據，假突破率極高。
+        # 0.618 / 0.786：深度回撤，最強反轉區（主力往往在此洗盤後翻轉）
+        # 0.382 / 0.500：淺度回撤，結構存在但偏弱，仍允許但評分較低
+        # 不在任何 Fib 位附近：強制拒絕——進場區間沒有 Fib 支撐，缺乏結構依據
+        _fib_lbl_d, _fib_px_d, _fib_near_d, _fib_dist_d = get_fibonacci_context(
+            df, price, direction)
+        if not _fib_near_d:
+            return None   # 背離不在任何 Fib 回撤位附近，拒絕
+        if _fib_lbl_d in ('0.618', '0.786'):
+            _fib_bonus_d = 15   # 深度回撤 Fib 背離，最高品質反轉點
+            _fib_label_d = f"📐Fib{_fib_lbl_d}背離區(深度回撤)"
+        elif _fib_lbl_d == '0.500':
+            _fib_bonus_d = 8
+            _fib_label_d = f"📐Fib{_fib_lbl_d}背離區(中位)"
+        else:   # 0.382 / 0.236
+            _fib_bonus_d = 5
+            _fib_label_d = f"📐Fib{_fib_lbl_d}背離區(淺回撤)"
 
         # ── 評分 ──
         # RSI 背離幅度（越大越確信）
@@ -2166,7 +2240,7 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         else:
             extreme_score = max(0, 40 - rsi) * 0.8
 
-        raw = rsi_score + wick_score + extreme_score
+        raw = rsi_score + wick_score + extreme_score + _fib_bonus_d
 
         # 映射（背離策略上限 82）
         win_rate = min(82, max(0, int(raw * 0.9)))
@@ -2196,6 +2270,10 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         entry_desc = (f"⚡ {tf_tag}  {div_desc}  |  "
                       f"現價 {format_price(price)}  RSI {rsi:.0f}  ADX {adx:.0f}  "
                       f"止損 {format_price(sl_price)}  TP {format_price(tp1)} / {format_price(tp2)}")
+        if _fib_label_d:
+            entry_desc += f"  |  {_fib_label_d}"
+        if _tp_src_d:
+            entry_desc += f"  |  {_tp_src_d}"
         if _poc_label_d:
             entry_desc += f"  |  {_poc_label_d}"
         if _fvg_label_d:
