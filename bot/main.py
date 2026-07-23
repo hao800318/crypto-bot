@@ -2135,8 +2135,9 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         sh = swing_highs_list[-2:] if len(swing_highs_list) >= 2 else []
         sl_pts = swing_lows_list[-2:] if len(swing_lows_list) >= 2 else []
 
-        direction = None
-        div_desc  = ""
+        direction     = None
+        div_desc      = ""
+        _is_div_signal = False   # True=經典背離(路徑A)，False=Fib極端RSI(路徑B)
 
         # ③-A 頂背離：新高 > 舊高，但 RSI 新高 < RSI 舊高，且量縮
         if sh:
@@ -2145,7 +2146,8 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             rsi_lower    = new_h[2] < old_h[2] - 3.0            # RSI 卻更低（背離至少 3pt，2pt 易是雜訊）
             vol_shrink   = new_h[3] < old_h[3] * 0.92           # 量縮 8% 以上
             if price_higher and rsi_lower and vol_shrink:
-                direction = "空"
+                direction      = "空"
+                _is_div_signal = True
                 div_desc  = (f"頂背離：前高 {old_h[1]:.4g}(RSI {old_h[2]:.0f}) → "
                              f"新高 {new_h[1]:.4g}(RSI {new_h[2]:.0f})，量縮 {(1-new_h[3]/old_h[3])*100:.0f}%")
 
@@ -2156,15 +2158,17 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             rsi_higher   = new_l[2] > old_l[2] + 3.0  # 背離至少 3pt，2pt 易是雜訊
             vol_shrink   = new_l[3] < old_l[3] * 0.92
             if price_lower and rsi_higher and vol_shrink:
-                direction = "多"
+                direction      = "多"
+                _is_div_signal = True
                 div_desc  = (f"底背離：前低 {old_l[1]:.4g}(RSI {old_l[2]:.0f}) → "
                              f"新低 {new_l[1]:.4g}(RSI {new_l[2]:.0f})，量縮 {(1-new_l[3]/old_l[3])*100:.0f}%")
 
-        # ③-C HTF Fib 超賣 / 超買替代路徑（路徑 B）
+        # ③-C HTF Fib 極端 RSI 替代路徑（路徑 B）
         # 沒有形成兩點標準背離，但同時滿足：
-        #   (1) HTF（1H）Fib 0.618 / 0.786 深度回撤位附近（大結構有依據）
-        #   (2) 小時框 RSI < 30（超賣）做多 / RSI > 70（超買）做空
-        # → 允許進場，等同「底部 Fib 插針 + 超賣確認」組合
+        #   多頭：價格跌到 HTF 0.618/0.786 支撐後反彈 + RSI < 30（超賣力竭）
+        #   空頭：價格反彈至 HTF 0.618/0.786 壓力後受壓 + RSI > 70（超買力竭）
+        # 說明：空頭 Fib 是「從高點拉到低點後，0.618 在上方作壓力」
+        #       多頭 Fib 是「從低點拉到高點後，0.618 在上方回撤為支撐」
         if direction is None and df_htf_d is not None:
             _htf_fib_lbl_long, _, _htf_fib_near_long, _ = get_fibonacci_context(
                 df_htf_d, price, "多")
@@ -2173,15 +2177,17 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             if (_htf_fib_near_long
                     and _htf_fib_lbl_long in ('0.618', '0.786')
                     and rsi < 30):
-                direction = "多"
-                div_desc  = (f"HTF{_htf_bar_d}Fib{_htf_fib_lbl_long}超賣進場"
-                             f"(RSI {rsi:.0f})")
+                direction      = "多"
+                _is_div_signal = False
+                div_desc  = (f"HTF{_htf_bar_d}Fib{_htf_fib_lbl_long}支撐+超賣"
+                             f"(RSI {rsi:.0f}<30)")
             elif (_htf_fib_near_short
                     and _htf_fib_lbl_short in ('0.618', '0.786')
                     and rsi > 70):
-                direction = "空"
-                div_desc  = (f"HTF{_htf_bar_d}Fib{_htf_fib_lbl_short}超買進場"
-                             f"(RSI {rsi:.0f})")
+                direction      = "空"
+                _is_div_signal = False
+                div_desc  = (f"HTF{_htf_bar_d}Fib{_htf_fib_lbl_short}壓力+超買"
+                             f"(RSI {rsi:.0f}>70)")
 
         if direction is None:
             return None
@@ -2266,15 +2272,17 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             _fib_df_src, price, direction)
         if not _fib_near_d:
             return None   # 背離不在任何 HTF Fib 回撤位附近，拒絕
+        # 標籤方向感知：多頭=價格跌到支撐，空頭=價格反彈到壓力
+        _fib_zone_tag = "支撐區" if direction == "多" else "壓力區"
         if _fib_lbl_d in ('0.618', '0.786'):
-            _fib_bonus_d = 15   # 深度回撤 Fib 背離，最高品質反轉點
-            _fib_label_d = f"📐Fib{_fib_lbl_d}背離區(深度回撤)"
+            _fib_bonus_d = 15
+            _fib_label_d = f"📐HTFFib{_fib_lbl_d}{_fib_zone_tag}(深度)"
         elif _fib_lbl_d == '0.500':
             _fib_bonus_d = 8
-            _fib_label_d = f"📐Fib{_fib_lbl_d}背離區(中位)"
+            _fib_label_d = f"📐HTFFib{_fib_lbl_d}{_fib_zone_tag}(中位)"
         else:   # 0.382 / 0.236
             _fib_bonus_d = 5
-            _fib_label_d = f"📐Fib{_fib_lbl_d}背離區(淺回撤)"
+            _fib_label_d = f"📐HTFFib{_fib_lbl_d}{_fib_zone_tag}(淺)"
 
         # ── 評分 ──
         # RSI 背離幅度（越大越確信）
@@ -2320,7 +2328,11 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         leverage  = score_to_leverage(win_rate, max_leverage, signal_type='divergence')
 
         tf_label = _TF_LABEL.get(tf, tf.upper())
-        dir_tag  = "頂背離做空" if direction == "空" else "底背離做多"
+        if _is_div_signal:
+            dir_tag = "頂背離做空" if direction == "空" else "底背離做多"
+        else:
+            # 路徑B：Fib 極端 RSI，標籤反映真實進場邏輯
+            dir_tag = "Fib壓力做空" if direction == "空" else "Fib支撐做多"
         tf_tag   = f"{tf_label}{dir_tag}"
 
         entry_desc = (f"⚡ {tf_tag}  {div_desc}  |  "
