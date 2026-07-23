@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 # ==================== 🔑 1. Telegram 設定 ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-SCAN_INTERVAL_MINUTES = 30
+SCAN_INTERVAL_MINUTES = 10
 
 BASE_URL = "https://www.okx.com"
 _tick_size_map: dict = {}   # inst_id → tickSz float，由 get_all_okx_swap_assets() 填充
