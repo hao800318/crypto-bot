@@ -430,8 +430,8 @@ def get_fibonacci_extension(df, entry, direction, sl):
 
     多頭：A = 最近擺動低點，B = 最近擺動高點（突破點）
           擴展目標 = B + (B-A) × ratio
-          1.272 擴展 ≈ 保守 TP1
-          1.618 擴展 ≈ 積極 TP2
+          1.0   延伸 ≈ 保守 TP1（等距量測）
+          1.618 延伸 ≈ 積極 TP2（黃金比例）
 
     空頭：A = 最近擺動高點，B = 最近擺動低點（跌破點）
           擴展目標 = B - (A-B) × ratio
@@ -465,10 +465,10 @@ def get_fibonacci_extension(df, entry, direction, sl):
             rng = b_px - a_px
             if rng < entry * 0.005:   # 擺動幅度 < 0.5%，無意義
                 return None
-            # 擴展線：從 B 向上延伸
-            tp1_fib = round(b_px + rng * 0.272, 8)   # 1.272 擴展
-            tp2_fib = round(b_px + rng * 0.618, 8)   # 1.618 擴展
-            tp3_fib = round(b_px + rng * 1.000, 8)   # 2.0   擴展
+            # 擴展線：從 B 向上延伸（標準 Fib 大趨勢延伸）
+            tp1_fib = round(b_px + rng * 1.000, 8)   # 1.0   延伸（等距量測）
+            tp2_fib = round(b_px + rng * 1.618, 8)   # 1.618 延伸（黃金比例）
+            tp3_fib = round(b_px + rng * 2.618, 8)   # 2.618 延伸（黃金比例平方）
             # 確認 TP 在 entry 上方（防止擺動點選到進場點之前）
             if tp1_fib <= entry or tp2_fib <= tp1_fib:
                 return None
@@ -482,10 +482,10 @@ def get_fibonacci_extension(df, entry, direction, sl):
             rng = a_px - b_px
             if rng < entry * 0.005:
                 return None
-            # 擴展線：從 B 向下延伸
-            tp1_fib = round(b_px - rng * 0.272, 8)   # 1.272 擴展
-            tp2_fib = round(b_px - rng * 0.618, 8)   # 1.618 擴展
-            tp3_fib = round(b_px - rng * 1.000, 8)   # 2.0   擴展
+            # 擴展線：從 B 向下延伸（標準 Fib 大趨勢延伸）
+            tp1_fib = round(b_px - rng * 1.000, 8)   # 1.0   延伸
+            tp2_fib = round(b_px - rng * 1.618, 8)   # 1.618 延伸
+            tp3_fib = round(b_px - rng * 2.618, 8)   # 2.618 延伸
             if tp1_fib >= entry or tp2_fib >= tp1_fib:
                 return None
 
@@ -1459,7 +1459,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 entry_price  = current_ma8
                 anchor_label = f"MA8={format_price(current_ma8)}"
 
-            # ⑦ SL / TP：Fibonacci 框架優先（SL=0.786回撤 / TP=1.272/1.618/2.0延伸）
+            # ⑦ SL / TP：Fibonacci 框架優先（SL=0.786回撤 / TP=1.0/1.618/2.618延伸）
             # 先備好市場結構 SL 作後備（Fib 計算失敗或 SL 無效時使用）
             sl_ms, _ms_tp1, _ms_tp2, _ms_tp3 = find_market_structure_levels(
                 df, entry_price, direction, current_atr)
@@ -1469,7 +1469,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             _tp_source = ""
             if _fib_ext is not None:
                 tp1, tp2, tp3, _fib_rng, _sl_fib = _fib_ext
-                _tp_source = "📐Fib擴展(1.272/1.618/2.0)"
+                _tp_source = "📐Fib延伸(1.0/1.618/2.618)"
 
                 # ── SL 改用 Fib 0.786 回撤位（與 TP 同一波段，R:R 更真實）──
                 _fib_sl_dist = abs(entry_price - _sl_fib)
@@ -2261,13 +2261,13 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
 
         # ── 優先使用 Fib 擴展線設定 TP（背離→轉折後延伸目標更有結構依據）──
         # 市場結構 TP 通常只量到前一個支撐/壓力位（距離偏短，盈虧比偏低）。
-        # Fib 擴展線（1.272 / 1.618 / 2.0）從最近 A→B 擺動推算，
+        # Fib 擴展線（1.0 / 1.618 / 2.618）從最近 A→B 擺動推算，
         # 背離後的反轉往往能追蹤到這些延伸位，大幅提升期望盈虧比。
         _fib_ext_d = get_fibonacci_extension(df, price, direction, sl_price)
         _tp_src_d  = ""
         if _fib_ext_d is not None:
             tp1, tp2, tp3, _, _ = _fib_ext_d
-            _tp_src_d = "📐Fib擴展(1.272/1.618/2.0)"
+            _tp_src_d = "📐Fib延伸(1.0/1.618/2.618)"
 
         # ── 盈虧比強制門檻：背離策略最低 1.5:1 ──
         # 背離是逆勢進場，止損通常放在結構高/低點之上，距離較大。
@@ -2603,7 +2603,7 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
     空頭三步：對稱反向。
 
     SL = 流動性獵取最低點（掃高最高點）之外 0.3%
-    TP = Fib 擴展 1.272 / 1.618 / 2.0
+    TP = Fib 延伸 1.0 / 1.618 / 2.618
     """
     bar_param = _TF_BAR.get(tf, "1H")
     url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={bar_param}&limit=200"
