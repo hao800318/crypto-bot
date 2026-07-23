@@ -500,7 +500,22 @@ def get_fibonacci_extension(df, entry, direction, sl):
             else:
                 return None
 
-        return tp1_fib, tp2_fib, tp3_fib, round(rng, 8)
+        # ── Fib 0.786 回撤止損（與 TP 延伸線使用同一波段，SL/TP 框架一致）──
+        # 多頭：SL = B（波段高點）往下量 0.786 回撤位再下移 0.2% 緩衝
+        # 空頭：SL = B（波段低點）往上量 0.786 回撤位再上移 0.2% 緩衝
+        _BUF = 0.002
+        if direction == "多":
+            sl_fib = round((b_px - rng * 0.786) * (1 - _BUF), 8)
+            # 安全：若進場已穿越 0.786，退而使用波段低點 A 下方
+            if sl_fib >= entry:
+                sl_fib = round(a_px * (1 - _BUF), 8)
+        else:
+            sl_fib = round((b_px + rng * 0.786) * (1 + _BUF), 8)
+            # 安全：若進場已穿越 0.786，退而使用波段高點 A 上方
+            if sl_fib <= entry:
+                sl_fib = round(a_px * (1 + _BUF), 8)
+
+        return tp1_fib, tp2_fib, tp3_fib, round(rng, 8), sl_fib
 
     except Exception:
         return None
@@ -1444,24 +1459,35 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 entry_price  = current_ma8
                 anchor_label = f"MA8={format_price(current_ma8)}"
 
-            # ⑦ SL：從 K 線擺動結構推導（entry 後方最近支撐/壓力，跌破訊號失效）
-            sl_price, _ms_tp1, _ms_tp2, _ms_tp3 = find_market_structure_levels(
+            # ⑦ SL / TP：Fibonacci 框架優先（SL=0.786回撤 / TP=1.272/1.618/2.0延伸）
+            # 先備好市場結構 SL 作後備（Fib 計算失敗或 SL 無效時使用）
+            sl_ms, _ms_tp1, _ms_tp2, _ms_tp3 = find_market_structure_levels(
                 df, entry_price, direction, current_atr)
 
-            # ── TP：優先使用 Fibonacci 擴展線（1.272 / 1.618 / 2.0）──
-            # 擺動結構 TP 目標往往是「最近壓力位」（0.5-1R），盈虧比偏低。
-            # Fib 擴展線從最近 A→B 擺動推算，自然落在 1.272R / 1.618R 以上，
-            # 符合「突破回踩」後的真實市場延伸目標。
-            _fib_ext = get_fibonacci_extension(df, entry_price, direction, sl_price)
+            # ── Fib 擴展線同時帶回 0.786 回撤 SL，確保 SL/TP 使用同一波段框架 ──
+            _fib_ext = get_fibonacci_extension(df, entry_price, direction, sl_ms)
             _tp_source = ""
             if _fib_ext is not None:
-                tp1, tp2, tp3, _fib_rng = _fib_ext
-                _tp_source = f"📐Fib擴展(1.272/1.618/2.0)"
+                tp1, tp2, tp3, _fib_rng, _sl_fib = _fib_ext
+                _tp_source = "📐Fib擴展(1.272/1.618/2.0)"
+
+                # ── SL 改用 Fib 0.786 回撤位（與 TP 同一波段，R:R 更真實）──
+                _fib_sl_dist = abs(entry_price - _sl_fib)
+                _sl_side_ok  = (_sl_fib > entry_price if direction == "空"
+                                else _sl_fib < entry_price)
+                _max_sl = current_atr * 8   # 硬上限：不超過 8 倍 ATR（防異常寬 SL）
+                _min_sl = current_atr * 0.5  # 硬下限：至少半根 ATR
+                if _sl_side_ok and _min_sl <= _fib_sl_dist <= _max_sl:
+                    sl_price = round_to_tick(_sl_fib, asset)
+                else:
+                    # 進場已穿越 0.786 或 SL 距離異常 → 回退市場結構 SL
+                    sl_price = sl_ms
             else:
-                # Fib 擴展計算失敗（擺動點不足），降回擺動結構 TP
+                # Fib 擴展計算失敗（擺動點不足）→ 降回擺動結構 SL/TP
+                sl_price = sl_ms
                 tp1, tp2, tp3 = _ms_tp1, _ms_tp2, _ms_tp3
                 _tp_source = "📊擺動結構"
-                # 保留舊版 R:R 硬門檻（Fib 無法計算時的安全網）
+                # R:R 安全網（擺動結構 TP 可能偏近）
                 _risk_dist = abs(entry_price - sl_price)
                 _tp1_dist  = abs(tp1 - entry_price)
                 if _tp1_dist < _risk_dist * 1.5:
@@ -2240,7 +2266,7 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         _fib_ext_d = get_fibonacci_extension(df, price, direction, sl_price)
         _tp_src_d  = ""
         if _fib_ext_d is not None:
-            tp1, tp2, tp3, _ = _fib_ext_d
+            tp1, tp2, tp3, _, _ = _fib_ext_d
             _tp_src_d = "📐Fib擴展(1.272/1.618/2.0)"
 
         # ── 盈虧比強制門檻：背離策略最低 1.5:1 ──
@@ -2725,7 +2751,7 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
                     entry_price = round_to_tick(current_price, asset)
                     _fib_ext = get_fibonacci_extension(df, float(entry_price), "多", float(sl_price))
                     if _fib_ext:
-                        tp1, tp2, tp3, _ = _fib_ext
+                        tp1, tp2, tp3, _, _ = _fib_ext
                     else:
                         _r = float(entry_price) - float(sl_price)
                         tp1 = entry_price + _r * 1.5
@@ -2847,7 +2873,7 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
                     entry_price = round_to_tick(current_price, asset)
                     _fib_ext = get_fibonacci_extension(df, float(entry_price), "空", float(sl_price))
                     if _fib_ext:
-                        tp1, tp2, tp3, _ = _fib_ext
+                        tp1, tp2, tp3, _, _ = _fib_ext
                     else:
                         _r = float(sl_price) - float(entry_price)
                         tp1 = float(entry_price) - _r * 1.5
