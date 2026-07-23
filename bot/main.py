@@ -2256,23 +2256,33 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         if float(c['vol']) > avg_vol * 1.8:
             return None
 
-        # ⑥ SL/TP：先用 K 線結構水位定基礎，再嘗試 Fib 擴展線覆蓋
-        sl_price, tp1, tp2, tp3 = find_market_structure_levels(df, price, direction, atr)
+        # ⑥ SL/TP：Fibonacci 框架優先（SL=0.786回撤 / TP=1.0/1.618/2.618延伸）
+        # 先備好市場結構 SL/TP 作後備
+        sl_ms_d, tp1, tp2, tp3 = find_market_structure_levels(df, price, direction, atr)
 
-        # ── 優先使用 Fib 擴展線設定 TP（背離→轉折後延伸目標更有結構依據）──
-        # 市場結構 TP 通常只量到前一個支撐/壓力位（距離偏短，盈虧比偏低）。
-        # Fib 擴展線（1.0 / 1.618 / 2.618）從最近 A→B 擺動推算，
-        # 背離後的反轉往往能追蹤到這些延伸位，大幅提升期望盈虧比。
-        _fib_ext_d = get_fibonacci_extension(df, price, direction, sl_price)
+        # ── SL 改用 Fib 0.786 回撤位（與 TP 延伸線使用同一波段，框架一致）──
+        # 背離進場點通常在 0.618/0.786 Fib 附近；若價格穿越 0.786 反向則反轉失敗
+        _fib_ext_d = get_fibonacci_extension(df, price, direction, sl_ms_d)
         _tp_src_d  = ""
         if _fib_ext_d is not None:
-            tp1, tp2, tp3, _, _ = _fib_ext_d
+            tp1, tp2, tp3, _, _sl_fib_d = _fib_ext_d
             _tp_src_d = "📐Fib延伸(1.0/1.618/2.618)"
 
+            _fib_sl_dist_d = abs(price - _sl_fib_d)
+            _sl_side_ok_d  = (_sl_fib_d > price if direction == "空"
+                              else _sl_fib_d < price)
+            _max_sl_d = atr * 8
+            _min_sl_d = atr * 0.5
+            if _sl_side_ok_d and _min_sl_d <= _fib_sl_dist_d <= _max_sl_d:
+                sl_price = _sl_fib_d
+            else:
+                sl_price = sl_ms_d   # 進場已穿越 0.786 → 回退結構 SL
+        else:
+            sl_price = sl_ms_d
+
         # ── 盈虧比強制門檻：背離策略最低 1.5:1 ──
-        # 背離是逆勢進場，止損通常放在結構高/低點之上，距離較大。
-        # TP1 若不足 1.5R，整筆交易期望值接近負值。
-        # 同樣策略：先嘗試升格 TP2；仍不足則拒絕。
+        # 背離是逆勢進場，TP1 若不足 1.5R，整筆期望值接近負值。
+        # 先嘗試升格 TP2；仍不足則拒絕。
         _risk_d = abs(price - sl_price)
         _tp1_d  = abs(tp1 - price)
         if _tp1_d < _risk_d * 1.5:
