@@ -1459,45 +1459,46 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 entry_price  = current_ma8
                 anchor_label = f"MA8={format_price(current_ma8)}"
 
-            # ⑦ SL / TP：Fibonacci 框架優先（SL=0.786回撤 / TP=1.0/1.618/2.618延伸）
-            # 先備好市場結構 SL 作後備（Fib 計算失敗或 SL 無效時使用）
-            sl_ms, _ms_tp1, _ms_tp2, _ms_tp3 = find_market_structure_levels(
+            # ⑦ SL / TP：TP1=前高/前低（結構水位）| TP2/3/4=Fib延伸 | SL=Fib 0.786回撤
+            # TP1 = 最近擺動高/低點（前高/前低），讓第一止盈有結構錨定
+            sl_ms, tp1, _ms_tp2, _ms_tp3 = find_market_structure_levels(
                 df, entry_price, direction, current_atr)
 
-            # ── Fib 擴展線同時帶回 0.786 回撤 SL，確保 SL/TP 使用同一波段框架 ──
+            # ── Fib 擴展：TP2=1.0 / TP3=1.618 / TP4=2.618（強趨勢啟用）──
+            # 同時回傳 0.786 回撤 SL，SL/TP 使用同一波段框架
             _fib_ext = get_fibonacci_extension(df, entry_price, direction, sl_ms)
             _tp_source = ""
             if _fib_ext is not None:
-                tp1, tp2, tp3, _fib_rng, _sl_fib = _fib_ext
-                _tp_source = "📐Fib延伸(1.0/1.618/2.618)"
+                tp2, tp3, tp4_cand, _fib_rng, _sl_fib = _fib_ext
+                _tp_source = "📐TP1前高低 | TP2/3/4 Fib(1.0/1.618/2.618)"
 
-                # ── SL 改用 Fib 0.786 回撤位（與 TP 同一波段，R:R 更真實）──
+                # ── SL 改用 Fib 0.786 回撤位 ──
                 _fib_sl_dist = abs(entry_price - _sl_fib)
                 _sl_side_ok  = (_sl_fib > entry_price if direction == "空"
                                 else _sl_fib < entry_price)
-                _max_sl = current_atr * 8   # 硬上限：不超過 8 倍 ATR（防異常寬 SL）
-                _min_sl = current_atr * 0.5  # 硬下限：至少半根 ATR
+                _max_sl = current_atr * 8
+                _min_sl = current_atr * 0.5
                 if _sl_side_ok and _min_sl <= _fib_sl_dist <= _max_sl:
                     sl_price = round_to_tick(_sl_fib, asset)
                 else:
-                    # 進場已穿越 0.786 或 SL 距離異常 → 回退市場結構 SL
                     sl_price = sl_ms
             else:
-                # Fib 擴展計算失敗（擺動點不足）→ 降回擺動結構 SL/TP
+                # Fib 計算失敗 → SL/TP 全降回結構水位
                 sl_price = sl_ms
-                tp1, tp2, tp3 = _ms_tp1, _ms_tp2, _ms_tp3
+                tp2, tp3 = _ms_tp2, _ms_tp3
+                tp4_cand = None
                 _tp_source = "📊擺動結構"
-                # R:R 安全網（擺動結構 TP 可能偏近）
+                # R:R 安全網（以 TP2 為第一有效目標判斷）
                 _risk_dist = abs(entry_price - sl_price)
-                _tp1_dist  = abs(tp1 - entry_price)
-                if _tp1_dist < _risk_dist * 1.5:
-                    _tp2_dist = abs(tp2 - entry_price)
-                    if _tp2_dist >= _risk_dist * 1.5:
+                _tp2_dist  = abs(tp2 - entry_price)
+                if _tp2_dist < _risk_dist * 1.5:
+                    _tp3_dist = abs(tp3 - entry_price)
+                    if _tp3_dist >= _risk_dist * 1.5:
                         _ext = abs(tp3 - tp2) if abs(tp3 - tp2) > 0 else _risk_dist
                         if direction == "多":
-                            tp1, tp2, tp3 = tp2, tp3, tp3 + _ext
+                            tp2, tp3 = tp3, tp3 + _ext
                         else:
-                            tp1, tp2, tp3 = tp2, tp3, tp3 - _ext
+                            tp2, tp3 = tp3, tp3 - _ext
                     else:
                         return None   # 擺動結構也無足夠 R:R，拒絕
 
@@ -1537,29 +1538,39 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             win_rate  = score_to_win_rate(score)
             leverage  = score_to_leverage(win_rate, max_leverage)
 
-            # ── 動態 TP 數量：依時框與訊號強度決定幾個止盈目標 ──
-            # 短週期訊號（15m/30m）動能衰減快，保守取利；長週期訊號視強度決定
+            # ── 動態 TP 數量：依時框、訊號強度與趨勢強度（ADX）決定 ──
+            # TP4（2.618）只在大趨勢（ADX ≥ 35）時啟用
+            _adx_strong = current_adx >= 35
             if tf in ("15m", "30m"):
                 tp_count = 2 if score >= 75 else 1
+                tp4 = None   # 短週期不設 TP4
             elif tf == "1h":
-                if score >= 80:    tp_count = 3
-                elif score >= 65:  tp_count = 2
-                else:              tp_count = 1
+                if _adx_strong and score >= 85 and tp4_cand is not None:
+                    tp_count = 4; tp4 = tp4_cand
+                elif score >= 80:    tp_count = 3; tp4 = None
+                elif score >= 65:    tp_count = 2; tp4 = None
+                else:                tp_count = 1; tp4 = None
             else:  # 4h, 1d
-                if score >= 80:    tp_count = 3
-                elif score >= 68:  tp_count = 2
-                else:              tp_count = 1
+                if _adx_strong and score >= 80 and tp4_cand is not None:
+                    tp_count = 4; tp4 = tp4_cand
+                elif score >= 80:    tp_count = 3; tp4 = None
+                elif score >= 68:    tp_count = 2; tp4 = None
+                else:                tp_count = 1; tp4 = None
 
-            # ── 手續費最低保本距離：TP1 < 0.25% 時「TP1後移至開倉止損」必虧 ──
+            # ── 手續費最低保本距離 ──
             _fee_min = entry_price * 0.0025
             if direction == "多":
                 tp1 = max(tp1, round(entry_price + _fee_min, 8))
                 tp2 = max(tp2, round(tp1 + _fee_min, 8))
                 tp3 = max(tp3, round(tp2 + _fee_min, 8))
+                if tp4 is not None:
+                    tp4 = max(tp4, round(tp3 + _fee_min, 8))
             else:
                 tp1 = min(tp1, round(entry_price - _fee_min, 8))
                 tp2 = min(tp2, round(tp1 - _fee_min, 8))
                 tp3 = min(tp3, round(tp2 - _fee_min, 8))
+                if tp4 is not None:
+                    tp4 = min(tp4, round(tp3 - _fee_min, 8))
 
             # ── 進場建議文字（依現價與進場點的偏離程度給出建議）──
             # is_market_entry = True 表示可直接市價進場（現價已貼近或已超過進場點）
@@ -1610,6 +1621,8 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             tp1         = round_to_tick(tp1,         asset)
             tp2         = round_to_tick(tp2,         asset)
             tp3         = round_to_tick(tp3,         asset)
+            if tp4 is not None:
+                tp4     = round_to_tick(tp4,         asset)
             return {
                 "asset":          asset.split('-')[0],
                 "dir":            direction,
@@ -1623,6 +1636,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 "tp1":            tp1,
                 "tp2":            tp2,
                 "tp3":            tp3,
+                "tp4":            tp4,
                 "entry_type":     entry_type,
                 "sentiment_note": sentiment_note,
                 "ls_ratio":       ls_ratio,
@@ -1643,7 +1657,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 "tp_source":        _tp_source,
                 "tp_count":         tp_count,
                 "signal_type":      "trend",
-                "atr_trail":        round(float(current_atr) * 2.5, 8),  # TP3 移動止盈距離 = ATR×2.5
+                "atr_trail":        round(float(current_atr) * 2.5, 8),
                 "price":            current_price,
                 "is_market_entry":  is_market_entry,
             }
@@ -2256,17 +2270,16 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         if float(c['vol']) > avg_vol * 1.8:
             return None
 
-        # ⑥ SL/TP：Fibonacci 框架優先（SL=0.786回撤 / TP=1.0/1.618/2.618延伸）
-        # 先備好市場結構 SL/TP 作後備
-        sl_ms_d, tp1, tp2, tp3 = find_market_structure_levels(df, price, direction, atr)
+        # ⑥ SL/TP：TP1=前高/前低（結構）| TP2/3/4=Fib延伸 | SL=Fib 0.786回撤
+        sl_ms_d, tp1, _ms_tp2_d, _ms_tp3_d = find_market_structure_levels(
+            df, price, direction, atr)
 
-        # ── SL 改用 Fib 0.786 回撤位（與 TP 延伸線使用同一波段，框架一致）──
-        # 背離進場點通常在 0.618/0.786 Fib 附近；若價格穿越 0.786 反向則反轉失敗
+        # ── Fib 擴展：TP2=1.0 / TP3=1.618 / TP4=2.618（強趨勢啟用）──
         _fib_ext_d = get_fibonacci_extension(df, price, direction, sl_ms_d)
         _tp_src_d  = ""
         if _fib_ext_d is not None:
-            tp1, tp2, tp3, _, _sl_fib_d = _fib_ext_d
-            _tp_src_d = "📐Fib延伸(1.0/1.618/2.618)"
+            tp2, tp3, tp4_cand_d, _, _sl_fib_d = _fib_ext_d
+            _tp_src_d = "📐TP1前高低 | TP2/3/4 Fib(1.0/1.618/2.618)"
 
             _fib_sl_dist_d = abs(price - _sl_fib_d)
             _sl_side_ok_d  = (_sl_fib_d > price if direction == "空"
@@ -2276,23 +2289,26 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             if _sl_side_ok_d and _min_sl_d <= _fib_sl_dist_d <= _max_sl_d:
                 sl_price = _sl_fib_d
             else:
-                sl_price = sl_ms_d   # 進場已穿越 0.786 → 回退結構 SL
+                sl_price = sl_ms_d
         else:
             sl_price = sl_ms_d
+            tp2, tp3 = _ms_tp2_d, _ms_tp3_d
+            tp4_cand_d = None
 
-        # ── 盈虧比強制門檻：背離策略最低 1.5:1 ──
-        # 背離是逆勢進場，TP1 若不足 1.5R，整筆期望值接近負值。
-        # 先嘗試升格 TP2；仍不足則拒絕。
+        # ── TP4：ADX ≥ 35 大趨勢才啟用 ──
+        tp4_d = tp4_cand_d if (adx >= 35 and tp4_cand_d is not None) else None
+
+        # ── 盈虧比強制門檻：背離策略最低 1.5:1（以 TP2 為第一目標判斷）──
         _risk_d = abs(price - sl_price)
-        _tp1_d  = abs(tp1 - price)
-        if _tp1_d < _risk_d * 1.5:
-            _tp2_d = abs(tp2 - price)
-            if _tp2_d >= _risk_d * 1.5:
+        _tp2_d  = abs(tp2 - price)
+        if _tp2_d < _risk_d * 1.5:
+            _tp3_d = abs(tp3 - price)
+            if _tp3_d >= _risk_d * 1.5:
                 _ext_d = abs(tp3 - tp2) if abs(tp3 - tp2) > 0 else _risk_d
                 if direction == "多":
-                    tp1, tp2, tp3 = tp2, tp3, tp3 + _ext_d
+                    tp2, tp3 = tp3, tp3 + _ext_d
                 else:
-                    tp1, tp2, tp3 = tp2, tp3, tp3 - _ext_d
+                    tp2, tp3 = tp3, tp3 - _ext_d
             else:
                 return None   # 背離訊號 R:R 不足，拒絕
 
@@ -2390,6 +2406,7 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             funding_rate_d, ls_ratio_d = 0.0, 1.0
         sentiment_note_d, _ = build_sentiment_note(direction, funding_rate_d, ls_ratio_d)
 
+        _tp_count_d = 4 if (adx >= 35 and tp4_d is not None) else 3
         return {
             "asset":          asset.split('-')[0],
             "dir":            direction,
@@ -2403,11 +2420,10 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             "tp1":            tp1,
             "tp2":            tp2,
             "tp3":            tp3,
+            "tp4":            tp4_d,
             "adx":            round(adx, 1),
             "rsi":            round(rsi, 1),
             "entry_type":     entry_desc,
-            # 空單：signal_price 略高於 entry → 突破空模式（等低點跌至 entry 填單）
-            # 多單：signal_price 略低於 entry → 突破多模式（等高點升至 entry 填單）
             "signal_price":   price * 1.0002 if direction == "空" else price * 0.9998,
             "signal_type":    "divergence",
             "div_desc":       div_desc,
@@ -2415,7 +2431,9 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             "ls_ratio":       ls_ratio_d,
             "entry_fr":       round(funding_rate_d * 100, 4),
             "vol_confirmed":  True,
-            "tf_note":        div_desc,   # 背離描述作為 tf_note 備用
+            "tf_note":        div_desc,
+            "tp_count":       _tp_count_d,
+            "tp_source":      _tp_src_d,
             "poc_price":      _poc_price_d,
             "poc_label":      _poc_label_d,
             "fvg_lo":         _fvg_lo_d,
@@ -2785,6 +2803,7 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
                         "tf": f"{tf_label}SMC", "order_type": "SMC流動性單",
                         "score": sc, "entry": entry_price,
                         "sl": sl_price, "tp1": tp1, "tp2": tp2, "tp3": tp3,
+                        "tp4": None,
                         "entry_type": f"🏦 {tf_label} SMC多｜掃低反轉｜{_loc}｜CHoCH確認",
                         "sentiment_note": "", "ls_ratio": 1.0,
                         "adx": round(current_adx, 1), "vol_confirmed": True,
@@ -2792,8 +2811,8 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
                         "fib_level": "", "fib_price": None, "fib_near": False, "fib_dist": None,
                         "poc_price": None, "poc_label": "",
                         "fvg_lo": _fvg_lo, "fvg_hi": _fvg_hi, "fvg_label": _fvg_label,
-                        "candle_pattern": "", "tp_source": "📐Fib擴展" if _fib_ext else "📊ATR",
-                        "tp_count": 3 if sc >= 65 else 2,
+                        "candle_pattern": "", "tp_source": "📐Fib延伸" if _fib_ext else "📊ATR",
+                        "tp_count": (4 if current_adx >= 35 else 3) if sc >= 65 else 2,
                         "signal_type": "smc",
                         "atr_trail": round(float(current_atr) * 2.5, 8),
                         "price": current_price, "is_market_entry": True,
@@ -2906,6 +2925,7 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
                         "tf": f"{tf_label}SMC", "order_type": "SMC流動性單",
                         "score": sc, "entry": entry_price,
                         "sl": sl_price, "tp1": tp1, "tp2": tp2, "tp3": tp3,
+                        "tp4": tp3 if (current_adx >= 35 and _fib_ext) else None,
                         "entry_type": f"🏦 {tf_label} SMC空｜掃高反轉｜{_loc}｜CHoCH確認",
                         "sentiment_note": "", "ls_ratio": 1.0,
                         "adx": round(current_adx, 1), "vol_confirmed": True,
@@ -2913,8 +2933,8 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
                         "fib_level": "", "fib_price": None, "fib_near": False, "fib_dist": None,
                         "poc_price": None, "poc_label": "",
                         "fvg_lo": _fvg_lo, "fvg_hi": _fvg_hi, "fvg_label": _fvg_label,
-                        "candle_pattern": "", "tp_source": "📐Fib擴展" if _fib_ext else "📊ATR",
-                        "tp_count": 3 if sc >= 65 else 2,
+                        "candle_pattern": "", "tp_source": "📐Fib延伸" if _fib_ext else "📊ATR",
+                        "tp_count": (4 if current_adx >= 35 else 3) if sc >= 65 else 2,
                         "signal_type": "smc",
                         "atr_trail": round(float(current_atr) * 2.5, 8),
                         "price": current_price, "is_market_entry": True,
@@ -3425,6 +3445,7 @@ def analyze_position(pos):
     _dir_m   = 1 if dir == "多" else -1
     tp2   = pos.get('tp2') or round(_tp1 + _dir_m * _sl_risk * 1.0, 8)   # TP1 + 1R
     tp3   = pos.get('tp3') or round(_tp1 + _dir_m * _sl_risk * 2.0, 8)   # TP1 + 2R
+    tp4   = pos.get('tp4')   # None when tp_count < 4
 
     _tf_str = pos.get('tf', '1H')
     if "15M" in _tf_str:
@@ -3649,20 +3670,59 @@ def analyze_position(pos):
                           f"現價 <code>{format_price(current_price)}</code>｜<b>建議立即平倉</b>")
             push = True
         # 止盈：用 K 線高點 + 0.05% 確認緩衝（防止 1-pip wick 誤觸）
-        elif effective_high >= tp3 * TP_CONFIRM:
+        elif tp4 is not None and effective_high >= tp4 * TP_CONFIRM:
+            # TP4（2.618 Fib，強趨勢最終目標）達標 → 全倉出場
             status = "🟣 全部止盈"
-            # 補記所有未標記的 TP 旗標（防止直接跳到 TP3 時狀態不一致）
             skipped = []
-            if not pos.get('tp1_hit'):
-                pos['tp1_hit'] = True
-                skipped.append(f"TP1 <code>{format_price(tp1)}</code>")
-            if not pos.get('tp2_hit'):
-                pos['tp2_hit'] = True
-                skipped.append(f"TP2 <code>{format_price(tp2)}</code>")
+            for _tp_lbl, _tp_val, _tp_flag in [
+                    ("TP1", tp1, 'tp1_hit'), ("TP2", tp2, 'tp2_hit'), ("TP3", tp3, 'tp3_hit')]:
+                if not pos.get(_tp_flag):
+                    pos[_tp_flag] = True
+                    skipped.append(f"{_tp_lbl} <code>{format_price(_tp_val)}</code>")
             skip_note = f"（同時穿越 {'、'.join(skipped)}）" if skipped else ""
-            action = (f"🎯 K線高點 {format_price(effective_high)} 已達止盈3 {format_price(tp3)}{skip_note}，"
+            action = (f"🎯 K線高點 {format_price(effective_high)} 已達止盈4(2.618) {format_price(tp4)}{skip_note}，"
                       f"現價 {format_price(current_price)}")
             push = True
+        elif effective_high >= tp3 * TP_CONFIRM:
+            if tp4 is not None and pos.get('tp3_hit'):
+                # TP3 已完成，ATR×2.5 追蹤止損等待 TP4（多頭）
+                _t_dist_t4 = pos.get('atr_trail', 0) or pos.get('trail_dist', entry * 0.015)
+                new_trail_sl = current_price - _t_dist_t4
+                if new_trail_sl > sl:
+                    pos['sl'] = new_trail_sl
+                    sl = new_trail_sl
+                status = "🔵 TP3已完成"
+                action = (f"🎯 剩餘20%移動止盈中，等待TP4 <code>{format_price(tp4)}</code>\n"
+                          f"追蹤止損（ATR×2.5）= <code>{format_price(sl)}</code>，現價 {format_price(current_price)}")
+                push = False
+            elif tp4 is not None and not pos.get('tp3_hit'):
+                # TP3 首次達標（tp_count==4）→ 平倉20%，開始追蹤 TP4
+                pos['tp3_hit'] = True
+                if not pos.get('tp1_hit'): pos['tp1_hit'] = True
+                if not pos.get('tp2_hit'): pos['tp2_hit'] = True
+                _atr_t4 = pos.get('atr_trail', 0)
+                _new_sl_t4 = (current_price - _atr_t4) if _atr_t4 > 0 else tp2
+                _new_sl_t4 = max(_new_sl_t4, tp2)
+                pos['sl'] = _new_sl_t4; sl = _new_sl_t4
+                status = "🔵 止盈3達標"
+                action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈3 <code>{format_price(tp3)}</code>\n"
+                          f"▸ <b>建議平倉20%</b>，止損鎖至TP2 <code>{format_price(sl)}</code>\n"
+                          f"▸ 剩20%等待TP4(2.618) <code>{format_price(tp4)}</code>，啟動移動止盈")
+                push = True
+            else:
+                # tp_count<=3：TP3 是最終目標 → 全倉出場
+                status = "🟣 全部止盈"
+                skipped = []
+                if not pos.get('tp1_hit'):
+                    pos['tp1_hit'] = True
+                    skipped.append(f"TP1 <code>{format_price(tp1)}</code>")
+                if not pos.get('tp2_hit'):
+                    pos['tp2_hit'] = True
+                    skipped.append(f"TP2 <code>{format_price(tp2)}</code>")
+                skip_note = f"（同時穿越 {'、'.join(skipped)}）" if skipped else ""
+                action = (f"🎯 K線高點 {format_price(effective_high)} 已達止盈3 {format_price(tp3)}{skip_note}，"
+                          f"現價 {format_price(current_price)}")
+                push = True
         elif effective_high >= tp2 * TP_CONFIRM:
             if pos.get('tp2_hit'):
                 # TP2 已完成（tp_count==3），ATR×2.5 追蹤止損繼續鎖利剩餘 20%（多頭）
@@ -3849,20 +3909,59 @@ def analyze_position(pos):
                           f"現價 <code>{format_price(current_price)}</code>｜<b>建議立即平倉</b>")
             push = True
         # 止盈：用 K 線低點 + 0.05% 確認緩衝（防止 1-pip wick 誤觸）
-        elif effective_low <= tp3 / TP_CONFIRM:
+        elif tp4 is not None and effective_low <= tp4 / TP_CONFIRM:
+            # TP4（2.618 Fib，強趨勢最終目標）達標 → 全倉出場
             status = "🟣 全部止盈"
-            # 補記所有未標記的 TP 旗標（防止直接跳到 TP3 時狀態不一致）
             skipped = []
-            if not pos.get('tp1_hit'):
-                pos['tp1_hit'] = True
-                skipped.append(f"TP1 <code>{format_price(tp1)}</code>")
-            if not pos.get('tp2_hit'):
-                pos['tp2_hit'] = True
-                skipped.append(f"TP2 <code>{format_price(tp2)}</code>")
+            for _tp_lbl, _tp_val, _tp_flag in [
+                    ("TP1", tp1, 'tp1_hit'), ("TP2", tp2, 'tp2_hit'), ("TP3", tp3, 'tp3_hit')]:
+                if not pos.get(_tp_flag):
+                    pos[_tp_flag] = True
+                    skipped.append(f"{_tp_lbl} <code>{format_price(_tp_val)}</code>")
             skip_note = f"（同時穿越 {'、'.join(skipped)}）" if skipped else ""
-            action = (f"🎯 K線低點 {format_price(effective_low)} 已達止盈3 {format_price(tp3)}{skip_note}，"
+            action = (f"🎯 K線低點 {format_price(effective_low)} 已達止盈4(2.618) {format_price(tp4)}{skip_note}，"
                       f"現價 {format_price(current_price)}")
             push = True
+        elif effective_low <= tp3 / TP_CONFIRM:
+            if tp4 is not None and pos.get('tp3_hit'):
+                # TP3 已完成，ATR×2.5 追蹤止損等待 TP4（空頭）
+                _t_dist_t4_s = pos.get('atr_trail', 0) or pos.get('trail_dist', entry * 0.015)
+                new_trail_sl = current_price + _t_dist_t4_s
+                if new_trail_sl < sl:
+                    pos['sl'] = new_trail_sl
+                    sl = new_trail_sl
+                status = "🔵 TP3已完成"
+                action = (f"🎯 剩餘20%移動止盈中，等待TP4 <code>{format_price(tp4)}</code>\n"
+                          f"追蹤止損（ATR×2.5）= <code>{format_price(sl)}</code>，現價 {format_price(current_price)}")
+                push = False
+            elif tp4 is not None and not pos.get('tp3_hit'):
+                # TP3 首次達標（tp_count==4）→ 平倉20%，開始追蹤 TP4
+                pos['tp3_hit'] = True
+                if not pos.get('tp1_hit'): pos['tp1_hit'] = True
+                if not pos.get('tp2_hit'): pos['tp2_hit'] = True
+                _atr_t4_s = pos.get('atr_trail', 0)
+                _new_sl_t4_s = (current_price + _atr_t4_s) if _atr_t4_s > 0 else tp2
+                _new_sl_t4_s = min(_new_sl_t4_s, tp2)
+                pos['sl'] = _new_sl_t4_s; sl = _new_sl_t4_s
+                status = "🔵 止盈3達標"
+                action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈3 <code>{format_price(tp3)}</code>\n"
+                          f"▸ <b>建議平倉20%</b>，止損鎖至TP2 <code>{format_price(sl)}</code>\n"
+                          f"▸ 剩20%等待TP4(2.618) <code>{format_price(tp4)}</code>，啟動移動止盈")
+                push = True
+            else:
+                # tp_count<=3：TP3 是最終目標 → 全倉出場
+                status = "🟣 全部止盈"
+                skipped = []
+                if not pos.get('tp1_hit'):
+                    pos['tp1_hit'] = True
+                    skipped.append(f"TP1 <code>{format_price(tp1)}</code>")
+                if not pos.get('tp2_hit'):
+                    pos['tp2_hit'] = True
+                    skipped.append(f"TP2 <code>{format_price(tp2)}</code>")
+                skip_note = f"（同時穿越 {'、'.join(skipped)}）" if skipped else ""
+                action = (f"🎯 K線低點 {format_price(effective_low)} 已達止盈3 {format_price(tp3)}{skip_note}，"
+                          f"現價 {format_price(current_price)}")
+                push = True
         elif effective_low <= tp2 / TP_CONFIRM:
             if pos.get('tp2_hit'):
                 # TP2 已完成，ATR×2.5 追蹤止損繼續鎖利剩餘 20%（空頭）
@@ -4992,10 +5091,16 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         elif _tc == 2:
             html_message += f"TP1   {format_price(item['tp1'])}  (平倉50%)\n"
             html_message += f"TP2   {format_price(item['tp2'])}  (平倉50%)\n"
-        else:
+        elif _tc == 3:
             html_message += f"TP1   {format_price(item['tp1'])}  ← 平倉40%｜SL移保本\n"
             html_message += f"TP2   {format_price(item['tp2'])}  ← 平倉40%｜SL鎖TP1\n"
             html_message += f"TP3   {format_price(item['tp3'])}  ← 20%移動止盈(ATR×2.5)\n"
+        else:   # tp_count == 4
+            html_message += f"TP1   {format_price(item['tp1'])}  ← 平倉30%｜SL移保本\n"
+            html_message += f"TP2   {format_price(item['tp2'])}  ← 平倉30%｜SL鎖TP1\n"
+            html_message += f"TP3   {format_price(item['tp3'])}  ← 平倉20%｜SL鎖TP2\n"
+            _tp4_disp = item.get('tp4') or item['tp3']
+            html_message += f"TP4   {format_price(_tp4_disp)}  ← 20%移動止盈(ATR×2.5)\n"
         html_message += "</pre>"
         # ── 分倉操作說明（含費後保本點）──
         if _tc >= 3:
@@ -5005,8 +5110,13 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
                 _sl_be_msg = max(_e_msg, 2 * _e_msg * (1 + _f_msg) / (1 - _f_msg) - _t1_msg)
             else:
                 _sl_be_msg = min(_e_msg, 2 * _e_msg * (1 - _f_msg) / (1 + _f_msg) - _t1_msg)
-            html_message += (f"▸ TP1達標 → <b>平倉40%</b>，止損移至 <code>{format_price(_sl_be_msg)}</code>（保本）\n"
-                             f"▸ TP2達標 → <b>再平倉40%</b>，止損鎖至TP1，剩20%啟動移動止盈\n")
+            if _tc >= 4:
+                html_message += (f"▸ TP1達標 → <b>平倉30%</b>，止損移至 <code>{format_price(_sl_be_msg)}</code>（保本）\n"
+                                 f"▸ TP2達標 → <b>再平倉30%</b>，止損鎖至TP1\n"
+                                 f"▸ TP3達標 → <b>平倉20%</b>，止損鎖至TP2，剩20%啟動移動止盈\n")
+            else:
+                html_message += (f"▸ TP1達標 → <b>平倉40%</b>，止損移至 <code>{format_price(_sl_be_msg)}</code>（保本）\n"
+                                 f"▸ TP2達標 → <b>再平倉40%</b>，止損鎖至TP1，剩20%啟動移動止盈\n")
         elif _tc == 2:
             _f_msg = 0.0005
             _e_msg, _t1_msg = item['entry'], item['tp1']
