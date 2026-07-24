@@ -384,62 +384,44 @@ def find_market_structure_levels(df, entry, direction, atr, n=2):
 
 def get_fibonacci_context(df, entry, direction):
     """
-    找出最近一次明顯擺動（多頭：波低→波高，空頭：波高→波低），
-    計算斐波那契回撤水位（0.236/0.382/0.5/0.618/0.786），
-    回傳最近的關鍵 Fib 水位與距離。
+    純結構 Fib 回撤：全段最高/最低點作為波段起訖，計算回撤水位。
+    不設 K 線視窗限制、不做擺動點確認、不設振幅門檻，純粹看整體趨勢高低點。
+
+    多頭：全段最低點 → 之後最高點，從高點往下量（找回踩支撐）
+    空頭：全段最高點 → 之後最低點，從低點往上量（找反彈壓力）
 
     回傳：(fib_label, fib_price, near_fib, dist_pct)
-        fib_label : str  e.g. "0.618" 或 None（找不到有效擺動時）
+        fib_label : str  e.g. "0.618" 或 None
         fib_price : float
         near_fib  : bool（距入場點 ≤ 1.5%）
         dist_pct  : float
     """
     KEY_FIBS = [0.236, 0.382, 0.500, 0.618, 0.786]
-    N_CONFIRM = 3   # 左右各 3 根確認擺動點
-    LOOKBACK  = 80  # 只看最近 80 根 K 線
-
-    highs = df['high'].values[-LOOKBACK:]
-    lows  = df['low'].values[-LOOKBACK:]
-
-    swing_highs, swing_lows = [], []
-    for i in range(N_CONFIRM, len(highs) - N_CONFIRM):
-        if highs[i] == max(highs[i - N_CONFIRM: i + N_CONFIRM + 1]):
-            swing_highs.append((i, float(highs[i])))
-        if lows[i]  == min(lows[i  - N_CONFIRM: i + N_CONFIRM + 1]):
-            swing_lows.append((i, float(lows[i])))
-
-    if not swing_highs or not swing_lows:
-        return None, None, False, 999.0
 
     try:
         if direction == "多":
-            # 找「波低 → 波高」的最近上行擺動，然後量回撤
-            last_hi_idx, last_hi_px = swing_highs[-1]
-            lows_before = [(i, p) for i, p in swing_lows if i < last_hi_idx]
-            if not lows_before:
+            low_idx  = int(df['low'].idxmin())
+            high_idx = int(df.loc[low_idx:, 'high'].idxmax())
+            swing_lo = float(df.loc[low_idx,  'low'])
+            swing_hi = float(df.loc[high_idx, 'high'])
+            rng = swing_hi - swing_lo
+            if rng <= 0:
                 return None, None, False, 999.0
-            _, swing_lo_px = lows_before[-1]
-            rng = last_hi_px - swing_lo_px
-            if rng < last_hi_px * 0.005:    # 擺動幅度 < 0.5%，無意義
-                return None, None, False, 999.0
-            # 回撤水位：從高點往下量
-            levels = {f"{r:.3f}": last_hi_px - rng * r for r in KEY_FIBS}
+            # 回撤水位：從高點往下量，尋找支撐
+            levels = {f"{r:.3f}": swing_hi - rng * r for r in KEY_FIBS}
         else:
-            # 找「波高 → 波低」的最近下行擺動，然後量反彈
-            last_lo_idx, last_lo_px = swing_lows[-1]
-            highs_before = [(i, p) for i, p in swing_highs if i < last_lo_idx]
-            if not highs_before:
+            high_idx = int(df['high'].idxmax())
+            low_idx  = int(df.loc[high_idx:, 'low'].idxmin())
+            swing_hi = float(df.loc[high_idx, 'high'])
+            swing_lo = float(df.loc[low_idx,  'low'])
+            rng = swing_hi - swing_lo
+            if rng <= 0:
                 return None, None, False, 999.0
-            _, swing_hi_px = highs_before[-1]
-            rng = swing_hi_px - last_lo_px
-            if rng < swing_hi_px * 0.005:
-                return None, None, False, 999.0
-            # 反彈水位：從低點往上量
-            levels = {f"{r:.3f}": last_lo_px + rng * r for r in KEY_FIBS}
+            # 反彈水位：從低點往上量，尋找壓力
+            levels = {f"{r:.3f}": swing_lo + rng * r for r in KEY_FIBS}
     except Exception:
         return None, None, False, 999.0
 
-    # 找最近 Fib 水位
     closest_lbl = min(levels, key=lambda k: abs(levels[k] - entry))
     closest_px  = levels[closest_lbl]
     dist_pct    = abs(closest_px - entry) / entry * 100
@@ -450,92 +432,63 @@ def get_fibonacci_context(df, entry, direction):
 
 def get_fibonacci_extension(df, entry, direction, sl):
     """
-    用最近擺動的 A→B 波段計算 Fibonacci 擴展線作為 TP 目標。
+    純結構 Fib 擴展線：全段最高/最低點作為 A→B 波段，計算延伸 TP 目標。
+    不設 K 線視窗限制、不做擺動點確認、不設振幅門檻，純粹看整體趨勢高低點。
 
-    多頭：A = 最近擺動低點，B = 最近擺動高點（突破點）
-          擴展目標 = B + (B-A) × ratio
-          1.0   延伸 ≈ 保守 TP1（等距量測）
-          1.618 延伸 ≈ 積極 TP2（黃金比例）
+    多頭：A = 全段最低點，B = A 之後最高點
+          TP = B + (B-A) × ratio（1.0 / 1.618 / 2.618）
 
-    空頭：A = 最近擺動高點，B = 最近擺動低點（跌破點）
-          擴展目標 = B - (A-B) × ratio
+    空頭：A = 全段最高點，B = A 之後最低點
+          TP = B - (A-B) × ratio
 
-    回傳 (tp1_fib, tp2_fib, tp3_fib, fib_range) 或 None（找不到有效擺動時）
-    fib_range = 擺動幅度，用於訊號訊息顯示
+    回傳 (tp1_fib, tp2_fib, tp3_fib, fib_range, sl_fib) 或 None
     """
-    N_CONFIRM = 3
-    LOOKBACK  = 60
-    highs = df['high'].values[-LOOKBACK:]
-    lows  = df['low'].values[-LOOKBACK:]
-
-    swing_highs, swing_lows = [], []
-    for i in range(N_CONFIRM, len(highs) - N_CONFIRM):
-        if highs[i] == max(highs[i - N_CONFIRM: i + N_CONFIRM + 1]):
-            swing_highs.append((i, float(highs[i])))
-        if lows[i] == min(lows[i - N_CONFIRM: i + N_CONFIRM + 1]):
-            swing_lows.append((i, float(lows[i])))
-
-    if not swing_highs or not swing_lows:
-        return None
-
     try:
         if direction == "多":
-            # A = 最近擺動低點，B = 最近擺動高點
-            a_idx, a_px = swing_lows[-1]
-            b_candidates = [(i, p) for i, p in swing_highs if i > a_idx]
-            if not b_candidates:
+            a_idx = int(df['low'].idxmin())
+            b_idx = int(df.loc[a_idx:, 'high'].idxmax())
+            a_px  = float(df.loc[a_idx, 'low'])
+            b_px  = float(df.loc[b_idx, 'high'])
+            rng   = b_px - a_px
+            if rng <= 0:
                 return None
-            b_idx, b_px = b_candidates[-1]
-            rng = b_px - a_px
-            if rng < entry * 0.005:   # 擺動幅度 < 0.5%，無意義
-                return None
-            # 擴展線：從 B 向上延伸（標準 Fib 大趨勢延伸）
-            tp1_fib = round(b_px + rng * 1.000, 8)   # 1.0   延伸（等距量測）
-            tp2_fib = round(b_px + rng * 1.618, 8)   # 1.618 延伸（黃金比例）
-            tp3_fib = round(b_px + rng * 2.618, 8)   # 2.618 延伸（黃金比例平方）
-            # 確認 TP 在 entry 上方（防止擺動點選到進場點之前）
+            tp1_fib = round(b_px + rng * 1.000, 8)
+            tp2_fib = round(b_px + rng * 1.618, 8)
+            tp3_fib = round(b_px + rng * 2.618, 8)
             if tp1_fib <= entry or tp2_fib <= tp1_fib:
                 return None
         else:
-            # A = 最近擺動高點，B = 最近擺動低點
-            a_idx, a_px = swing_highs[-1]
-            b_candidates = [(i, p) for i, p in swing_lows if i > a_idx]
-            if not b_candidates:
+            a_idx = int(df['high'].idxmax())
+            b_idx = int(df.loc[a_idx:, 'low'].idxmin())
+            a_px  = float(df.loc[a_idx, 'high'])
+            b_px  = float(df.loc[b_idx, 'low'])
+            rng   = a_px - b_px
+            if rng <= 0:
                 return None
-            b_idx, b_px = b_candidates[-1]
-            rng = a_px - b_px
-            if rng < entry * 0.005:
-                return None
-            # 擴展線：從 B 向下延伸（標準 Fib 大趨勢延伸）
-            tp1_fib = round(b_px - rng * 1.000, 8)   # 1.0   延伸
-            tp2_fib = round(b_px - rng * 1.618, 8)   # 1.618 延伸
-            tp3_fib = round(b_px - rng * 2.618, 8)   # 2.618 延伸
+            tp1_fib = round(b_px - rng * 1.000, 8)
+            tp2_fib = round(b_px - rng * 1.618, 8)
+            tp3_fib = round(b_px - rng * 2.618, 8)
             if tp1_fib >= entry or tp2_fib >= tp1_fib:
                 return None
 
-        # 最終安全檢查：TP1 R:R 需 ≥ 1.5
+        # R:R 安全檢查：TP1 需 ≥ 1.5R，否則嘗試以 TP2 代替
         _risk = abs(entry - sl)
         _rew  = abs(tp1_fib - entry)
         if _risk > 0 and _rew < _risk * 1.5:
-            # TP1 不夠，嘗試直接用 TP2（1.618）作為第一目標
             _rew2 = abs(tp2_fib - entry)
             if _rew2 >= _risk * 1.5:
                 tp1_fib, tp2_fib, tp3_fib = tp2_fib, tp3_fib, tp3_fib
             else:
                 return None
 
-        # ── Fib 0.786 回撤止損（與 TP 延伸線使用同一波段，SL/TP 框架一致）──
-        # 多頭：SL = B（波段高點）往下量 0.786 回撤位再下移 0.2% 緩衝
-        # 空頭：SL = B（波段低點）往上量 0.786 回撤位再上移 0.2% 緩衝
+        # ── SL = Fib 0.786 回撤位（與 TP 框架使用同一波段，SL/TP 框架一致）──
         _BUF = 0.002
         if direction == "多":
             sl_fib = round((b_px - rng * 0.786) * (1 - _BUF), 8)
-            # 安全：若進場已穿越 0.786，退而使用波段低點 A 下方
             if sl_fib >= entry:
                 sl_fib = round(a_px * (1 - _BUF), 8)
         else:
             sl_fib = round((b_px + rng * 0.786) * (1 + _BUF), 8)
-            # 安全：若進場已穿越 0.786，退而使用波段高點 A 上方
             if sl_fib <= entry:
                 sl_fib = round(a_px * (1 + _BUF), 8)
 
