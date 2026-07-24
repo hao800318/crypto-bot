@@ -5278,35 +5278,35 @@ def _fib_structural_swings(df, is_bull, atr, lookback=150, min_move_atr=1.5):
             elif h - cur_val >= threshold:      # 上漲夠大 → 確認這個結構低點
                 confirmed.append((offset + cur_sub_i, cur_val, 'L'))
                 cur_type, cur_val, cur_sub_i = 'H', h, i
-    # cur_type/cur_val/cur_sub_i 是目前還在跑、尚未確認的段 → 不納入
+    # cur_type/cur_val/cur_sub_i 是目前還在跑、尚未完全確認的段
+    # 永遠納入作為「暫定端點」——否則當價格從新高回落時，
+    # 配對邏輯只看到舊的 H→L，完全忽略最新的擺動段
+    confirmed.append((offset + cur_sub_i, cur_val, cur_type))
 
     if len(confirmed) < 2:
-        # 已確認點不足，把當前在跑的段也加進來勉強撐一下
-        confirmed.append((offset + cur_sub_i, cur_val, cur_type))
-        if len(confirmed) < 2:
-            return None
+        return None
 
     # 相鄰 pair 列表：[(p_older, p_newer), ...]
     pairs = list(zip(confirmed[:-1], confirmed[1:]))
 
-    # 結構性波段最小振幅門檻：range 須 ≥ 5×ATR 才算有效結構段
-    # 3×ATR 仍可能讓大趨勢內的 sub-swing 混入；5×ATR 才能確保真正的主結構
-    min_struct_range = atr * 5.0
+    # 結構性波段最小振幅門檻：range 須 ≥ 3×ATR 才算有效結構段
+    # 原本 5×ATR 會讓「新高後正在回落」的最新段被濾掉，導致報告顯示過時的舊擺動
+    min_struct_range = atr * 3.0
 
     def _pick_lh(pair_list):
         """從 L→H pair 清單挑選：優先最近的結構性（≥ 3×ATR）pair；
-        若全部都太小，退而選 range 最大的那個。"""
+        若全部都太小，退而選最近的那個（優先時序而非振幅）。"""
         structural = [(p1, p2) for p1, p2 in pair_list
                       if (p2[1] - p1[1]) >= min_struct_range]
-        chosen = structural[-1] if structural else max(pair_list, key=lambda x: x[1][1] - x[0][1])
+        chosen = structural[-1] if structural else pair_list[-1]
         return chosen
 
     def _pick_hl(pair_list):
         """從 H→L pair 清單挑選：優先最近的結構性（≥ 3×ATR）pair；
-        若全部都太小，退而選 range 最大的那個。"""
+        若全部都太小，退而選最近的那個（優先時序而非振幅）。"""
         structural = [(p1, p2) for p1, p2 in pair_list
                       if (p1[1] - p2[1]) >= min_struct_range]
-        chosen = structural[-1] if structural else max(pair_list, key=lambda x: x[0][1] - x[1][1])
+        chosen = structural[-1] if structural else pair_list[-1]
         return chosen
 
     if is_bull:
