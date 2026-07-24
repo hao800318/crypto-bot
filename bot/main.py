@@ -382,42 +382,82 @@ def find_market_structure_levels(df, entry, direction, atr, n=2):
     return sl, tp1, tp2, tp3
 
 
-def get_fibonacci_context(df, entry, direction):
+def _find_swing_df(df, is_bull, current_price, max_dist_pct=15.0):
     """
-    純結構 Fib 回撤：全段最高/最低點作為波段起訖，計算回撤水位。
-    不設 K 線視窗限制、不做擺動點確認、不設振幅門檻，純粹看整體趨勢高低點。
+    找「最長且 Fib 水位仍在現價 max_dist_pct% 以內」的 K 線視窗。
 
-    多頭：全段最低點 → 之後最高點，從高點往下量（找回踩支撐）
-    空頭：全段最高點 → 之後最低點，從低點往上量（找反彈壓力）
+    策略：從全段資料開始，若最近的 Fib 水位距現價 >max_dist_pct%，
+    依序縮短至 150 → 100 → 60 → 30 根，直到找到有意義的水位為止。
+    這樣可以避免像 MUU 那種 96% 暴跌把 Fib 水位拉到幾百 % 之外。
 
-    回傳：(fib_label, fib_price, near_fib, dist_pct)
-        fib_label : str  e.g. "0.618" 或 None
-        fib_price : float
-        near_fib  : bool（距入場點 ≤ 1.5%）
-        dist_pct  : float
+    回傳：適合用來計算 Fib 的 DataFrame 子集（最多 300 根，最少 30 根）
     """
     KEY_FIBS = [0.236, 0.382, 0.500, 0.618, 0.786]
 
+    for window in [len(df), 150, 100, 60, 30]:
+        td = df.iloc[-window:] if window < len(df) else df
+        if len(td) < 5:
+            continue
+        try:
+            if is_bull:
+                lo_i = int(td['low'].idxmin())
+                hi_i = int(td.loc[lo_i:, 'high'].idxmax())
+                lo, hi = float(td.loc[lo_i, 'low']), float(td.loc[hi_i, 'high'])
+                rng = hi - lo
+                if rng <= 0:
+                    continue
+                lvls = [hi - rng * r for r in KEY_FIBS]
+            else:
+                hi_i = int(td['high'].idxmax())
+                lo_i = int(td.loc[hi_i:, 'low'].idxmin())
+                hi, lo = float(td.loc[hi_i, 'high']), float(td.loc[lo_i, 'low'])
+                rng = hi - lo
+                if rng <= 0:
+                    continue
+                lvls = [lo + rng * r for r in KEY_FIBS]
+
+            nearest = min(abs(lv - current_price) / current_price * 100 for lv in lvls)
+            if nearest <= max_dist_pct:
+                return td
+        except Exception:
+            continue
+
+    return df   # 全部視窗都找不到有意義的水位，退回全段（呼叫方自行處理）
+
+
+def get_fibonacci_context(df, entry, direction):
+    """
+    純結構 Fib 回撤：整體趨勢高低點計算回撤水位。
+    若全段 Fib 水位距入場點 >15%，自動縮短視窗尋找更近的有效水位。
+
+    多頭：最低點 → 之後最高點，從高點往下量（找回踩支撐）
+    空頭：最高點 → 之後最低點，從低點往上量（找反彈壓力）
+
+    回傳：(fib_label, fib_price, near_fib, dist_pct)
+    """
+    KEY_FIBS = [0.236, 0.382, 0.500, 0.618, 0.786]
+    is_bull  = (direction == "多")
+
     try:
-        if direction == "多":
-            low_idx  = int(df['low'].idxmin())
-            high_idx = int(df.loc[low_idx:, 'high'].idxmax())
-            swing_lo = float(df.loc[low_idx,  'low'])
-            swing_hi = float(df.loc[high_idx, 'high'])
+        td = _find_swing_df(df, is_bull, entry)
+
+        if is_bull:
+            low_idx  = int(td['low'].idxmin())
+            high_idx = int(td.loc[low_idx:, 'high'].idxmax())
+            swing_lo = float(td.loc[low_idx,  'low'])
+            swing_hi = float(td.loc[high_idx, 'high'])
             rng = swing_hi - swing_lo
             if rng <= 0:
                 return None, None, False, 999.0
-            # 回撤水位：從高點往下量，尋找支撐
             levels = {f"{r:.3f}": swing_hi - rng * r for r in KEY_FIBS}
         else:
-            high_idx = int(df['high'].idxmax())
-            low_idx  = int(df.loc[high_idx:, 'low'].idxmin())
-            swing_hi = float(df.loc[high_idx, 'high'])
-            swing_lo = float(df.loc[low_idx,  'low'])
+            high_idx = int(td['high'].idxmax())
+            low_idx  = int(td.loc[high_idx:, 'low'].idxmin())
+            swing_hi = float(td.loc[high_idx, 'high'])
+            swing_lo = float(td.loc[low_idx,  'low'])
             rng = swing_hi - swing_lo
             if rng <= 0:
                 return None, None, False, 999.0
-            # 反彈水位：從低點往上量，尋找壓力
             levels = {f"{r:.3f}": swing_lo + rng * r for r in KEY_FIBS}
     except Exception:
         return None, None, False, 999.0
@@ -425,30 +465,30 @@ def get_fibonacci_context(df, entry, direction):
     closest_lbl = min(levels, key=lambda k: abs(levels[k] - entry))
     closest_px  = levels[closest_lbl]
     dist_pct    = abs(closest_px - entry) / entry * 100
-    near_fib    = dist_pct <= 1.5   # ≤ 1.5% 算匯流
+    near_fib    = dist_pct <= 1.5
 
     return closest_lbl, closest_px, near_fib, round(dist_pct, 2)
 
 
 def get_fibonacci_extension(df, entry, direction, sl):
     """
-    純結構 Fib 擴展線：全段最高/最低點作為 A→B 波段，計算延伸 TP 目標。
-    不設 K 線視窗限制、不做擺動點確認、不設振幅門檻，純粹看整體趨勢高低點。
+    純結構 Fib 擴展線：A→B 波段計算延伸 TP 目標。
+    若全段波段 Fib 水位距入場點過遠，自動縮短視窗找更近的有效波段。
 
-    多頭：A = 全段最低點，B = A 之後最高點
-          TP = B + (B-A) × ratio（1.0 / 1.618 / 2.618）
-
-    空頭：A = 全段最高點，B = A 之後最低點
-          TP = B - (A-B) × ratio
+    多頭：A = 最低點，B = A 之後最高點 → TP = B + (B-A) × ratio
+    空頭：A = 最高點，B = A 之後最低點 → TP = B - (A-B) × ratio
 
     回傳 (tp1_fib, tp2_fib, tp3_fib, fib_range, sl_fib) 或 None
     """
+    is_bull = (direction == "多")
     try:
-        if direction == "多":
-            a_idx = int(df['low'].idxmin())
-            b_idx = int(df.loc[a_idx:, 'high'].idxmax())
-            a_px  = float(df.loc[a_idx, 'low'])
-            b_px  = float(df.loc[b_idx, 'high'])
+        td = _find_swing_df(df, is_bull, entry)
+
+        if is_bull:
+            a_idx = int(td['low'].idxmin())
+            b_idx = int(td.loc[a_idx:, 'high'].idxmax())
+            a_px  = float(td.loc[a_idx, 'low'])
+            b_px  = float(td.loc[b_idx, 'high'])
             rng   = b_px - a_px
             if rng <= 0:
                 return None
@@ -458,10 +498,10 @@ def get_fibonacci_extension(df, entry, direction, sl):
             if tp1_fib <= entry or tp2_fib <= tp1_fib:
                 return None
         else:
-            a_idx = int(df['high'].idxmax())
-            b_idx = int(df.loc[a_idx:, 'low'].idxmin())
-            a_px  = float(df.loc[a_idx, 'high'])
-            b_px  = float(df.loc[b_idx, 'low'])
+            a_idx = int(td['high'].idxmax())
+            b_idx = int(td.loc[a_idx:, 'low'].idxmin())
+            a_px  = float(td.loc[a_idx, 'high'])
+            b_px  = float(td.loc[b_idx, 'low'])
             rng   = a_px - b_px
             if rng <= 0:
                 return None
@@ -481,9 +521,9 @@ def get_fibonacci_extension(df, entry, direction, sl):
             else:
                 return None
 
-        # ── SL = Fib 0.786 回撤位（與 TP 框架使用同一波段，SL/TP 框架一致）──
+        # ── SL = Fib 0.786 回撤位（與 TP 框架使用同一波段）──
         _BUF = 0.002
-        if direction == "多":
+        if is_bull:
             sl_fib = round((b_px - rng * 0.786) * (1 - _BUF), 8)
             if sl_fib >= entry:
                 sl_fib = round(a_px * (1 - _BUF), 8)
@@ -5195,39 +5235,40 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
 
 def _fib_structural_swings(df, is_bull, atr=None):
     """
-    純結構最高最低點：找整體趨勢的波段起點與終點。
+    純結構最高最低點：找當前趨勢波段的起訖點。
+    優先用全段資料，若 Fib 水位距現價 >15% 則自動縮短視窗（150→100→60→30 根），
+    避免極端暴跌/暴漲把水位推到無法操作的地方。
 
-    邏輯（極簡）：
-      多頭：全段最低收盤低點 → 之後的最高高點（完整上漲波）
-      空頭：全段最高高點 → 之後的最低低點（完整下跌波）
+    多頭：視窗內最低點 → 之後最高點
+    空頭：視窗內最高點 → 之後最低點
 
-    不設 ATR 門檻、不設 K 線視窗限制、不做 Zigzag 分段。
     回傳 (sl_idx, swing_low, sh_idx, swing_high) 或 None。
     """
     if len(df) < 5:
         return None
 
+    current_price = float(df['close'].iloc[-1])
+    td = _find_swing_df(df, is_bull, current_price)
+
     if is_bull:
-        # 多頭：全段最低點 → 之後出現的最高點
-        low_idx  = int(df['low'].idxmin())
-        sub_high = df.loc[low_idx:]
+        low_idx  = int(td['low'].idxmin())
+        sub_high = td.loc[low_idx:]
         if len(sub_high) < 2:
             return None
-        high_idx    = int(sub_high['high'].idxmax())
-        swing_low   = float(df.loc[low_idx,  'low'])
-        swing_high  = float(df.loc[high_idx, 'high'])
+        high_idx   = int(sub_high['high'].idxmax())
+        swing_low  = float(td.loc[low_idx,  'low'])
+        swing_high = float(td.loc[high_idx, 'high'])
         if swing_high <= swing_low:
             return None
         return low_idx, swing_low, high_idx, swing_high
     else:
-        # 空頭：全段最高點 → 之後出現的最低點
-        high_idx = int(df['high'].idxmax())
-        sub_low  = df.loc[high_idx:]
+        high_idx = int(td['high'].idxmax())
+        sub_low  = td.loc[high_idx:]
         if len(sub_low) < 2:
             return None
-        low_idx     = int(sub_low['low'].idxmin())
-        swing_high  = float(df.loc[high_idx, 'high'])
-        swing_low   = float(df.loc[low_idx,  'low'])
+        low_idx    = int(sub_low['low'].idxmin())
+        swing_high = float(td.loc[high_idx, 'high'])
+        swing_low  = float(td.loc[low_idx,  'low'])
         if swing_high <= swing_low:
             return None
         return low_idx, swing_low, high_idx, swing_high
