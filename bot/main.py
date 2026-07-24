@@ -400,17 +400,17 @@ def _find_swing_df(df, is_bull, current_price, max_dist_pct=15.0):
             continue
         try:
             if is_bull:
-                lo_i = int(td['low'].idxmin())
-                hi_i = int(td.loc[lo_i:, 'high'].idxmax())
-                lo, hi = float(td.loc[lo_i, 'low']), float(td.loc[hi_i, 'high'])
+                lo_i = int(td['close'].idxmin())
+                hi_i = int(td.loc[lo_i:, 'close'].idxmax())
+                lo, hi = float(td.loc[lo_i, 'close']), float(td.loc[hi_i, 'close'])
                 rng = hi - lo
                 if rng <= 0:
                     continue
                 lvls = [hi - rng * r for r in KEY_FIBS]
             else:
-                hi_i = int(td['high'].idxmax())
-                lo_i = int(td.loc[hi_i:, 'low'].idxmin())
-                hi, lo = float(td.loc[hi_i, 'high']), float(td.loc[lo_i, 'low'])
+                hi_i = int(td['close'].idxmax())
+                lo_i = int(td.loc[hi_i:, 'close'].idxmin())
+                hi, lo = float(td.loc[hi_i, 'close']), float(td.loc[lo_i, 'close'])
                 rng = hi - lo
                 if rng <= 0:
                     continue
@@ -442,19 +442,19 @@ def get_fibonacci_context(df, entry, direction):
         td = _find_swing_df(df, is_bull, entry)
 
         if is_bull:
-            low_idx  = int(td['low'].idxmin())
-            high_idx = int(td.loc[low_idx:, 'high'].idxmax())
-            swing_lo = float(td.loc[low_idx,  'low'])
-            swing_hi = float(td.loc[high_idx, 'high'])
+            low_idx  = int(td['close'].idxmin())
+            high_idx = int(td.loc[low_idx:, 'close'].idxmax())
+            swing_lo = float(td.loc[low_idx,  'close'])
+            swing_hi = float(td.loc[high_idx, 'close'])
             rng = swing_hi - swing_lo
             if rng <= 0:
                 return None, None, False, 999.0
             levels = {f"{r:.3f}": swing_hi - rng * r for r in KEY_FIBS}
         else:
-            high_idx = int(td['high'].idxmax())
-            low_idx  = int(td.loc[high_idx:, 'low'].idxmin())
-            swing_hi = float(td.loc[high_idx, 'high'])
-            swing_lo = float(td.loc[low_idx,  'low'])
+            high_idx = int(td['close'].idxmax())
+            low_idx  = int(td.loc[high_idx:, 'close'].idxmin())
+            swing_hi = float(td.loc[high_idx, 'close'])
+            swing_lo = float(td.loc[low_idx,  'close'])
             rng = swing_hi - swing_lo
             if rng <= 0:
                 return None, None, False, 999.0
@@ -485,10 +485,10 @@ def get_fibonacci_extension(df, entry, direction, sl):
         td = _find_swing_df(df, is_bull, entry)
 
         if is_bull:
-            a_idx = int(td['low'].idxmin())
-            b_idx = int(td.loc[a_idx:, 'high'].idxmax())
-            a_px  = float(td.loc[a_idx, 'low'])
-            b_px  = float(td.loc[b_idx, 'high'])
+            a_idx = int(td['close'].idxmin())
+            b_idx = int(td.loc[a_idx:, 'close'].idxmax())
+            a_px  = float(td.loc[a_idx, 'close'])
+            b_px  = float(td.loc[b_idx, 'close'])
             rng   = b_px - a_px
             if rng <= 0:
                 return None
@@ -498,10 +498,10 @@ def get_fibonacci_extension(df, entry, direction, sl):
             if tp1_fib <= entry or tp2_fib <= tp1_fib:
                 return None
         else:
-            a_idx = int(td['high'].idxmax())
-            b_idx = int(td.loc[a_idx:, 'low'].idxmin())
-            a_px  = float(td.loc[a_idx, 'high'])
-            b_px  = float(td.loc[b_idx, 'low'])
+            a_idx = int(td['close'].idxmax())
+            b_idx = int(td.loc[a_idx:, 'close'].idxmin())
+            a_px  = float(td.loc[a_idx, 'close'])
+            b_px  = float(td.loc[b_idx, 'close'])
             rng   = a_px - b_px
             if rng <= 0:
                 return None
@@ -5251,24 +5251,24 @@ def _fib_structural_swings(df, is_bull, atr=None):
     td = _find_swing_df(df, is_bull, current_price)
 
     if is_bull:
-        low_idx  = int(td['low'].idxmin())
+        low_idx  = int(td['close'].idxmin())
         sub_high = td.loc[low_idx:]
         if len(sub_high) < 2:
             return None
-        high_idx   = int(sub_high['high'].idxmax())
-        swing_low  = float(td.loc[low_idx,  'low'])
-        swing_high = float(td.loc[high_idx, 'high'])
+        high_idx   = int(sub_high['close'].idxmax())
+        swing_low  = float(td.loc[low_idx,  'close'])
+        swing_high = float(td.loc[high_idx, 'close'])
         if swing_high <= swing_low:
             return None
         return low_idx, swing_low, high_idx, swing_high
     else:
-        high_idx = int(td['high'].idxmax())
+        high_idx = int(td['close'].idxmax())
         sub_low  = td.loc[high_idx:]
         if len(sub_low) < 2:
             return None
-        low_idx    = int(sub_low['low'].idxmin())
-        swing_high = float(td.loc[high_idx, 'high'])
-        swing_low  = float(td.loc[low_idx,  'low'])
+        low_idx    = int(sub_low['close'].idxmin())
+        swing_high = float(td.loc[high_idx, 'close'])
+        swing_low  = float(td.loc[low_idx,  'close'])
         if swing_high <= swing_low:
             return None
         return low_idx, swing_low, high_idx, swing_high
