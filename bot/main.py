@@ -145,29 +145,53 @@ def get_market_sentiment(asset):
     return _res['fr'], _res['ls']
 
 def build_sentiment_note(direction, funding_rate, ls_ratio):
-    """根據主力動向生成說明文字與評分加減"""
+    """
+    根據主力動向生成說明文字與評分加減。
+
+    設計邏輯（基於實際敗場統計，敗場均費率 +0.303% vs 勝場 +0.089%）：
+    ─────────────────────────────────────────────────────────────
+    高正費率（≥+0.10%）= 多頭嚴重擁擠 → 多單被清洗概率極高（-25）
+                                        → 空單逆向清洗機會（+12）
+    中等正費率（+0.03~0.10%）+ 多頭方向 = 輕度確認（+8）
+    中等正費率 + 空頭方向 = 輕度阻礙（-5，不完全拒絕）
+    負費率（≤-0.10%）= 空頭嚴重擁擠 → 空單軋空風險（-25）/ 多單機會（+12）
+    負費率（-0.03~-0.10%）+ 空方向 = 確認（+8）
+    逆向費率（一般）= -15（不變）
+    ─────────────────────────────────────────────────────────────
+    """
     fr_pct = funding_rate * 100
     bonus = 0
     if direction == "多":
-        if funding_rate > 0.0001 and ls_ratio >= 1.05:
+        if funding_rate >= 0.0010:   # ≥+0.10%：多頭嚴重擁擠，SL被清洗風險高
+            note = f"🚨 多頭擠倉風險（費率+{fr_pct:.4f}%，多空比{ls_ratio:.2f}）❌ 清洗概率高"
+            bonus = -25
+        elif funding_rate >= 0.0003 and ls_ratio >= 1.05:  # +0.03~0.10% + 方向確認
             note = f"📈 主力偏多（費率+{fr_pct:.4f}%，多空比{ls_ratio:.2f}）✅ 方向確認"
-            bonus = 12
-        elif funding_rate < -0.0001 and ls_ratio < 0.95:
+            bonus = +8   # 從 +12 降低（避免過度確認中等費率）
+        elif funding_rate < -0.0001 and ls_ratio < 0.95:   # 負費率偏空，不利多單
             note = f"⚠️ 主力偏空（費率{fr_pct:.4f}%，多空比{ls_ratio:.2f}）🔻 逆向風險"
             bonus = -15
         else:
             note = f"🔄 主力中性（費率{fr_pct:.4f}%，多空比{ls_ratio:.2f}）"
             bonus = 0
-    else:
-        if funding_rate < -0.0001 and ls_ratio <= 0.95:
+
+    else:  # direction == "空"
+        if funding_rate <= -0.0010:  # ≤-0.10%：空頭嚴重擁擠，軋空風險高
+            note = f"🚨 空頭擠倉風險（費率{fr_pct:.4f}%，多空比{ls_ratio:.2f}）❌ 軋空概率高"
+            bonus = -25
+        elif funding_rate >= 0.0010:  # 高正費率 → 多頭過熱，空頭逆向清洗機會
+            note = f"📉 多頭過熱→空頭機會（費率+{fr_pct:.4f}%，多空比{ls_ratio:.2f}）✅ 擠倉方向"
+            bonus = +12  # 從 -15 翻正（實際數據空頭在此環境獲勝）
+        elif funding_rate >= 0.0003 and ls_ratio > 1.05:  # 中等正費率 + 多頭佔優
+            note = f"⚠️ 主力偏多（費率+{fr_pct:.4f}%，多空比{ls_ratio:.2f}）⚡ 注意逆向"
+            bonus = -5   # 輕度阻礙（不完全拒絕，此環境空單仍有機會）
+        elif funding_rate <= -0.0003 and ls_ratio <= 0.95:  # 負費率 + 空方向確認
             note = f"📉 主力偏空（費率{fr_pct:.4f}%，多空比{ls_ratio:.2f}）✅ 方向確認"
-            bonus = 12
-        elif funding_rate > 0.0001 and ls_ratio > 1.05:
-            note = f"⚠️ 主力偏多（費率+{fr_pct:.4f}%，多空比{ls_ratio:.2f}）🔻 逆向風險"
-            bonus = -15
+            bonus = +8   # 從 +12 降低
         else:
             note = f"🔄 主力中性（費率{fr_pct:.4f}%，多空比{ls_ratio:.2f}）"
             bonus = 0
+
     return note, bonus
 
 # ==================== ⚙️ 4. 市場環境指標（掃描前各取一次）====================
@@ -1405,22 +1429,35 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             btc_bonus = 0
             btc_risk_note = ""
             if _rt == "bear" and direction == "多":
-                btc_bonus     = -12
+                btc_bonus     = -20   # 從 -12 加強：生態鏈偏空仍做多失敗率高
                 btc_risk_note = f" ⚠️{ref_coin}偏空"
             elif _rt == "bull" and direction == "空":
-                btc_bonus     = -12
+                btc_bonus     = -20   # 從 -12 加強
                 btc_risk_note = f" ⚠️{ref_coin}偏多"
             elif _rt == "bull" and direction == "多":
                 btc_bonus     = +5
             elif _rt == "bear" and direction == "空":
                 btc_bonus     = +5
 
-            # ⑥ 全市場資金費率過熱（軟性扣分，保留彈性）
+            # ⑥ 全市場資金費率分層過濾（分三級，加入逆向機會獎勵）
             fr_bonus = 0
-            if market_fr > 0.0005 and direction == "多":
-                fr_bonus = -10   # 多頭過熱
-            elif market_fr < -0.0003 and direction == "空":
-                fr_bonus = -10   # 空頭過熱
+            if direction == "多":
+                if market_fr >= 0.0015:    fr_bonus = -25  # 全市場極端多頭過熱
+                elif market_fr >= 0.0008:  fr_bonus = -18  # 全市場重度多頭
+                elif market_fr >= 0.0003:  fr_bonus = -10  # 全市場輕度多頭
+                elif market_fr <= -0.0008: fr_bonus = +8   # 全市場極端空頭 → 多單逆向機會
+            else:  # 空
+                if market_fr <= -0.0012:   fr_bonus = -25  # 全市場極端空頭過熱
+                elif market_fr <= -0.0006: fr_bonus = -18
+                elif market_fr <= -0.0003: fr_bonus = -10
+                elif market_fr >= 0.0008:  fr_bonus = +8   # 全市場多頭過熱 → 空單逆向機會
+
+            # ── 個幣費率硬封鎖（極端擁擠直接拒絕，不給評分繞過的機會）──
+            # 損場均費率 +0.303%（0.003）→ 設硬門檻於 0.002（0.2%），保留小幅緩衝
+            if funding_rate >= 0.002 and direction == "多":
+                return None  # 個幣費率 ≥+0.20%，多頭嚴重擁擠，拒絕多單
+            if funding_rate <= -0.002 and direction == "空":
+                return None  # 個幣費率 ≤-0.20%，空頭嚴重擁擠，拒絕空單
 
             sentiment_note, sentiment_bonus = build_sentiment_note(direction, funding_rate, ls_ratio)
 
@@ -3052,9 +3089,10 @@ def run_strategy_scan():
     div_signals_raw = div_signals[:]
     div_signals = [s for s in div_signals if s['win_rate'] >= 62]
 
-    # ── SMC 訊號品質門檻（技術分 ≥ 60，無 ADX 硬門檻——SMC 靠結構而非趨勢強度）──
+    # ── SMC 訊號品質門檻（ADX ≥ 20 + 技術分 ≥ 60）──
+    # ADX<20 的市場接近無方向性，CHoCH/流動性獵取後容易假突破回頭（實際敗場：ADX12/ADX17）
     smc_signals.sort(key=lambda x: x['score'], reverse=True)
-    smc_signals = [s for s in smc_signals if s['win_rate'] >= 60]
+    smc_signals = [s for s in smc_signals if s['win_rate'] >= 60 and s['adx'] >= 20]
 
     print(f"   趨勢候選 {len(trend_signals)} 組 | 區間候選 {len(range_signals)} 組 | 背離候選 {len(div_signals)} 組 | SMC候選 {len(smc_signals)} 組")
 
