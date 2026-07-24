@@ -237,7 +237,17 @@ def get_ecosystem_ref_trends() -> dict[str, str]:
     並行取回所有生態鏈參考幣的 1H 趨勢，供掃描器按幣種查表使用。
     回傳範例：{"BTC": "bull", "ETH": "bear", "SOL": "bull", "BNB": "bull", "AVAX": "neutral", ...}
     """
-    ref_coins = {"BTC", "ETH", "SOL", "BNB", "AVAX", "SUI", "NEAR", "TON"}
+    ref_coins = {
+        # 加密生態鏈
+        "BTC", "ETH", "SOL", "BNB", "AVAX", "SUI", "NEAR", "TON",
+        # 股票板塊代表幣
+        "NVDA",   # 半導體 / AI 硬體
+        "MSFT",   # 科技巨頭 / SaaS
+        "TSLA",   # 汽車 / 電動車
+        "MSTR",   # 加密金融股
+        "XAU",    # 貴金屬
+        "UNH",    # 醫療生技
+    }
     with ThreadPoolExecutor(max_workers=len(ref_coins)) as ex:
         futures = {ex.submit(_fetch_one_trend, coin): coin for coin in ref_coins}
         results = {}
@@ -1048,6 +1058,45 @@ _CHAIN_REF: dict[str, str] = {
     "ICP": "BTC", "FIL": "BTC", "APT": "BTC", "TRX": "BTC",
     "HBAR": "BTC", "XLM": "BTC", "VET": "BTC", "EOS": "BTC",
     "THETA": "BTC", "EGLD": "BTC", "FLOW": "BTC", "KSM": "BTC",
+    # ── 股票代幣：半導體（以 NVDA 為板塊領頭）──
+    "NVDA": "NVDA",
+    "AMD": "NVDA", "MU": "NVDA", "MUU": "NVDA",
+    "INTC": "NVDA", "QCOM": "NVDA", "AVGO": "NVDA",
+    "TSM": "NVDA", "ASML": "NVDA", "ARM": "NVDA",
+    "AMAT": "NVDA", "LRCX": "NVDA", "KLAC": "NVDA",
+    "MRVL": "NVDA", "SMCI": "NVDA", "CGNX": "NVDA",
+    "CRDO": "NVDA", "COHR": "NVDA", "CIEN": "NVDA",
+    "WDC": "NVDA", "TSEM": "NVDA", "TTMI": "NVDA", "FLNC": "NVDA",
+    # ── 股票代幣：科技巨頭 / SaaS（以 MSFT 為板塊領頭）──
+    "MSFT": "MSFT",
+    "AAPL": "MSFT", "AMZN": "MSFT", "GOOGL": "MSFT",
+    "META": "MSFT", "NFLX": "MSFT", "ORCL": "MSFT", "CSCO": "MSFT",
+    "CRWD": "MSFT", "PLTR": "MSFT", "TTWO": "MSFT",
+    "TWLO": "MSFT", "DKNG": "MSFT",
+    # ── 股票代幣：AI 公司（技術底層靠 NVDA，以 NVDA 為參考）──
+    "ANTHROPIC": "NVDA", "BARD": "NVDA", "COAI": "NVDA",
+    "CRWV": "NVDA", "ZHIPU": "NVDA",
+    # ── 股票代幣：加密金融股（以 MSTR 為板塊領頭）──
+    "MSTR": "MSTR",
+    "COIN": "MSTR", "HOOD": "MSTR",
+    # ── 股票代幣：汽車 / 電動車（以 TSLA 為板塊領頭）──
+    "TSLA": "TSLA",
+    "RIVN": "TSLA", "HYUNDAI": "TSLA",
+    # ── 股票代幣：醫療生技（以 UNH 為板塊領頭）──
+    "UNH": "UNH",
+    "JNJ": "UNH", "HIMS": "UNH", "OSCR": "UNH",
+    # ── 股票代幣：ETF ──
+    "TQQQ": "MSFT",   # 科技 3× ETF → 科技板塊
+    "IWM": "BTC", "USO": "BTC", "URNM": "BTC", "UVXY": "BTC",
+    # ── 股票代幣：貴金屬（以 XAU 為板塊領頭）──
+    "XAU": "XAU",
+    "XPT": "XAU",
+    # ── 股票代幣：大宗商品 / 太空國防 / 遊戲娛樂 / 金融（fallback BTC）──
+    "CL": "BTC", "XCU": "BTC",
+    "ASTS": "BTC", "LUNR": "BTC",
+    "GME": "BTC",
+    "BREV": "BTC", "CRCL": "BTC",
+    "USAR": "BTC",
 }
 
 # ── 板塊分類表（Sector Map）──────────────────────────────────────────────
