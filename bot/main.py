@@ -5240,101 +5240,44 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
 
 # ==================== 📐 Fib 多級別全市場掃描（附掛 /scan）====================
 
-def _fib_structural_swings(df, is_bull, atr, lookback=150, min_move_atr=1.5):
+def _fib_structural_swings(df, is_bull, atr=None):
     """
-    Zigzag 結構算法，專門抓「上一個兩端都已確認的完整波段」作為 Fib 參考。
+    純結構最高最低點：找整體趨勢的波段起點與終點。
 
-    邏輯：
-      - price 從當前極值反轉 ≥ min_move_atr × ATR 才確認一個結構轉折點
-      - 只用「已確認」的 pivot（不含仍在跑的最新段）
-      - 多頭：抓最近一個已確認 H→L（上一段大跌），Fib 量那段 → 反彈能到哪
-      - 空頭：抓最近一個已確認 L→H（上一段大漲），Fib 量那段 → 回落能到哪
-      - 若找不到反向結構，fallback 用最後兩個已確認 pivot
+    邏輯（極簡）：
+      多頭：全段最低收盤低點 → 之後的最高高點（完整上漲波）
+      空頭：全段最高高點 → 之後的最低低點（完整下跌波）
 
+    不設 ATR 門檻、不設 K 線視窗限制、不做 Zigzag 分段。
     回傳 (sl_idx, swing_low, sh_idx, swing_high) 或 None。
     """
-    threshold = atr * min_move_atr
-    start     = max(0, len(df) - lookback)
-    sub       = df.iloc[start:].reset_index(drop=True)
-    offset    = start
-
-    confirmed: list = []        # 兩端都已確認的結構點 (df_idx, price, 'H'|'L')
-    cur_type  = 'H'
-    cur_val   = float(sub['high'].iloc[0])
-    cur_sub_i = 0
-
-    for i in range(len(sub)):
-        h = float(sub['high'].iloc[i])
-        l = float(sub['low'].iloc[i])
-        if cur_type == 'H':
-            if h >= cur_val:
-                cur_val, cur_sub_i = h, i
-            elif cur_val - l >= threshold:      # 下跌夠大 → 確認這個結構高點
-                confirmed.append((offset + cur_sub_i, cur_val, 'H'))
-                cur_type, cur_val, cur_sub_i = 'L', l, i
-        else:
-            if l <= cur_val:
-                cur_val, cur_sub_i = l, i
-            elif h - cur_val >= threshold:      # 上漲夠大 → 確認這個結構低點
-                confirmed.append((offset + cur_sub_i, cur_val, 'L'))
-                cur_type, cur_val, cur_sub_i = 'H', h, i
-    # cur_type/cur_val/cur_sub_i 是目前還在跑、尚未完全確認的段
-    # 永遠納入作為「暫定端點」——否則當價格從新高回落時，
-    # 配對邏輯只看到舊的 H→L，完全忽略最新的擺動段
-    confirmed.append((offset + cur_sub_i, cur_val, cur_type))
-
-    if len(confirmed) < 2:
+    if len(df) < 5:
         return None
-
-    # 相鄰 pair 列表：[(p_older, p_newer), ...]
-    pairs = list(zip(confirmed[:-1], confirmed[1:]))
-
-    # 結構性波段最小振幅門檻：range 須 ≥ 3×ATR 才算有效結構段
-    # 原本 5×ATR 會讓「新高後正在回落」的最新段被濾掉，導致報告顯示過時的舊擺動
-    min_struct_range = atr * 3.0
-
-    def _pick_lh(pair_list):
-        """從 L→H pair 清單挑選：優先最近的結構性（≥ 3×ATR）pair；
-        若全部都太小，退而選最近的那個（優先時序而非振幅）。"""
-        structural = [(p1, p2) for p1, p2 in pair_list
-                      if (p2[1] - p1[1]) >= min_struct_range]
-        chosen = structural[-1] if structural else pair_list[-1]
-        return chosen
-
-    def _pick_hl(pair_list):
-        """從 H→L pair 清單挑選：優先最近的結構性（≥ 3×ATR）pair；
-        若全部都太小，退而選最近的那個（優先時序而非振幅）。"""
-        structural = [(p1, p2) for p1, p2 in pair_list
-                      if (p1[1] - p2[1]) >= min_struct_range]
-        chosen = structural[-1] if structural else pair_list[-1]
-        return chosen
 
     if is_bull:
-        # 多頭主趨勢 L→H：Fib 從頂點往下量回撤支撐位
-        lh_pairs = [(p1, p2) for p1, p2 in pairs if p1[2] == 'L' and p2[2] == 'H']
-        if lh_pairs:
-            (sl_idx, sl_val, _), (sh_idx, sh_val, _) = _pick_lh(lh_pairs)
-        else:
-            p1, p2 = confirmed[-2], confirmed[-1]
-            if p1[2] == 'L':
-                sl_idx, sl_val, sh_idx, sh_val = p1[0], p1[1], p2[0], p2[1]
-            else:
-                sl_idx, sl_val, sh_idx, sh_val = p2[0], p2[1], p1[0], p1[1]
+        # 多頭：全段最低點 → 之後出現的最高點
+        low_idx  = int(df['low'].idxmin())
+        sub_high = df.loc[low_idx:]
+        if len(sub_high) < 2:
+            return None
+        high_idx    = int(sub_high['high'].idxmax())
+        swing_low   = float(df.loc[low_idx,  'low'])
+        swing_high  = float(df.loc[high_idx, 'high'])
+        if swing_high <= swing_low:
+            return None
+        return low_idx, swing_low, high_idx, swing_high
     else:
-        # 空頭主趨勢 H→L：Fib 從底點往上量反彈阻力位
-        hl_pairs = [(p1, p2) for p1, p2 in pairs if p1[2] == 'H' and p2[2] == 'L']
-        if hl_pairs:
-            (sh_idx, sh_val, _), (sl_idx, sl_val, _) = _pick_hl(hl_pairs)
-        else:
-            p1, p2 = confirmed[-2], confirmed[-1]
-            if p1[2] == 'H':
-                sh_idx, sh_val, sl_idx, sl_val = p1[0], p1[1], p2[0], p2[1]
-            else:
-                sh_idx, sh_val, sl_idx, sl_val = p2[0], p2[1], p1[0], p1[1]
-
-    if sh_idx == sl_idx:
-        return None
-    return sl_idx, sl_val, sh_idx, sh_val
+        # 空頭：全段最高點 → 之後出現的最低點
+        high_idx = int(df['high'].idxmax())
+        sub_low  = df.loc[high_idx:]
+        if len(sub_low) < 2:
+            return None
+        low_idx     = int(sub_low['low'].idxmin())
+        swing_high  = float(df.loc[high_idx, 'high'])
+        swing_low   = float(df.loc[low_idx,  'low'])
+        if swing_high <= swing_low:
+            return None
+        return low_idx, swing_low, high_idx, swing_high
 
 
 def _fib_all_levels_check(inst_id, bar_param="4H"):
@@ -5394,7 +5337,7 @@ def _fib_all_levels_check(inst_id, bar_param="4H"):
         sl_idx, swing_low, sh_idx, swing_high = swings
 
         sw_range = swing_high - swing_low
-        if sw_range < atr * 4.0:    # 振幅太小（< 4×ATR）不足以作為結構性 Fib 參考
+        if sw_range <= 0:
             return None
 
         # 多頭：從趨勢低點量到高點，回撤算支撐；空頭：從趨勢高點量到低點，反彈算阻力
@@ -6012,25 +5955,24 @@ def _fib618_check_asset(inst_id):
         )[['hl','hc','lc']].max(axis=1))
         atr = float(df['TR'].rolling(14).mean().iloc[-1])
 
-        # ── 尋找最近一波擺動：漲勢找「最低→最高」，跌勢找「最高→最低」──
-        window = min(80, len(df))
-        sub    = df.iloc[-window:]
-
+        # ── 純結構最高/最低點：整體趨勢觀察，不限 K 線數量，不設門檻 ──
         if is_bull:
-            # 看多：找近期擺動低點（先低後高），計算回踩 Fib
-            swing_low_idx  = int(sub['low'].idxmin())
-            swing_high_idx = int(sub.loc[swing_low_idx:, 'high'].idxmax())
-            swing_low   = float(sub.loc[swing_low_idx, 'low'])
-            swing_high  = float(sub.loc[swing_high_idx, 'high'])
+            # 看多：全段最低點 → 之後的最高點
+            low_idx        = int(df['low'].idxmin())
+            swing_low_idx  = low_idx
+            swing_high_idx = int(df.loc[low_idx:, 'high'].idxmax())
+            swing_low      = float(df.loc[swing_low_idx,  'low'])
+            swing_high     = float(df.loc[swing_high_idx, 'high'])
         else:
-            # 看空：找近期擺動高點（先高後低），計算反彈 Fib
-            swing_high_idx = int(sub['high'].idxmax())
-            swing_low_idx  = int(sub.loc[swing_high_idx:, 'low'].idxmin())
-            swing_high  = float(sub.loc[swing_high_idx, 'high'])
-            swing_low   = float(sub.loc[swing_low_idx, 'low'])
+            # 看空：全段最高點 → 之後的最低點
+            high_idx       = int(df['high'].idxmax())
+            swing_high_idx = high_idx
+            swing_low_idx  = int(df.loc[high_idx:, 'low'].idxmin())
+            swing_high     = float(df.loc[swing_high_idx, 'high'])
+            swing_low      = float(df.loc[swing_low_idx,  'low'])
 
         sw_range = swing_high - swing_low
-        if sw_range < atr * 4.0:          # 擺動幅度太小，跳過（< 4×ATR 不構成結構性參考）
+        if sw_range <= 0:
             return None
 
         fib618 = swing_high - 0.618 * sw_range
