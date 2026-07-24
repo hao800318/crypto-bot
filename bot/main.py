@@ -3218,7 +3218,9 @@ def record_trade_outcome(pos, outcome, exit_type=None):
 
     # 推算出場類型（若未指定）
     if exit_type is None:
-        if pos.get('tp3_hit'):
+        if pos.get('tp4_hit'):
+            exit_type = "tp4"
+        elif pos.get('tp3_hit'):
             exit_type = "tp3"
         elif pos.get('tp2_hit'):
             exit_type = "tp2"
@@ -3235,35 +3237,55 @@ def record_trade_outcome(pos, outcome, exit_type=None):
     if entry > 0:
         sign = 1 if pos.get('dir') == "多" else -1
         _tgt_map = {
-            "tp3": pos.get('tp3'), "tp2": pos.get('tp2'),
-            "tp1": pos.get('tp1'), "sl":  pos.get('sl'),
-            "breakeven": entry,
+            "tp4": pos.get('tp4'), "tp3": pos.get('tp3'),
+            "tp2": pos.get('tp2'), "tp1": pos.get('tp1'),
+            "sl":  pos.get('sl'),  "breakeven": entry,
         }
         _tgt = _tgt_map.get(exit_type)
         if _tgt:
             pnl_pct = round(sign * (_tgt - entry) / entry * 100, 3)
 
+    # ── 計算輔助統計欄位 ──
+    _sl       = pos.get('sl') or 0
+    _open_t   = pos.get('timestamp', pos.get('signal_time', 0))
+    _now_t    = time.time()
+    _hold_min = round((_now_t - _open_t) / 60, 1) if _open_t > 0 else None
+    _sl_dist_pct = (round(abs(entry - _sl) / entry * 100, 3)
+                    if entry > 0 and _sl > 0 else None)
+
     records.append({
-        "asset":       pos['asset'],
-        "dir":         pos['dir'],
-        "tf":          pos.get('tf', '—'),
-        "signal_type": pos.get('signal_type', 'trend'),
-        "entry":       entry or None,
-        "sl":          pos.get('sl'),
-        "tp1":         pos.get('tp1'),
-        "adx":         pos.get('adx', 0),
-        "score":       pos.get('score', 0),
-        "win_rate":    pos.get('win_rate', 0),
-        "entry_fr":    round(entry_fr * 100, 4),
-        "exit_type":   exit_type,
-        "pnl_pct":     pnl_pct,
-        "outcome":     outcome,
-        "timestamp":   time.time(),
-        "open_time":   pos.get('timestamp', pos.get('signal_time', 0)),
+        "asset":        pos['asset'],
+        "dir":          pos['dir'],
+        "tf":           pos.get('tf', '—'),
+        "signal_type":  pos.get('signal_type', 'trend'),
+        "entry":        entry or None,
+        "sl":           _sl or None,
+        "tp1":          pos.get('tp1'),
+        "adx":          pos.get('adx', 0),
+        "score":        pos.get('score', 0),
+        "win_rate":     pos.get('win_rate', 0),
+        "entry_fr":     round(entry_fr * 100, 4),
+        "exit_type":    exit_type,
+        "pnl_pct":      pnl_pct,
+        "outcome":      outcome,
+        "timestamp":    _now_t,
+        "open_time":    _open_t,
+        # ── 新增維度（敗場原因分析用）──
+        "tp_count":     pos.get('tp_count', 3),
+        "vol_confirmed":pos.get('vol_confirmed', False),
+        "order_type":   pos.get('order_type', ''),
+        "tp_source":    pos.get('tp_source', ''),
+        "hold_mins":    _hold_min,
+        "sl_dist_pct":  _sl_dist_pct,
+        "is_market_entry": pos.get('is_market_entry', True),
+        "leverage":     pos.get('leverage', 0),
     })
     save_stats(records)
     pnl_str = f"  P&L≈{pnl_pct:+.2f}%" if pnl_pct is not None else ""
-    print(f"📊 記錄交易結果：{pos['asset']} {pos['dir']} → {outcome} ({exit_type}){pnl_str}  費率{entry_fr*100:.4f}%")
+    print(f"📊 記錄交易結果：{pos['asset']} {pos['dir']} → {outcome} ({exit_type}){pnl_str}  "
+          f"持倉{_hold_min:.0f}分  SL距{_sl_dist_pct:.2f}%  費率{entry_fr*100:.4f}%"
+          if _hold_min and _sl_dist_pct else
+          f"📊 記錄交易結果：{pos['asset']} {pos['dir']} → {outcome} ({exit_type}){pnl_str}  費率{entry_fr*100:.4f}%")
 
 # 最近一次掃描結果快取（key = asset 如 "ETH"，value = signal dict）
 # 供 /open 指令查詢，不自動加入持倉監控
@@ -3673,6 +3695,7 @@ def analyze_position(pos):
         elif tp4 is not None and effective_high >= tp4 * TP_CONFIRM:
             # TP4（2.618 Fib，強趨勢最終目標）達標 → 全倉出場
             status = "🟣 全部止盈"
+            pos['tp4_hit'] = True   # 標記 TP4 達標（供統計記錄用）
             skipped = []
             for _tp_lbl, _tp_val, _tp_flag in [
                     ("TP1", tp1, 'tp1_hit'), ("TP2", tp2, 'tp2_hit'), ("TP3", tp3, 'tp3_hit')]:
@@ -3912,6 +3935,7 @@ def analyze_position(pos):
         elif tp4 is not None and effective_low <= tp4 / TP_CONFIRM:
             # TP4（2.618 Fib，強趨勢最終目標）達標 → 全倉出場
             status = "🟣 全部止盈"
+            pos['tp4_hit'] = True   # 標記 TP4 達標（供統計記錄用）
             skipped = []
             for _tp_lbl, _tp_val, _tp_flag in [
                     ("TP1", tp1, 'tp1_hit'), ("TP2", tp2, 'tp2_hit'), ("TP3", tp3, 'tp3_hit')]:
@@ -6413,30 +6437,76 @@ def send_daily_journal(chat_id):
         return {"trend": "趨勢", "range": "區間", "divergence": "背離"}.get(
             r.get('signal_type', 'trend'), r.get('signal_type', ''))
 
-    # ── 失效原因分析（單筆敗場）──
+    # ── 失效原因分析（單筆敗場，多維度診斷）──
     def _failure_reason(r):
-        st  = r.get('signal_type', 'trend')
-        tf  = r.get('tf', '')
-        adx = r.get('adx') or 0
+        st       = r.get('signal_type', 'trend')
+        tf       = r.get('tf', '')
+        adx      = r.get('adx') or 0
+        score    = r.get('score') or 0
+        hold_min = r.get('hold_mins')
+        sl_dist  = r.get('sl_dist_pct')     # SL距進場%
+        fr       = r.get('entry_fr') or 0   # 資金費率%
+        vol_ok   = r.get('vol_confirmed', True)
+        reasons  = []
+
+        # ── 1. 超快速反轉（< 15 分鐘出場）──
+        if hold_min is not None and hold_min < 15:
+            reasons.append(f"⚡ 進場後{hold_min:.0f}分即觸SL，疑似假突破/流動性獵取")
+
+        # ── 2. SL 距離分析 ──
+        if sl_dist is not None:
+            if sl_dist < 0.4:
+                reasons.append(f"🎯 SL過緊({sl_dist:.2f}%)，市場正常波動即觸發")
+            elif sl_dist > 3.5:
+                reasons.append(f"⚠️ SL過寬({sl_dist:.2f}%)，虧損金額偏大")
+
+        # ── 3. 成交量未確認 ──
+        if not vol_ok:
+            reasons.append("📉 進場時成交量未確認，動能可能不足")
+
+        # ── 4. ADX 分析（策略相關）──
         if st == 'trend':
-            if '15M' in tf or '超短' in tf:
-                return "超短線(15M)雜訊大，趨勢動能維持時間短，快速反轉"
-            if adx < 30:
-                return f"ADX偏低({adx:.0f})，趨勢方向性不足，進場後趨勢消失"
-            if adx > 55:
-                return "ADX過高，趨勢末段進場，動能耗盡後反轉"
-            return "趨勢中途反轉，建議加強更高時框方向確認"
-        if st == 'range':
+            if '15M' in tf:
+                reasons.append(f"⏱️ 15M超短線雜訊大，趨勢動能維持時間短")
+            if adx < 28:
+                reasons.append(f"📊 ADX={adx:.0f}<28，趨勢方向性不足")
+            elif adx > 58:
+                reasons.append(f"📊 ADX={adx:.0f}>58，趨勢末段進場，動能耗盡前後反轉")
+        elif st == 'range':
             if adx > 35:
-                return f"ADX過高({adx:.0f})，市場已由盤整轉趨勢，區間結構被突破"
-            return "支撐/壓力位被有效突破，盤整結構失效"
-        if st == 'divergence':
-            if adx > 35:
-                return f"強趨勢(ADX {adx:.0f})中的背離往往是假反轉，趨勢繼續延伸"
-            if adx < 20:
-                return f"ADX偏低({adx:.0f})，背離訊號可靠性低，方向性不明"
-            return "背離反轉空間不足，趨勢未完全結束便再度延伸"
-        return "策略條件在出場前發生變化"
+                reasons.append(f"🔀 ADX={adx:.0f}>35，盤整已被趨勢突破，區間結構失效")
+            else:
+                reasons.append("🔀 支撐/壓力位被有效突破，盤整結構失效")
+        elif st == 'divergence':
+            if adx > 38:
+                reasons.append(f"💪 強趨勢(ADX={adx:.0f})中背離常為假反轉，趨勢繼續延伸")
+            elif adx < 20:
+                reasons.append(f"😴 ADX={adx:.0f}<20，背離方向性太弱，雙向均有可能")
+
+        # ── 5. Score 偏低 ──
+        if score < 78:
+            reasons.append(f"🔢 訊號評分{score}偏低，本就屬於邊際交易")
+
+        # ── 6. 資金費率不利 ──
+        if st == 'divergence' or st == 'trend':
+            # 做多而費率>0.05%（多頭過熱）→ 空頭壓力大
+            # 做空而費率<-0.05%（空頭過熱）→ 多頭反彈壓力大
+            _dir = r.get('dir', '')
+            if _dir == '多' and fr > 0.05:
+                reasons.append(f"💸 費率+{fr:.3f}%，多頭過熱，空頭壓力大")
+            elif _dir == '空' and fr < -0.05:
+                reasons.append(f"💸 費率{fr:.3f}%，空頭過熱，多頭反彈壓力大")
+
+        # 若無明確原因，給通用原因
+        if not reasons:
+            if st == 'trend':
+                reasons.append("趨勢中途反轉，建議加強更高時框方向確認")
+            elif st == 'divergence':
+                reasons.append("背離反轉空間不足，趨勢未完全結束便再度延伸")
+            else:
+                reasons.append("策略條件在出場前發生變化")
+
+        return "；".join(reasons[:3])   # 最多顯示 3 個原因
 
     # ── 組合今日概要 ──
     tp_types   = [r.get('exit_type','') for r in wins]
@@ -6570,6 +6640,126 @@ def send_daily_journal(chat_id):
         print(f"❌ 每日交易日誌發送失敗：{e}")
 
 
+def send_loss_analysis(chat_id):
+    """
+    /losses — 最近 20 筆敗場深度分析：
+    每筆顯示幣種/方向/時框/策略/出場/P&L/ADX/score/持倉時長/SL距離/失效原因。
+    末尾附上各失效因子統計（超快反轉次數、SL 過緊/過寬、量能不足、費率不利…）。
+    """
+    _url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    _cid = str(chat_id)
+    try:
+        records = load_stats()
+        losses  = [r for r in records if r.get('outcome') == 'loss']
+        losses.sort(key=lambda r: r.get('timestamp', 0), reverse=True)
+        recent  = losses[:20]
+    except Exception as e:
+        requests.post(_url, json={"chat_id": _cid, "text": f"⚠️ 讀取統計失敗：{e}"}, timeout=10)
+        return
+
+    if not recent:
+        requests.post(_url, json={"chat_id": _cid, "parse_mode": "HTML",
+            "text": "✅ 近期無敗場記錄，繼續保持！"}, timeout=10)
+        return
+
+    la_tz   = pytz.timezone('America/Los_Angeles')
+    now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
+
+    _st_label = {'trend':'趨勢','range':'區間','divergence':'背離','smc':'SMC'}
+    _exit_tag = {
+        'tp4':'TP4🎯','tp3':'TP3🎯','tp2':'TP2✅','tp1':'TP1✅',
+        'sl':'SL❌','breakeven':'保本🛡️','timeout':'逾時⏰','manual':'手動🖐️',
+    }
+
+    msg  = f"🔴 <b>【敗場深度分析】</b>  {now_str} PT\n"
+    msg += f"最近 {len(recent)} 筆敗場（共 {len(losses)} 筆歷史）\n"
+    msg += "─────────────────────────\n"
+
+    # ── 各筆明細 ──
+    for i, r in enumerate(recent, 1):
+        asset = r.get('asset','?')
+        dir_  = r.get('dir','')
+        tf    = r.get('tf','')
+        st    = _st_label.get(r.get('signal_type','trend'), r.get('signal_type',''))
+        et    = _exit_tag.get(r.get('exit_type',''), r.get('exit_type',''))
+        pnl   = r.get('pnl_pct')
+        adx   = r.get('adx') or 0
+        sc    = r.get('score') or 0
+        hold  = r.get('hold_mins')
+        sld   = r.get('sl_dist_pct')
+        fr    = r.get('entry_fr') or 0
+        vol   = r.get('vol_confirmed', True)
+        ts    = r.get('timestamp', 0)
+        dt_s  = datetime.datetime.fromtimestamp(ts, tz=la_tz).strftime('%m/%d %H:%M') if ts else '—'
+
+        pnl_s  = f"{pnl:+.2f}%" if pnl is not None else "—"
+        hold_s = f"{hold:.0f}分" if hold is not None else "—"
+        sld_s  = f"{sld:.2f}%" if sld is not None else "—"
+        fr_s   = f"{fr:+.4f}%" if fr else "—"
+        vol_s  = "" if vol else " ⚡無量"
+
+        msg += (f"<b>{i}.</b> <b>{asset}</b>{dir_} {tf} {st}  {et}  "
+                f"<code>{pnl_s}</code>\n"
+                f"   ADX{adx:.0f} Sc{sc:.0f}  持{hold_s}  SL±{sld_s}  FR{fr_s}{vol_s}\n"
+                f"   📅{dt_s}\n")
+
+    # ── 失效因子統計 ──
+    msg += "─────────────────────────\n"
+    msg += "📌 <b>失效因子統計</b>\n"
+
+    n = len(recent)
+    fast_sl   = sum(1 for r in recent if (r.get('hold_mins') or 999) < 15)
+    tight_sl  = sum(1 for r in recent if (r.get('sl_dist_pct') or 99) < 0.5)
+    wide_sl   = sum(1 for r in recent if (r.get('sl_dist_pct') or 0) > 3.0)
+    no_vol    = sum(1 for r in recent if not r.get('vol_confirmed', True))
+    low_adx   = sum(1 for r in recent
+                    if r.get('signal_type','trend') == 'trend' and (r.get('adx') or 0) < 28)
+    high_adx  = sum(1 for r in recent
+                    if r.get('signal_type','trend') == 'range'  and (r.get('adx') or 0) > 35)
+    low_sc    = sum(1 for r in recent if (r.get('score') or 99) < 78)
+    bad_fr    = sum(1 for r in recent if (
+        (r.get('dir') == '多' and (r.get('entry_fr') or 0) > 0.05) or
+        (r.get('dir') == '空' and (r.get('entry_fr') or 0) < -0.05)
+    ))
+    div_strong = sum(1 for r in recent
+                     if r.get('signal_type','trend') == 'divergence' and (r.get('adx') or 0) > 38)
+
+    factors = [
+        (fast_sl,   f"⚡ 超快速反轉(<15分)：{fast_sl}筆 → 疑似流動性獵取"),
+        (tight_sl,  f"🎯 SL過緊(<0.5%)：{tight_sl}筆 → 建議加寬緩衝"),
+        (wide_sl,   f"⚠️ SL過寬(>3%)：{wide_sl}筆 → R:R惡化"),
+        (no_vol,    f"📉 量能不足：{no_vol}筆 → 動能確認失效"),
+        (low_adx,   f"📊 趨勢ADX<28：{low_adx}筆 → 趨勢動能不足"),
+        (high_adx,  f"🔀 區間ADX>35：{high_adx}筆 → 盤整結構已被趨勢突破"),
+        (low_sc,    f"🔢 評分<78：{low_sc}筆 → 邊際訊號，本就高風險"),
+        (bad_fr,    f"💸 費率不利：{bad_fr}筆 → 費率方向與倉位相反"),
+        (div_strong,f"💪 強趨勢中背離：{div_strong}筆 → 建議ADX>38時跳過背離"),
+    ]
+    any_factor = False
+    for cnt, txt in factors:
+        if cnt > 0:
+            pct = cnt / n * 100
+            msg += f"  {txt}（{pct:.0f}%）\n"
+            any_factor = True
+    if not any_factor:
+        msg += "  （暫無明確規律，繼續積累樣本）\n"
+
+    # ── 策略分布 ──
+    from collections import Counter
+    st_cnt = Counter(r.get('signal_type','trend') for r in recent)
+    st_parts = [f"{_st_label.get(k,k)}×{v}" for k, v in st_cnt.most_common()]
+    msg += f"\n策略分布：{'  '.join(st_parts)}\n"
+
+    if len(msg) > 4000:
+        msg = msg[:3990] + "\n…（訊息過長已截斷）"
+
+    try:
+        requests.post(_url, json={"chat_id": _cid, "text": msg, "parse_mode": "HTML"}, timeout=15)
+        print(f"🔴 敗場分析已發送，共 {len(recent)} 筆")
+    except Exception as e:
+        print(f"❌ send_loss_analysis 失敗：{e}")
+
+
 def export_trade_data(chat_id):
     """
     將完整交易記錄以 JSON 檔案形式透過 Telegram 發送。
@@ -6692,6 +6882,68 @@ def send_stats_report(chat_id):
             if high_fr: msg += f"  費率>+0.03%（多頭過熱）：{len(high_fr)}筆  勝率{_zone_wr(high_fr):.0f}%\n"
             if neut_fr: msg += f"  費率中性（±0.03%）：{len(neut_fr)}筆  勝率{_zone_wr(neut_fr):.0f}%\n"
             if low_fr:  msg += f"  費率<-0.03%（空頭過熱）：{len(low_fr)}筆  勝率{_zone_wr(low_fr):.0f}%\n"
+
+        # ── ADX 分段勝率 ──
+        adx_bins = [
+            ("ADX<25（弱勢）",   lambda r: (r.get('adx') or 0) < 25),
+            ("ADX 25-35（普通）", lambda r: 25 <= (r.get('adx') or 0) < 35),
+            ("ADX 35-50（強勢）", lambda r: 35 <= (r.get('adx') or 0) < 50),
+            ("ADX≥50（極強）",    lambda r: (r.get('adx') or 0) >= 50),
+        ]
+        adx_rows = []
+        for label, fn in adx_bins:
+            grp = [r for r in valid if fn(r)]
+            if len(grp) >= 2:
+                gw = sum(1 for r in grp if r['outcome'] == 'win')
+                adx_rows.append(f"  {label}：{gw}/{len(grp)} ({gw/len(grp)*100:.0f}%)")
+        if adx_rows:
+            msg += "\n<b>📊 ADX 分段勝率：</b>\n" + "\n".join(adx_rows) + "\n"
+
+        # ── score 分段勝率 ──
+        sc_bins = [
+            ("Score<80",        lambda r: (r.get('score') or 0) < 80),
+            ("Score 80-89",     lambda r: 80 <= (r.get('score') or 0) < 90),
+            ("Score≥90（高信心）",lambda r: (r.get('score') or 0) >= 90),
+        ]
+        sc_rows = []
+        for label, fn in sc_bins:
+            grp = [r for r in valid if fn(r)]
+            if len(grp) >= 2:
+                gw = sum(1 for r in grp if r['outcome'] == 'win')
+                sc_rows.append(f"  {label}：{gw}/{len(grp)} ({gw/len(grp)*100:.0f}%)")
+        if sc_rows:
+            msg += "\n<b>🔢 評分分段勝率：</b>\n" + "\n".join(sc_rows) + "\n"
+
+        # ── 持倉時長：勝場 vs 敗場 ──
+        def _avg_hold(lst):
+            vals = [r['hold_mins'] for r in lst
+                    if r.get('hold_mins') is not None and r['hold_mins'] > 0]
+            if not vals: return None
+            return sum(vals) / len(vals)
+        win_hold = _avg_hold(wins)
+        loss_hold = _avg_hold(losses)
+        if win_hold is not None or loss_hold is not None:
+            msg += "\n<b>⏱ 平均持倉時長：</b>\n"
+            if win_hold  is not None: msg += f"  🟢 勝場：{win_hold:.0f} 分鐘\n"
+            if loss_hold is not None: msg += f"  🔴 敗場：{loss_hold:.0f} 分鐘\n"
+
+        # ── SL 距離分析（敗場）──
+        sl_dists = [r['sl_dist_pct'] for r in losses
+                    if r.get('sl_dist_pct') is not None and r['sl_dist_pct'] > 0]
+        if len(sl_dists) >= 2:
+            avg_sl = sum(sl_dists) / len(sl_dists)
+            tight  = sum(1 for v in sl_dists if v < 0.5)
+            wide   = sum(1 for v in sl_dists if v > 3.0)
+            msg += f"\n<b>🎯 敗場 SL 距離：</b>  均={avg_sl:.2f}%"
+            if tight: msg += f"  過緊(<0.5%)×{tight}"
+            if wide:  msg += f"  過寬(>3%)×{wide}"
+            msg += "\n"
+
+        # ── 成交量未確認敗場比例 ──
+        unconf_losses = [r for r in losses if not r.get('vol_confirmed', True)]
+        if unconf_losses:
+            msg += (f"\n⚠️ 敗場中有 <b>{len(unconf_losses)}</b> 筆進場時成交量未確認"
+                    f"（佔敗場 {len(unconf_losses)/len(losses)*100:.0f}%），建議加強量能過濾\n")
 
         msg += "\n<i>數據僅供參考，保持紀律為第一要務。</i>"
         if len(msg) > 4000:
@@ -7163,7 +7415,8 @@ def handle_telegram_updates():
                                 "/unwatch [幣種] — 移除自選監控\n"
                                 "/watching — 查看自選監控清單\n\n"
                                 "📊 <b>統計與備份</b>\n"
-                                "/stats — 查看近 30 天真實交易勝率統計\n"
+                                "/stats — 近 30 天勝率統計（含 ADX/評分/持倉時長分段）\n"
+                                "/losses — 最近 20 筆敗場深度分析（失效因子統計）\n"
                                 "/export_data — 匯出完整交易記錄 JSON（人工備份）\n"
                                 "/resetstats — 清空歷史勝率紀錄，重新開始累積\n\n"
                                 "─────────────────────────\n"
@@ -7247,6 +7500,12 @@ def handle_telegram_updates():
                             t.daemon = True
                             t.start()
 
+                        elif text.lower().startswith("/losses") or text.lower().startswith("/loss"):
+                            print(f"🔴 收到 /losses 指令，執行敗場深度分析")
+                            t = threading.Thread(target=send_loss_analysis, args=(chat_id,))
+                            t.daemon = True
+                            t.start()
+
                         elif text.lower().startswith("/stats"):
                             print(f"📊 收到 /stats 指令，同步執行")
                             send_stats_report(chat_id)
@@ -7276,7 +7535,7 @@ def handle_telegram_updates():
                         elif text.startswith("/") and len(text) > 1:
                             # 通用幣種查詢：/eth /btc /sol /doge 等
                             coin_cmd = text.split()[0].lstrip("/").split("@")[0]
-                            if coin_cmd and coin_cmd.isalpha() and coin_cmd.lower() not in ("open","close","scan","holding","watch","unwatch","watching","stats","resetstats","help","fib618","fib"):
+                            if coin_cmd and coin_cmd.isalpha() and coin_cmd.lower() not in ("open","close","scan","holding","watch","unwatch","watching","stats","resetstats","help","fib618","fib","losses","loss"):
                                 print(f"🔍 收到幣種查詢指令：/{coin_cmd.upper()}")
                                 requests.post(
                                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
