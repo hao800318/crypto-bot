@@ -3737,8 +3737,12 @@ def analyze_position(pos):
     # ── 關鍵：只有 API 成功回傳資料才推進 last_checked_ts ──
     # 若 API 超時回傳 None，保留舊 since_ts，下一輪重新覆蓋同一時段，防止 TP 觸碰被永久跳過
     _candle_api_ok = effective_high is not None
-    effective_high = max(effective_high, current_price) if effective_high is not None else current_price
-    effective_low  = min(effective_low,  current_price) if effective_low  is not None else current_price
+    # ── 重要：不把現價強制合入 K 棒高低點 ──
+    # 原本的 max/min 合入現價會導致「只要現價碰到 SL 就立即觸發」，
+    # 繞過 K 棒收盤確認，造成頻繁誤報保本/止損通知。
+    # 改為：K 棒資料存在時以 K 棒為準；API 失敗才以現價兜底。
+    effective_high = effective_high if effective_high is not None else current_price
+    effective_low  = effective_low  if effective_low  is not None else current_price
     # 原始時框補充：since_ts 與 fill_ts 取較晚者，同樣避免重抓成交 K 棒
     _bar_secs = {"15m": 900, "30m": 1800, "1H": 3600, "4H": 14400, "1D": 86400}
     _bar_dur  = _bar_secs.get(bar, 3600)
@@ -3786,9 +3790,10 @@ def analyze_position(pos):
                           f"✅ TP2 段利潤已鎖定，剩餘倉位保本出場\n"
                           f"<b>⛔ 系統已停止追蹤此倉位</b>")
             elif pos.get('tp1_hit'):
-                # TP1 達標後 SL 已移至進場成本，現在回落至成本 → 保本出場
+                # TP1 達標後 SL 已移至保本或追蹤止損，現在回落 → 鎖利出場
                 status = "🛡️ 回調至保本止損"
-                action = (f"📉 K線低點 <code>{format_price(effective_low)}</code> 回落至保本止損（進場成本）<code>{format_price(sl)}</code>，"
+                _sl_label = "進場成本" if abs(sl - entry) / entry < 0.003 else "追蹤止損"
+                action = (f"📉 K線低點 <code>{format_price(effective_low)}</code> 回落至{_sl_label} <code>{format_price(sl)}</code>，"
                           f"現價 <code>{format_price(current_price)}</code>\n"
                           f"✅ TP1 段利潤已鎖定，剩餘倉位零風險出場\n"
                           f"<b>⛔ 系統已停止追蹤此倉位</b>")
@@ -4026,9 +4031,10 @@ def analyze_position(pos):
                           f"✅ TP2 段利潤已鎖定，剩餘倉位保本出場\n"
                           f"<b>⛔ 系統已停止追蹤此倉位</b>")
             elif pos.get('tp1_hit'):
-                # TP1 達標後 SL 已移至進場成本，現在反彈至成本 → 保本出場
+                # TP1 達標後 SL 已移至保本或追蹤止損，現在反彈 → 鎖利出場
                 status = "🛡️ 回調至保本止損"
-                action = (f"📈 K線高點 <code>{format_price(effective_high)}</code> 反彈至保本止損（進場成本）<code>{format_price(sl)}</code>，"
+                _sl_label_s = "進場成本" if abs(sl - entry) / entry < 0.003 else "追蹤止損"
+                action = (f"📈 K線高點 <code>{format_price(effective_high)}</code> 反彈至{_sl_label_s} <code>{format_price(sl)}</code>，"
                           f"現價 <code>{format_price(current_price)}</code>\n"
                           f"✅ TP1 段利潤已鎖定，剩餘倉位零風險出場\n"
                           f"<b>⛔ 系統已停止追蹤此倉位</b>")
