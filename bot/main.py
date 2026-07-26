@@ -3945,17 +3945,13 @@ def analyze_position(pos):
                 push = True
         elif effective_high >= tp1 * TP_CONFIRM:
             if pos.get('tp1_hit'):
-                # 追蹤止損：TP1 後每次監控都把 SL 往上拉緊鎖利
-                trail_dist = pos.get('trail_dist', entry * 0.015)
-                new_trail_sl = current_price - trail_dist
-                if new_trail_sl > sl:
-                    pos['sl'] = new_trail_sl
-                    sl = new_trail_sl
-                # TP1 已在前次通知，本次靜默監控等待 TP2/TP3
+                # TP1 後 SL 固定在進場成本，不做自動追蹤
+                # 追蹤止損會把 SL 拉高，導致微幅回調就誤觸「保本止損」通知
+                # 改為固定在 entry，只有 TP2 達標後才移至 TP1
                 _tc_now = pos.get('tp_count', 3)
                 _rem_pct = 60 if _tc_now >= 3 else 50
                 status = "🟢 TP1已完成"
-                action = f"剩餘{_rem_pct}%持倉中，等待TP2 <code>{format_price(tp2)}</code>，追蹤止損 {format_price(sl)}，現價 {format_price(current_price)}"
+                action = f"剩餘{_rem_pct}%持倉中，等待TP2 <code>{format_price(tp2)}</code>，保本止損 <code>{format_price(sl)}</code>，現價 {format_price(current_price)}"
                 deteri = check_market_deterioration(inst_id, dir, pos.get('tf','1H'))
                 if deteri:
                     if not pos.get('deteri_alerted'):
@@ -4186,17 +4182,11 @@ def analyze_position(pos):
                 push = True
         elif effective_low <= tp1 / TP_CONFIRM:
             if pos.get('tp1_hit'):
-                # 追蹤止損：TP1 後每次監控都把 SL 往下拉緊鎖利（空頭）
-                trail_dist = pos.get('trail_dist', entry * 0.015)
-                new_trail_sl = current_price + trail_dist
-                if new_trail_sl < sl:
-                    pos['sl'] = new_trail_sl
-                    sl = new_trail_sl
-                # TP1 已在前次通知，本次靜默監控等待 TP2/TP3（空頭）
+                # TP1 後 SL 固定在進場成本，不做自動追蹤（空頭）
                 _tc_now_s = pos.get('tp_count', 3)
                 _rem_pct_s = 60 if _tc_now_s >= 3 else 50
                 status = "🟢 TP1已完成"
-                action = f"剩餘{_rem_pct_s}%持倉中，等待TP2 <code>{format_price(tp2)}</code>，追蹤止損 {format_price(sl)}，現價 {format_price(current_price)}"
+                action = f"剩餘{_rem_pct_s}%持倉中，等待TP2 <code>{format_price(tp2)}</code>，保本止損 <code>{format_price(sl)}</code>，現價 {format_price(current_price)}"
                 deteri = check_market_deterioration(inst_id, dir, pos.get('tf','4H'))
                 if deteri:
                     if not pos.get('deteri_alerted'):
