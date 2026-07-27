@@ -3596,18 +3596,14 @@ def analyze_position(pos):
         # 對齊 K 棒開盤會把訊號發出「之前」的 K 棒價格（例如 4H bar 前 30 分鐘）
         # 誤算進去，導致還沒到進場點就判定已成交。
         fill_since = int(reported_at)
-        # ── 以 1m K 線為主要填單判定，精度高、不受大時框對齊誤差影響 ──
+        # ── 填單判定只用 1m K 棒 ──
+        # 移除原始時框（1H/4H）的補充抓取：大時框單根棒範圍過寬，
+        # 可能在同一棒內同時包含「low ≤ 進場點」和「high ≥ TP1」，
+        # 導致填單和止盈在相鄰兩次監控週期連發，進場根本沒真正碰到就誤判成交。
+        # 1m K 棒 limit=100 = 100 分鐘，足以覆蓋任何正常監控間隔。
         fill_high, fill_low = get_candle_range_since(inst_id, fill_since, '1m', no_margin=True)
-        # ── 原始時框 K 線補充（只納入訊號發出「之後」新開盤的 K 棒）──
-        _fh2, _fl2 = get_candle_range_since(inst_id, fill_since, bar, no_margin=True)
-        if _fh2 is not None:
-            fill_high = max(fill_high, _fh2) if fill_high is not None else _fh2
-        if _fl2 is not None:
-            fill_low  = min(fill_low,  _fl2) if fill_low  is not None else _fl2
-        # 不把 current_price 納入 fill_eff：僅用 K 棒極值做填單判斷
-        # 避免「現價本身就已在進場點另一側」時瞬間誤判已成交
-        fill_eff_high = fill_high  # 純 K 棒最高點（含1m補充）
-        fill_eff_low  = fill_low   # 純 K 棒最低點（含1m補充）
+        fill_eff_high = fill_high  # 純 1m K 棒最高點
+        fill_eff_low  = fill_low   # 純 1m K 棒最低點
 
         # 填單方向判斷：依「訊號時現價 vs 進場點」區分突破 / 回調類型
         #   多頭突破（進場 > signal_price）→ 等價格「漲」到進場：high ≥ entry
