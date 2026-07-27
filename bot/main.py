@@ -6683,146 +6683,120 @@ def send_daily_journal(chat_id):
 
 def send_loss_analysis(chat_id):
     """
-    /losses — 最近 20 筆敗場深度分析：
-    每筆顯示幣種/方向/時框/策略/出場/P&L/ADX/score/持倉時長/SL距離/失效原因。
-    末尾附上各失效因子統計（超快反轉次數、SL 過緊/過寬、量能不足、費率不利…）。
+    /losses — 最近 20 筆敗場深度分析。
+    結構完全對齊 send_stats_report：直接 requests.post，每步 print + HTTP 狀態確認。
     """
     _url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     _cid = str(chat_id)
+    print(f"🔴 send_loss_analysis 開始執行，chat_id={_cid}")
 
-    def _safe_send(text, parse_mode="HTML"):
-        """保底發送：任何異常都靜默忽略"""
-        try:
-            requests.post(_url, json={"chat_id": _cid, "text": text,
-                                      "parse_mode": parse_mode}, timeout=10)
-        except Exception as _se:
-            print(f"❌ _safe_send 失敗：{_se}")
-
+    # ── Step 1: 讀取統計資料 ──
     try:
         records = load_stats()
-        _safe_send(f"🔍 載入統計完成，共 {len(records)} 筆記錄，篩選中...")
         losses  = [r for r in records if r.get('outcome') == 'loss']
         losses.sort(key=lambda r: r.get('timestamp', 0), reverse=True)
         recent  = losses[:20]
-        _safe_send(f"📊 找到 {len(losses)} 筆敗場，準備組裝訊息...")
-    except Exception as e:
-        _safe_send(f"⚠️ 讀取統計失敗：{e}")
+        print(f"🔴 統計資料：總={len(records)}, 敗場={len(losses)}, 取前={len(recent)}")
+    except Exception as ex:
+        print(f"❌ load_stats 失敗: {ex}")
+        requests.post(_url, json={"chat_id": _cid,
+            "text": f"⚠️ 讀取統計檔案失敗：{ex}"}, timeout=10)
         return
 
+    # ── Step 2: 無敗場記錄 ──
     if not recent:
-        _safe_send("✅ 近期無敗場記錄，繼續保持！")
+        requests.post(_url, json={"chat_id": _cid,
+            "text": "✅ 近期無敗場記錄，繼續保持！"}, timeout=10)
+        print("🔴 無敗場記錄，已回覆提示")
         return
 
-    la_tz   = pytz.timezone('America/Los_Angeles')
-    now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
-
-    _st_label = {'trend':'趨勢','range':'區間','divergence':'背離','smc':'SMC'}
-    _exit_tag = {
-        'tp4':'TP4🎯','tp3':'TP3🎯','tp2':'TP2✅','tp1':'TP1✅',
-        'sl':'SL❌','breakeven':'保本🛡️','timeout':'逾時⏰','manual':'手動🖐️',
-    }
-
+    # ── Step 3: 組裝訊息 ──
     try:
-        msg  = f"🔴 <b>【敗場深度分析】</b>  {now_str} PT\n"
-        msg += f"最近 {len(recent)} 筆敗場（共 {len(losses)} 筆歷史）\n"
-        msg += "─────────────────────────\n"
+        from collections import Counter
+        la_tz   = pytz.timezone('America/Los_Angeles')
+        now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
 
-        # ── 各筆明細 ──
+        _st_label = {'trend':'趨勢','range':'區間','divergence':'背離','smc':'SMC'}
+        _exit_tag = {
+            'tp4':'TP4🎯','tp3':'TP3🎯','tp2':'TP2✅','tp1':'TP1✅',
+            'sl':'SL❌','breakeven':'保本🛡️','timeout':'逾時⏰','manual':'手動🖐️',
+        }
+
+        lines = [f"🔴 【敗場深度分析】  {now_str} PT",
+                 f"最近 {len(recent)} 筆敗場（共 {len(losses)} 筆歷史）",
+                 "─────────────────────────"]
+
         for i, r in enumerate(recent, 1):
             asset = r.get('asset','?')
             dir_  = r.get('dir','')
             tf    = r.get('tf','')
             st    = _st_label.get(r.get('signal_type','trend'), r.get('signal_type',''))
-            et    = _exit_tag.get(r.get('exit_type',''), r.get('exit_type',''))
-            pnl   = r.get('pnl_pct')
-            adx   = r.get('adx') or 0
-            sc    = r.get('score') or 0
-            hold  = r.get('hold_mins')
-            sld   = r.get('sl_dist_pct')
-            fr    = r.get('entry_fr') or 0
-            vol   = r.get('vol_confirmed', True)
-            ts    = r.get('timestamp', 0)
-            dt_s  = datetime.datetime.fromtimestamp(ts, tz=la_tz).strftime('%m/%d %H:%M') if ts else '—'
-
+            et    = _exit_tag.get(r.get('exit_type',''), r.get('exit_type','?'))
             try:
-                pnl_s  = f"{float(pnl):+.2f}%" if pnl is not None else "—"
-                hold_s = f"{float(hold):.0f}分" if hold is not None else "—"
-                sld_s  = f"{float(sld):.2f}%" if sld is not None else "—"
-                fr_s   = f"{float(fr):+.4f}%" if fr else "—"
-                adx_s  = f"{float(adx):.0f}"
-                sc_s   = f"{float(sc):.0f}"
+                pnl_s  = f"{float(r.get('pnl_pct')):+.2f}%" if r.get('pnl_pct') is not None else "—"
+                hold_s = f"{float(r.get('hold_mins')):.0f}分" if r.get('hold_mins') is not None else "—"
+                sld_s  = f"{float(r.get('sl_dist_pct')):.2f}%" if r.get('sl_dist_pct') is not None else "—"
+                fr_v   = r.get('entry_fr') or 0
+                fr_s   = f"{float(fr_v):+.4f}%" if fr_v else "—"
+                adx_s  = f"{float(r.get('adx') or 0):.0f}"
+                sc_s   = f"{float(r.get('score') or 0):.0f}"
             except (TypeError, ValueError):
                 pnl_s = hold_s = sld_s = fr_s = "—"
                 adx_s = sc_s = "?"
-            vol_s  = "" if vol else " ⚡無量"
+            vol_s = "" if r.get('vol_confirmed', True) else " 無量"
+            ts    = r.get('timestamp', 0)
+            dt_s  = datetime.datetime.fromtimestamp(ts, tz=la_tz).strftime('%m/%d %H:%M') if ts else "—"
+            lines.append(f"{i}. {asset}{dir_} {tf} {st}  {et}  {pnl_s}")
+            lines.append(f"   ADX{adx_s} Sc{sc_s}  持{hold_s}  SL±{sld_s}  FR{fr_s}{vol_s}")
+            lines.append(f"   {dt_s}")
 
-            msg += (f"<b>{i}.</b> <b>{asset}</b>{dir_} {tf} {st}  {et}  "
-                    f"<code>{pnl_s}</code>\n"
-                    f"   ADX{adx_s} Sc{sc_s}  持{hold_s}  SL±{sld_s}  FR{fr_s}{vol_s}\n"
-                    f"   📅{dt_s}\n")
-
-        # ── 失效因子統計 ──
-        msg += "─────────────────────────\n"
-        msg += "📌 <b>失效因子統計</b>\n"
-
+        # 失效因子統計
         n = len(recent)
-        fast_sl   = sum(1 for r in recent if (r.get('hold_mins') or 999) < 15)
-        tight_sl  = sum(1 for r in recent if (r.get('sl_dist_pct') or 99) < 0.5)
-        wide_sl   = sum(1 for r in recent if (r.get('sl_dist_pct') or 0) > 3.0)
-        no_vol    = sum(1 for r in recent if not r.get('vol_confirmed', True))
-        low_adx   = sum(1 for r in recent
-                        if r.get('signal_type','trend') == 'trend' and (r.get('adx') or 0) < 28)
-        high_adx  = sum(1 for r in recent
-                        if r.get('signal_type','trend') == 'range'  and (r.get('adx') or 0) > 35)
-        low_sc    = sum(1 for r in recent if (r.get('score') or 99) < 78)
-        bad_fr    = sum(1 for r in recent if (
-            (r.get('dir') == '多' and (r.get('entry_fr') or 0) > 0.05) or
-            (r.get('dir') == '空' and (r.get('entry_fr') or 0) < -0.05)
-        ))
-        div_strong = sum(1 for r in recent
-                         if r.get('signal_type','trend') == 'divergence' and (r.get('adx') or 0) > 38)
-
+        lines.append("─────────────────────────")
+        lines.append("失效因子統計")
         factors = [
-            (fast_sl,    f"⚡ 超快速反轉(<15分)：{fast_sl}筆 → 疑似流動性獵取"),
-            (tight_sl,   f"🎯 SL過緊(<0.5%)：{tight_sl}筆 → 建議加寬緩衝"),
-            (wide_sl,    f"⚠️ SL過寬(>3%)：{wide_sl}筆 → R:R惡化"),
-            (no_vol,     f"📉 量能不足：{no_vol}筆 → 動能確認失效"),
-            (low_adx,    f"📊 趨勢ADX<28：{low_adx}筆 → 趨勢動能不足"),
-            (high_adx,   f"🔀 區間ADX>35：{high_adx}筆 → 盤整結構已被趨勢突破"),
-            (low_sc,     f"🔢 評分<78：{low_sc}筆 → 邊際訊號，本就高風險"),
-            (bad_fr,     f"💸 費率不利：{bad_fr}筆 → 費率方向與倉位相反"),
-            (div_strong, f"💪 強趨勢中背離：{div_strong}筆 → 建議ADX>38時跳過背離"),
+            (sum(1 for r in recent if (r.get('hold_mins') or 999) < 15),
+             "超快速反轉(<15分) → 疑似流動性獵取"),
+            (sum(1 for r in recent if (r.get('sl_dist_pct') or 99) < 0.5),
+             "SL過緊(<0.5%) → 建議加寬緩衝"),
+            (sum(1 for r in recent if (r.get('sl_dist_pct') or 0) > 3.0),
+             "SL過寬(>3%) → R:R惡化"),
+            (sum(1 for r in recent if not r.get('vol_confirmed', True)),
+             "量能不足 → 動能確認失效"),
+            (sum(1 for r in recent if r.get('signal_type') == 'trend' and (r.get('adx') or 0) < 28),
+             "趨勢ADX<28 → 趨勢動能不足"),
+            (sum(1 for r in recent if (r.get('score') or 99) < 78),
+             "評分<78 → 邊際訊號高風險"),
         ]
         any_factor = False
         for cnt, txt in factors:
             if cnt > 0:
-                pct = cnt / n * 100
-                msg += f"  {txt}（{pct:.0f}%）\n"
+                lines.append(f"  {txt}：{cnt}筆（{cnt/n*100:.0f}%）")
                 any_factor = True
         if not any_factor:
-            msg += "  （暫無明確規律，繼續積累樣本）\n"
+            lines.append("  暫無明確規律，繼續積累樣本")
 
-        # ── 策略分布 ──
-        from collections import Counter
-        st_cnt = Counter(r.get('signal_type','trend') for r in recent)
-        st_parts = [f"{_st_label.get(k,k)}×{v}" for k, v in st_cnt.most_common()]
-        msg += f"\n策略分布：{'  '.join(st_parts)}\n"
+        st_cnt   = Counter(r.get('signal_type','trend') for r in recent)
+        st_parts = [f"{_st_label.get(k,k)}x{v}" for k, v in st_cnt.most_common()]
+        lines.append(f"策略分布：{'  '.join(st_parts)}")
 
+        msg = "\n".join(lines)
         if len(msg) > 4000:
             msg = msg[:3990] + "\n…（訊息過長已截斷）"
 
-    except Exception as e:
-        print(f"❌ send_loss_analysis 組裝訊息失敗：{e}")
+        print(f"🔴 訊息組裝完成，長度={len(msg)}")
+    except Exception as ex:
+        print(f"❌ send_loss_analysis 組裝失敗: {ex}")
         requests.post(_url, json={"chat_id": _cid,
-            "text": f"⚠️ 敗場分析發生錯誤：{e}\n請檢查 Railway logs。",
-            "parse_mode": "HTML"}, timeout=10)
+            "text": f"⚠️ 敗場分析組裝失敗：{ex}"}, timeout=10)
         return
 
+    # ── Step 4: 發送（純文字，不用 parse_mode 避免 HTML 解析錯誤）──
     try:
-        requests.post(_url, json={"chat_id": _cid, "text": msg, "parse_mode": "HTML"}, timeout=15)
-        print(f"🔴 敗場分析已發送，共 {len(recent)} 筆")
-    except Exception as e:
-        print(f"❌ send_loss_analysis 發送失敗：{e}")
+        r4 = requests.post(_url, json={"chat_id": _cid, "text": msg}, timeout=15)
+        print(f"🔴 敗場分析已發送，HTTP={r4.status_code}, ok={r4.json().get('ok')}")
+    except Exception as ex:
+        print(f"❌ send_loss_analysis 發送失敗: {ex}")
 
 
 def export_trade_data(chat_id):
