@@ -6689,18 +6689,28 @@ def send_loss_analysis(chat_id):
     """
     _url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     _cid = str(chat_id)
+
+    def _safe_send(text, parse_mode="HTML"):
+        """保底發送：任何異常都靜默忽略"""
+        try:
+            requests.post(_url, json={"chat_id": _cid, "text": text,
+                                      "parse_mode": parse_mode}, timeout=10)
+        except Exception as _se:
+            print(f"❌ _safe_send 失敗：{_se}")
+
     try:
         records = load_stats()
+        _safe_send(f"🔍 載入統計完成，共 {len(records)} 筆記錄，篩選中...")
         losses  = [r for r in records if r.get('outcome') == 'loss']
         losses.sort(key=lambda r: r.get('timestamp', 0), reverse=True)
         recent  = losses[:20]
+        _safe_send(f"📊 找到 {len(losses)} 筆敗場，準備組裝訊息...")
     except Exception as e:
-        requests.post(_url, json={"chat_id": _cid, "text": f"⚠️ 讀取統計失敗：{e}"}, timeout=10)
+        _safe_send(f"⚠️ 讀取統計失敗：{e}")
         return
 
     if not recent:
-        requests.post(_url, json={"chat_id": _cid, "parse_mode": "HTML",
-            "text": "✅ 近期無敗場記錄，繼續保持！"}, timeout=10)
+        _safe_send("✅ 近期無敗場記錄，繼續保持！")
         return
 
     la_tz   = pytz.timezone('America/Los_Angeles')
