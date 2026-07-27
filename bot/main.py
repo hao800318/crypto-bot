@@ -508,38 +508,94 @@ def get_fibonacci_context(df, entry, direction):
 
 def get_fibonacci_extension(df, entry, direction, sl):
     """
-    純結構 Fib 擴展線：A→B 波段計算延伸 TP 目標。
-    若全段波段 Fib 水位距入場點過遠，自動縮短視窗找更近的有效波段。
+    近期結構 Fib 擴展線：取「最近的 A→B 波段」計算延伸 TP 目標。
 
-    多頭：A = 最低點，B = A 之後最高點 → TP = B + (B-A) × ratio
-    空頭：A = 最高點，B = A 之後最低點 → TP = B - (A-B) × ratio
+    取點邏輯（以多頭為例）：
+      B = 最近的擺動高點（高於 entry，即回踩前的前高）
+          從最新 K 棒向前掃，取第一個符合左右各 SW 根確認的局部高點
+      A = B 之前最近的擺動低點（該上升波的起點）
+          從 B 向前掃，取第一個局部低點
 
-    回傳 (tp1_fib, tp2_fib, tp3_fib, fib_range, sl_fib) 或 None
+      TP2 = B + rng × 1.0
+      TP3 = B + rng × 1.618
+      TP4 = B + rng × 2.0   (tp3_fib，供 tp4_cand 使用)
+
+    空頭對稱反向。
+
+    回傳 (tp1_fib, tp2_fib, tp3_fib, fib_range, sl_fib, b_px) 或 None
     """
     is_bull = (direction == "多")
+    SW = 3          # 擺動確認：左右各 SW 根
+    MIN_RNG = 0.03  # 最小波段幅度（相對 entry），過小的波不採用
     try:
         td = _find_swing_df(df, is_bull, entry)
+        arr_h = [float(v) for v in td['high'].values]
+        arr_l = [float(v) for v in td['low'].values]
+        n     = len(arr_h)
+        entry = float(entry)
+
+        def is_swing_high(i):
+            lo, hi = max(0, i - SW), min(n, i + SW + 1)
+            return arr_h[i] >= max(arr_h[lo:hi])
+
+        def is_swing_low(i):
+            lo, hi = max(0, i - SW), min(n, i + SW + 1)
+            return arr_l[i] <= min(arr_l[lo:hi])
 
         if is_bull:
-            a_idx = int(td['low'].idxmin())
-            b_idx = int(td.loc[a_idx:, 'high'].idxmax())
-            a_px  = float(td.loc[a_idx, 'low'])
-            b_px  = float(td.loc[b_idx, 'high'])
-            rng   = b_px - a_px
-            if rng <= 0:
+            # B：從最新 K 棒向前找第一個擺動高點，且高於 entry 0.3%
+            b_pos = None
+            for i in range(n - SW - 1, SW - 1, -1):
+                if arr_h[i] > entry * 1.003 and is_swing_high(i):
+                    b_pos = i
+                    break
+            if b_pos is None:          # 備援：取視窗內絕對最高
+                b_pos = arr_h.index(max(arr_h))
+            b_px = arr_h[b_pos]
+
+            # A：從 b_pos 向前找最近的擺動低點
+            a_pos = None
+            for i in range(b_pos - 1, SW - 1, -1):
+                if is_swing_low(i):
+                    a_pos = i
+                    break
+            if a_pos is None:          # 備援：b_pos 前的絕對最低
+                a_pos = arr_l.index(min(arr_l[:b_pos + 1]))
+            a_px = arr_l[a_pos]
+
+            rng = b_px - a_px
+            if rng <= 0 or rng < entry * MIN_RNG:
                 return None
             tp1_fib = round(b_px + rng * 1.000, 8)
             tp2_fib = round(b_px + rng * 1.618, 8)
             tp3_fib = round(b_px + rng * 2.000, 8)
             if tp1_fib <= entry or tp2_fib <= tp1_fib:
                 return None
-        else:
-            a_idx = int(td['high'].idxmax())
-            b_idx = int(td.loc[a_idx:, 'low'].idxmin())
-            a_px  = float(td.loc[a_idx, 'high'])
-            b_px  = float(td.loc[b_idx, 'low'])
-            rng   = a_px - b_px
-            if rng <= 0:
+
+        else:  # bear
+            # A：從最新 K 棒向前找第一個擺動高點，且高於 entry 0.3%
+            a_pos = None
+            for i in range(n - SW - 1, SW - 1, -1):
+                if arr_h[i] > entry * 1.003 and is_swing_high(i):
+                    a_pos = i
+                    break
+            if a_pos is None:
+                a_pos = arr_h.index(max(arr_h))
+            a_px = arr_h[a_pos]
+
+            # B：a_pos 之後最近的擺動低點，且低於 entry 0.3%
+            b_pos = None
+            for i in range(a_pos + SW + 1, n - SW):
+                if arr_l[i] < entry * 0.997 and is_swing_low(i):
+                    b_pos = i
+            # 取最後一個符合（即最近的）
+            if b_pos is None:
+                sub = arr_l[a_pos:]
+                b_pos = a_pos + sub.index(min(sub))
+            b_px = arr_l[b_pos]
+
+            rng = a_px - b_px
+            if rng <= 0 or rng < entry * MIN_RNG:
                 return None
             tp1_fib = round(b_px - rng * 1.000, 8)
             tp2_fib = round(b_px - rng * 1.618, 8)
@@ -547,7 +603,7 @@ def get_fibonacci_extension(df, entry, direction, sl):
             if tp1_fib >= entry or tp2_fib >= tp1_fib:
                 return None
 
-        # R:R 安全檢查：TP1 需 ≥ 1.5R，否則嘗試以 TP2 代替
+        # ── R:R 安全檢查：tp1_fib（Fib 1.0）需 ≥ 1.5R，否則嘗試 tp2_fib ──
         _risk = abs(entry - sl)
         _rew  = abs(tp1_fib - entry)
         if _risk > 0 and _rew < _risk * 1.5:
