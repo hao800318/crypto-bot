@@ -2801,7 +2801,8 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
         macd_sig      = float(c_last['MACD_SIG'])if pd.notna(c_last['MACD_SIG'])else 0.0
 
         tf_label = _TF_LABEL.get(tf, tf)
-        scan_window = min(30, len(df) - 10)   # 掃描最近 30 根
+        scan_window = min(20, len(df) - 10)   # 掃描最近 20 根（SMC 窗口縮短，避免抓舊 sweep）
+        avg_vol_20  = df['vol'].iloc[-22:-2].mean()  # 20 根均量（供 vol_confirmed 判斷）
 
         # ══════════════════════════════════════════════════════════════
         # 多頭 SMC 掃描
@@ -2876,10 +2877,12 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
                    (c_ema200 <= 0 or current_price >= c_ema200 * 0.995):
                     # ── 評分 ──
                     sc = 0
-                    if current_adx >= 40: sc += 47
-                    elif current_adx >= 30: sc += 35
-                    elif current_adx >= 20: sc += 20
-                    else: sc += 5
+                    # SMC 是反轉/流動性獵取策略：震盪市（ADX 18-30）效果最好
+                    # 強趨勢（ADX≥38）SMC 失效率高，不應加分
+                    if 18 <= current_adx < 28: sc += 42    # 震盪市甜蜜區
+                    elif 28 <= current_adx < 38: sc += 22  # 輕趨勢，謹慎可行
+                    elif current_adx < 18: sc += 10        # 過度震盪，方向性不足
+                    else: sc += 0                           # ADX≥38，強趨勢，SMC 勝率極低
                     if 30 <= current_rsi <= 50: sc += 30
                     elif current_rsi < 30: sc += 18
                     elif 50 < current_rsi <= 65: sc += 10
@@ -2923,8 +2926,9 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
                         "tp4": None,
                         "entry_type": f"🏦 {tf_label} SMC多｜掃低反轉｜{_loc}｜CHoCH確認",
                         "sentiment_note": "", "ls_ratio": 1.0,
-                        "adx": round(current_adx, 1), "vol_confirmed": True,
-                        "tf_note": "", "entry_fr": 0.0,
+                        "adx": round(current_adx, 1),
+                        "vol_confirmed": float(df.iloc[-bull_sweep_i]["vol"]) > avg_vol_20,
+                        "tf_note": "", "entry_fr": round(market_fr * 100, 4),
                         "fib_level": "", "fib_price": None, "fib_near": False, "fib_dist": None,
                         "poc_price": None, "poc_label": "",
                         "fvg_lo": _fvg_lo, "fvg_hi": _fvg_hi, "fvg_label": _fvg_label,
@@ -2932,7 +2936,7 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
                         "tp_count": (4 if current_adx >= 35 else 3) if sc >= 65 else 2,
                         "signal_type": "smc",
                         "atr_trail": round(float(current_atr) * 2.5, 8),
-                        "price": current_price, "is_market_entry": True,
+                        "price": current_price, "is_market_entry": False,
                     }
 
         # ══════════════════════════════════════════════════════════════
@@ -3000,10 +3004,11 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
                 if (_in_ob or _in_fvg or _in_ret) and \
                    (c_ema200 <= 0 or current_price <= c_ema200 * 1.005):
                     sc = 0
-                    if current_adx >= 40: sc += 47
-                    elif current_adx >= 30: sc += 35
-                    elif current_adx >= 20: sc += 20
-                    else: sc += 5
+                    # SMC 反轉策略：震盪市（ADX 18-30）效果最好
+                    if 18 <= current_adx < 28: sc += 42
+                    elif 28 <= current_adx < 38: sc += 22
+                    elif current_adx < 18: sc += 10
+                    else: sc += 0                           # ADX≥38，強趨勢，SMC 勝率低
                     if 50 <= current_rsi <= 70: sc += 30
                     elif current_rsi > 70: sc += 18
                     elif 35 <= current_rsi < 50: sc += 10
@@ -3045,8 +3050,9 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
                         "tp4": tp3 if (current_adx >= 35 and _fib_ext) else None,
                         "entry_type": f"🏦 {tf_label} SMC空｜掃高反轉｜{_loc}｜CHoCH確認",
                         "sentiment_note": "", "ls_ratio": 1.0,
-                        "adx": round(current_adx, 1), "vol_confirmed": True,
-                        "tf_note": "", "entry_fr": 0.0,
+                        "adx": round(current_adx, 1),
+                        "vol_confirmed": float(df.iloc[-bear_sweep_i]["vol"]) > avg_vol_20,
+                        "tf_note": "", "entry_fr": round(market_fr * 100, 4),
                         "fib_level": "", "fib_price": None, "fib_near": False, "fib_dist": None,
                         "poc_price": None, "poc_label": "",
                         "fvg_lo": _fvg_lo, "fvg_hi": _fvg_hi, "fvg_label": _fvg_label,
@@ -3054,7 +3060,7 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
                         "tp_count": (4 if current_adx >= 35 else 3) if sc >= 65 else 2,
                         "signal_type": "smc",
                         "atr_trail": round(float(current_atr) * 2.5, 8),
-                        "price": current_price, "is_market_entry": True,
+                        "price": current_price, "is_market_entry": False,
                     }
     except Exception:
         pass
@@ -3173,13 +3179,16 @@ def run_strategy_scan():
     div_signals = [s for s in div_signals if s['win_rate'] >= 62]
 
     # ── SMC 訊號品質門檻 ──
-    # 歷史數據：SMC 在趨勢市 5/5 全敗（100% 敗場率）。
-    # 趨勢市停用 SMC；震盪市維持但大幅提高門檻（win_rate≥85, ADX≥30）。
+    # 趨勢市停用 SMC（結構上逆趨勢策略在強趨勢中成功率極低）。
+    # 震盪市：ADX 評分已修正（高 ADX 不再加分），門檻調整為 win_rate≥72 / ADX≥22 / vol_confirmed
     smc_signals.sort(key=lambda x: x['score'], reverse=True)
     if market_regime == 'ranging':
-        smc_signals = [s for s in smc_signals if s['win_rate'] >= 85 and s['adx'] >= 30]
+        smc_signals = [s for s in smc_signals
+                       if s['win_rate'] >= 72
+                       and s['adx'] >= 22
+                       and s.get('vol_confirmed', False)]  # 掃除棒須有放量確認
     else:
-        smc_signals = []   # 趨勢市 SMC 停用
+        smc_signals = []   # 趨勢市 SMC 停用（逆趨勢掃除後動能常不足）
 
     print(f"   趨勢候選 {len(trend_signals)} 組 | 區間候選 {len(range_signals)} 組 | 背離候選 {len(div_signals)} 組 | SMC候選 {len(smc_signals)} 組")
 
@@ -6857,6 +6866,157 @@ def export_trade_data(chat_id):
             pass
 
 
+def send_strategy_breakdown(chat_id):
+    """
+    各策略類型深度勝敗分析：/breakdown 指令觸發。
+    顯示 trend / range / divergence / smc 各自的勝敗比、失效模式、
+    及單型（order_type）勝敗排行。純文字，不使用 HTML parse_mode。
+    """
+    _url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    _cid = str(chat_id)
+    print(f"📊 send_strategy_breakdown 開始，chat_id={_cid}")
+
+    try:
+        r0 = requests.post(_url, json={"chat_id": _cid, "text": "📊 各策略勝敗分析中，請稍候…"}, timeout=10)
+        print(f"📊 確認訊息，HTTP={r0.status_code}")
+    except Exception as ex:
+        print(f"❌ breakdown 確認失敗: {ex}")
+        return
+
+    try:
+        records = load_stats()
+        valid = [r for r in records if r.get('outcome') in ('win', 'loss')]
+        print(f"📊 有效記錄：{len(valid)} 筆（共 {len(records)} 筆）")
+    except Exception as ex:
+        requests.post(_url, json={"chat_id": _cid, "text": f"⚠️ 讀取統計失敗：{ex}"}, timeout=10)
+        return
+
+    if not valid:
+        requests.post(_url, json={"chat_id": _cid,
+            "text": "📊 尚無完整交易記錄\n每次 TP/SL 觸發後自動累積，繼續監控中。"}, timeout=10)
+        return
+
+    try:
+        from collections import defaultdict
+        la_tz   = pytz.timezone('America/Los_Angeles')
+        now_str = datetime.datetime.now(la_tz).strftime('%Y-%m-%d %H:%M')
+
+        _st_label = {'trend': '趨勢', 'range': '區間', 'divergence': '背離', 'smc': 'SMC'}
+
+        def _wr_str(wins, total):
+            if total == 0: return "—"
+            return f"{wins}/{total} ({wins/total*100:.0f}%)"
+
+        # ── 按策略類型分組 ──
+        by_type = defaultdict(lambda: {'win': [], 'loss': []})
+        for r in valid:
+            st = r.get('signal_type', 'trend')
+            by_type[st][r['outcome']].append(r)
+
+        lines = [
+            f"【各策略勝敗分析】  {now_str} PT",
+            f"共 {len(valid)} 筆有效交易",
+            "─────────────────────────",
+            "策略類型    勝/總   勝率   常見失效",
+        ]
+
+        _failure_patterns = {
+            'trend':      [('hold_mins', lambda v: v < 15, '快速反轉'),
+                           ('sl_dist_pct', lambda v: v < 0.5, 'SL過緊'),
+                           ('vol_confirmed', lambda v: not v, '無量進場'),
+                           ('adx', lambda v: v < 28, 'ADX不足')],
+            'range':      [('hold_mins', lambda v: v < 15, '快速突破'),
+                           ('adx', lambda v: v > 35, 'ADX過高趨勢化'),
+                           ('sl_dist_pct', lambda v: v < 0.5, 'SL過緊')],
+            'divergence': [('adx', lambda v: v > 38, '強趨勢假背離'),
+                           ('adx', lambda v: v < 20, '方向性不足'),
+                           ('hold_mins', lambda v: v < 15, '快速失效')],
+            'smc':        [('hold_mins', lambda v: v < 15, '流動性再獵取'),
+                           ('vol_confirmed', lambda v: not v, '無量掃除'),
+                           ('adx', lambda v: v > 35, '趨勢市進場')],
+        }
+
+        st_order = ['trend', 'range', 'divergence', 'smc']
+        for st in st_order:
+            grp = by_type.get(st)
+            if not grp:
+                continue
+            w = grp['win']
+            l = grp['loss']
+            t = len(w) + len(l)
+            if t == 0:
+                continue
+            wr = _wr_str(len(w), t)
+            label = _st_label.get(st, st)
+
+            # 找最常見失效
+            fail_tags = []
+            for key, cond, tag in _failure_patterns.get(st, []):
+                cnt = sum(1 for r in l if r.get(key) is not None and cond(r.get(key)))
+                if cnt > 0 and len(l) > 0:
+                    pct = cnt / len(l) * 100
+                    if pct >= 25:
+                        fail_tags.append(f"{tag}({pct:.0f}%)")
+
+            fail_str = " ".join(fail_tags[:2]) if fail_tags else "無明顯規律"
+            lines.append(f"{label:6s}  {wr:12s}  {fail_str}")
+
+        # ── 按單型分組 ──
+        lines.append("─────────────────────────")
+        lines.append("單型勝率排行（≥3筆）")
+        by_order = defaultdict(lambda: {'win': 0, 'loss': 0})
+        for r in valid:
+            ot = r.get('order_type', '—')
+            by_order[ot][r['outcome']] += 1
+
+        ranked = []
+        for ot, v in by_order.items():
+            t = v['win'] + v['loss']
+            if t >= 3:
+                wr = v['win'] / t
+                ranked.append((ot, v['win'], t, wr))
+        ranked.sort(key=lambda x: -x[3])
+        for ot, w, t, wr in ranked[:8]:
+            lines.append(f"  {ot[:14]:14s}  {w}/{t}  ({wr*100:.0f}%)")
+
+        # ── 市價 vs 限價對比 ──
+        lines.append("─────────────────────────")
+        mkt = [r for r in valid if r.get('is_market_entry', False)]
+        lmt = [r for r in valid if not r.get('is_market_entry', True)]
+        def _grp_wr(lst):
+            if not lst: return "—"
+            w = sum(1 for r in lst if r['outcome'] == 'win')
+            return f"{w}/{len(lst)} ({w/len(lst)*100:.0f}%)"
+        lines.append(f"市價進場：{_grp_wr(mkt)}")
+        lines.append(f"限價掛單：{_grp_wr(lmt)}")
+
+        # ── Vol confirmed 對比 ──
+        vol_ok  = [r for r in valid if r.get('vol_confirmed', True)]
+        vol_no  = [r for r in valid if not r.get('vol_confirmed', True)]
+        if vol_no:
+            lines.append(f"有量確認：{_grp_wr(vol_ok)}")
+            lines.append(f"無量確認：{_grp_wr(vol_no)}")
+
+        lines.append("─────────────────────────")
+        lines.append("樣本數少時僅供參考，持續累積後更可靠。")
+
+        msg = "\n".join(lines)
+        if len(msg) > 4000:
+            msg = msg[:3990] + "\n…（過長已截斷）"
+        print(f"📊 breakdown 訊息長度={len(msg)}")
+
+    except Exception as ex:
+        print(f"❌ breakdown 組裝失敗: {ex}")
+        requests.post(_url, json={"chat_id": _cid, "text": f"⚠️ 分析組裝失敗：{ex}"}, timeout=10)
+        return
+
+    try:
+        r1 = requests.post(_url, json={"chat_id": _cid, "text": msg}, timeout=15)
+        print(f"📊 breakdown 發送，HTTP={r1.status_code}, ok={r1.json().get('ok')}")
+    except Exception as ex:
+        print(f"❌ breakdown 發送失敗: {ex}")
+
+
 def send_stats_report(chat_id):
     """勝率統計播報（近30天）"""
     _url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -7564,6 +7724,12 @@ def handle_telegram_updates():
                             except Exception:
                                 pass
                             t = threading.Thread(target=send_loss_analysis, args=(chat_id,))
+                            t.daemon = True
+                            t.start()
+
+                        elif text.lower().startswith("/breakdown"):
+                            print(f"📊 收到 /breakdown 指令")
+                            t = threading.Thread(target=send_strategy_breakdown, args=(chat_id,))
                             t.daemon = True
                             t.start()
 
