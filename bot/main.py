@@ -530,7 +530,7 @@ def get_fibonacci_extension(df, entry, direction, sl):
                 return None
             tp1_fib = round(b_px + rng * 1.000, 8)
             tp2_fib = round(b_px + rng * 1.618, 8)
-            tp3_fib = round(b_px + rng * 2.618, 8)
+            tp3_fib = round(b_px + rng * 2.000, 8)
             if tp1_fib <= entry or tp2_fib <= tp1_fib:
                 return None
         else:
@@ -543,7 +543,7 @@ def get_fibonacci_extension(df, entry, direction, sl):
                 return None
             tp1_fib = round(b_px - rng * 1.000, 8)
             tp2_fib = round(b_px - rng * 1.618, 8)
-            tp3_fib = round(b_px - rng * 2.618, 8)
+            tp3_fib = round(b_px - rng * 2.000, 8)
             if tp1_fib >= entry or tp2_fib >= tp1_fib:
                 return None
 
@@ -1613,7 +1613,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             _tp_source = ""
             if _fib_ext is not None:
                 tp2, tp3, tp4_cand, _fib_rng, _sl_fib = _fib_ext
-                _tp_source = "📐TP1前高低 | TP2/3/4 Fib(1.0/1.618/2.618)"
+                _tp_source = "📐TP1前高低 | TP2/3/4 Fib(1.0/1.618/2.0)"
 
                 # ── SL 改用 Fib 0.786 回撤位 ──
                 _fib_sl_dist = abs(entry_price - _sl_fib)
