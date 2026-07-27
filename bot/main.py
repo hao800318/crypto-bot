@@ -568,7 +568,7 @@ def get_fibonacci_extension(df, entry, direction, sl):
             if sl_fib <= entry:
                 sl_fib = round(a_px * (1 + _BUF), 8)
 
-        return tp1_fib, tp2_fib, tp3_fib, round(rng, 8), sl_fib
+        return tp1_fib, tp2_fib, tp3_fib, round(rng, 8), sl_fib, b_px
 
     except Exception:
         return None
@@ -1607,12 +1607,20 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             sl_ms, tp1, _ms_tp2, _ms_tp3 = find_market_structure_levels(
                 df, entry_price, direction, current_atr)
 
-            # ── Fib 擴展：TP2=1.0 / TP3=1.618 / TP4=2.618（強趨勢啟用）──
+            # ── Fib 擴展：TP1=前高/前低(B點) | TP2=1.0 / TP3=1.618 / TP4=2.0 ──
             # 同時回傳 0.786 回撤 SL，SL/TP 使用同一波段框架
             _fib_ext = get_fibonacci_extension(df, entry_price, direction, sl_ms)
             _tp_source = ""
             if _fib_ext is not None:
-                tp2, tp3, tp4_cand, _fib_rng, _sl_fib = _fib_ext
+                tp2, tp3, tp4_cand, _fib_rng, _sl_fib, _swing_b = _fib_ext
+                # TP1 = Fib 波段 B 點（回踩前的前高/前低），是最自然的第一目標
+                # 有效性檢查：B 點需在 entry 的正確方向且距離合理（> 0.3%）
+                _b_valid = (
+                    (direction == "多" and _swing_b > entry_price * 1.003) or
+                    (direction == "空" and _swing_b < entry_price * 0.997)
+                )
+                if _b_valid:
+                    tp1 = _swing_b   # 覆蓋 find_market_structure_levels 的 tp1
                 _tp_source = "📐TP1前高低 | TP2/3/4 Fib(1.0/1.618/2.0)"
 
                 # ── SL 改用 Fib 0.786 回撤位 ──
@@ -1690,7 +1698,7 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             leverage  = score_to_leverage(win_rate, max_leverage)
 
             # ── 動態 TP 數量：依時框、訊號強度與趨勢強度（ADX）決定 ──
-            # TP4（2.618）只在大趨勢（ADX ≥ 35）時啟用
+            # TP4（2.0）只在大趨勢（ADX ≥ 35）時啟用
             _adx_strong = current_adx >= 35
             if tf in ("15m", "30m"):
                 tp_count = 2 if score >= 75 else 1
@@ -2441,12 +2449,12 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         sl_ms_d, tp1, _ms_tp2_d, _ms_tp3_d = find_market_structure_levels(
             df, price, direction, atr)
 
-        # ── Fib 擴展：TP2=1.0 / TP3=1.618 / TP4=2.618（強趨勢啟用）──
+        # ── Fib 擴展：TP2=1.0 / TP3=1.618 / TP4=2.0（強趨勢啟用）──
         _fib_ext_d = get_fibonacci_extension(df, price, direction, sl_ms_d)
         _tp_src_d  = ""
         if _fib_ext_d is not None:
-            tp2, tp3, tp4_cand_d, _, _sl_fib_d = _fib_ext_d
-            _tp_src_d = "📐TP1前高低 | TP2/3/4 Fib(1.0/1.618/2.618)"
+            tp2, tp3, tp4_cand_d, _, _sl_fib_d, _ = _fib_ext_d
+            _tp_src_d = "📐TP1前高低 | TP2/3/4 Fib(1.0/1.618/2.0)"
 
             _fib_sl_dist_d = abs(price - _sl_fib_d)
             _sl_side_ok_d  = (_sl_fib_d > price if direction == "空"
@@ -2800,7 +2808,7 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
     空頭三步：對稱反向。
 
     SL = 流動性獵取最低點（掃高最高點）之外 0.3%
-    TP = Fib 延伸 1.0 / 1.618 / 2.618
+    TP = Fib 延伸 1.0 / 1.618 / 2.0
     """
     bar_param = _TF_BAR.get(tf, "1H")
     url = f"{BASE_URL}/api/v5/market/candles?instId={asset}&bar={bar_param}&limit=200"
@@ -2951,7 +2959,7 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
                     entry_price = round_to_tick(current_price, asset)
                     _fib_ext = get_fibonacci_extension(df, float(entry_price), "多", float(sl_price))
                     if _fib_ext:
-                        tp1, tp2, tp3, _, _ = _fib_ext
+                        tp1, tp2, tp3, _, _, _ = _fib_ext
                     else:
                         _r = float(entry_price) - float(sl_price)
                         tp1 = entry_price + _r * 1.5
@@ -3078,7 +3086,7 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
                     entry_price = round_to_tick(current_price, asset)
                     _fib_ext = get_fibonacci_extension(df, float(entry_price), "空", float(sl_price))
                     if _fib_ext:
-                        tp1, tp2, tp3, _, _ = _fib_ext
+                        tp1, tp2, tp3, _, _, _ = _fib_ext
                     else:
                         _r = float(sl_price) - float(entry_price)
                         tp1 = float(entry_price) - _r * 1.5
@@ -3885,7 +3893,7 @@ def analyze_position(pos):
             push = True
         # 止盈：用 K 線高點 + 0.05% 確認緩衝（防止 1-pip wick 誤觸）
         elif tp4 is not None and effective_high >= tp4 * TP_CONFIRM:
-            # TP4（2.618 Fib，強趨勢最終目標）達標 → 全倉出場
+            # TP4（2.0 Fib，強趨勢最終目標）達標 → 全倉出場
             status = "🟣 全部止盈"
             pos['tp4_hit'] = True   # 標記 TP4 達標（供統計記錄用）
             skipped = []
@@ -3895,7 +3903,7 @@ def analyze_position(pos):
                     pos[_tp_flag] = True
                     skipped.append(f"{_tp_lbl} <code>{format_price(_tp_val)}</code>")
             skip_note = f"（同時穿越 {'、'.join(skipped)}）" if skipped else ""
-            action = (f"🎯 K線高點 {format_price(effective_high)} 已達止盈4(2.618) {format_price(tp4)}{skip_note}，"
+            action = (f"🎯 K線高點 {format_price(effective_high)} 已達止盈4(2.0) {format_price(tp4)}{skip_note}，"
                       f"現價 {format_price(current_price)}")
             push = True
         elif effective_high >= tp3 * TP_CONFIRM:
@@ -3922,7 +3930,7 @@ def analyze_position(pos):
                 status = "🔵 止盈3達標"
                 action = (f"✅ K線高點 {format_price(effective_high)} 已達止盈3 <code>{format_price(tp3)}</code>\n"
                           f"▸ <b>建議平倉20%</b>，止損鎖至TP2 <code>{format_price(sl)}</code>\n"
-                          f"▸ 剩20%等待TP4(2.618) <code>{format_price(tp4)}</code>，啟動移動止盈")
+                          f"▸ 剩20%等待TP4(2.0) <code>{format_price(tp4)}</code>，啟動移動止盈")
                 push = True
             else:
                 # tp_count<=3：TP3 是最終目標 → 全倉出場
@@ -4122,7 +4130,7 @@ def analyze_position(pos):
             push = True
         # 止盈：用 K 線低點 + 0.05% 確認緩衝（防止 1-pip wick 誤觸）
         elif tp4 is not None and effective_low <= tp4 / TP_CONFIRM:
-            # TP4（2.618 Fib，強趨勢最終目標）達標 → 全倉出場
+            # TP4（2.0 Fib，強趨勢最終目標）達標 → 全倉出場
             status = "🟣 全部止盈"
             pos['tp4_hit'] = True   # 標記 TP4 達標（供統計記錄用）
             skipped = []
@@ -4132,7 +4140,7 @@ def analyze_position(pos):
                     pos[_tp_flag] = True
                     skipped.append(f"{_tp_lbl} <code>{format_price(_tp_val)}</code>")
             skip_note = f"（同時穿越 {'、'.join(skipped)}）" if skipped else ""
-            action = (f"🎯 K線低點 {format_price(effective_low)} 已達止盈4(2.618) {format_price(tp4)}{skip_note}，"
+            action = (f"🎯 K線低點 {format_price(effective_low)} 已達止盈4(2.0) {format_price(tp4)}{skip_note}，"
                       f"現價 {format_price(current_price)}")
             push = True
         elif effective_low <= tp3 / TP_CONFIRM:
@@ -4159,7 +4167,7 @@ def analyze_position(pos):
                 status = "🔵 止盈3達標"
                 action = (f"✅ K線低點 {format_price(effective_low)} 已達止盈3 <code>{format_price(tp3)}</code>\n"
                           f"▸ <b>建議平倉20%</b>，止損鎖至TP2 <code>{format_price(sl)}</code>\n"
-                          f"▸ 剩20%等待TP4(2.618) <code>{format_price(tp4)}</code>，啟動移動止盈")
+                          f"▸ 剩20%等待TP4(2.0) <code>{format_price(tp4)}</code>，啟動移動止盈")
                 push = True
             else:
                 # tp_count<=3：TP3 是最終目標 → 全倉出場
