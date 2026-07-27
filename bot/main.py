@@ -1778,8 +1778,8 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 "price":            current_price,
                 "is_market_entry":  is_market_entry,
             }
-    except:
-        pass
+    except Exception as _exc:
+        print(f"⚠️ fetch_candle_sync {asset}/{tf} 例外: {_exc}")
     return None
 
 def fetch_trend_state(inst_id, tf):
@@ -2171,7 +2171,8 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
             "sentiment_note": sentiment_note_r,
             "ls_ratio":       ls_ratio_r,
             "entry_fr":       round(funding_rate_r * 100, 4),
-            "vol_confirmed":  True,   # 已確認量縮（非放量突破）
+            "vol_confirmed":  float(c['vol']) < avg_vol,  # 量縮反彈確認（真實計算，非放量即 True）
+            "tp_count":       3,   # 區間策略固定3目標：中線/對側/邊界
             "tf_note":        f"支撐[{format_price(sup_lo)}–{format_price(sup_hi)}]→壓力[{format_price(res_lo)}–{format_price(res_hi)}]",
             "poc_price":      _poc_price_r,
             "poc_label":      _poc_label_r,
@@ -2292,9 +2293,10 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         sh = swing_highs_list[-2:] if len(swing_highs_list) >= 2 else []
         sl_pts = swing_lows_list[-2:] if len(swing_lows_list) >= 2 else []
 
-        direction     = None
-        div_desc      = ""
+        direction      = None
+        div_desc       = ""
         _is_div_signal = False   # True=經典背離(路徑A)，False=Fib極端RSI(路徑B)
+        _vol_confirmed_d = False  # 量能縮量確認（路徑A=vol_shrink已驗證；路徑B=非放量）
 
         # ③-A 頂背離：新高 > 舊高，但 RSI 新高 < RSI 舊高，且量縮
         if sh:
@@ -2303,8 +2305,9 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             rsi_lower    = new_h[2] < old_h[2] - 3.0            # RSI 卻更低（背離至少 3pt，2pt 易是雜訊）
             vol_shrink   = new_h[3] < old_h[3] * 0.92           # 量縮 8% 以上
             if price_higher and rsi_lower and vol_shrink:
-                direction      = "空"
-                _is_div_signal = True
+                direction        = "空"
+                _is_div_signal   = True
+                _vol_confirmed_d = True   # vol_shrink 已作為進場條件驗證
                 div_desc  = (f"頂背離：前高 {old_h[1]:.4g}(RSI {old_h[2]:.0f}) → "
                              f"新高 {new_h[1]:.4g}(RSI {new_h[2]:.0f})，量縮 {(1-new_h[3]/old_h[3])*100:.0f}%")
 
@@ -2315,34 +2318,43 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             rsi_higher   = new_l[2] > old_l[2] + 3.0  # 背離至少 3pt，2pt 易是雜訊
             vol_shrink   = new_l[3] < old_l[3] * 0.92
             if price_lower and rsi_higher and vol_shrink:
-                direction      = "多"
-                _is_div_signal = True
+                direction        = "多"
+                _is_div_signal   = True
+                _vol_confirmed_d = True   # vol_shrink 已作為進場條件驗證
                 div_desc  = (f"底背離：前低 {old_l[1]:.4g}(RSI {old_l[2]:.0f}) → "
                              f"新低 {new_l[1]:.4g}(RSI {new_l[2]:.0f})，量縮 {(1-new_l[3]/old_l[3])*100:.0f}%")
 
         # ③-C HTF Fib 極端 RSI 替代路徑（路徑 B）
         # 沒有形成兩點標準背離，但同時滿足：
-        #   多頭：價格跌到 HTF 0.618/0.786 支撐後反彈 + RSI < 30（超賣力竭）
-        #   空頭：價格反彈至 HTF 0.618/0.786 壓力後受壓 + RSI > 70（超買力竭）
+        #   多頭：價格跌到 HTF 0.618/0.786 支撐後反彈 + RSI < 30（超賣力竭）+ 量不放大
+        #   空頭：價格反彈至 HTF 0.618/0.786 壓力後受壓 + RSI > 70（超買力竭）+ 量不放大
         # 說明：空頭 Fib 是「從高點拉到低點後，0.618 在上方作壓力」
         #       多頭 Fib 是「從低點拉到高點後，0.618 在上方回撤為支撐」
+        # 量能要求：路徑B 進場時當前量不應超過 1.5×均量
+        #   放量 = 可能是繼續突破（capitulation 繼續下跌），非反轉
+        #   量縮/正常量 = 賣方（或買方）力竭，反轉勝率較高
         if direction is None and df_htf_d is not None:
+            _pathb_vol_ok = float(c['vol']) < avg_vol * 1.5  # 路徑B量能確認（非放量）
             _htf_fib_lbl_long, _, _htf_fib_near_long, _ = get_fibonacci_context(
                 df_htf_d, price, "多")
             _htf_fib_lbl_short, _, _htf_fib_near_short, _ = get_fibonacci_context(
                 df_htf_d, price, "空")
             if (_htf_fib_near_long
                     and _htf_fib_lbl_long in ('0.618', '0.786')
-                    and rsi < 30):
-                direction      = "多"
-                _is_div_signal = False
+                    and rsi < 30
+                    and _pathb_vol_ok):   # 量不放大，力竭而非 capitulation 繼續
+                direction        = "多"
+                _is_div_signal   = False
+                _vol_confirmed_d = True
                 div_desc  = (f"HTF{_htf_bar_d}Fib{_htf_fib_lbl_long}支撐+超賣"
                              f"(RSI {rsi:.0f}<30)")
             elif (_htf_fib_near_short
                     and _htf_fib_lbl_short in ('0.618', '0.786')
-                    and rsi > 70):
-                direction      = "空"
-                _is_div_signal = False
+                    and rsi > 70
+                    and _pathb_vol_ok):   # 量不放大，力竭而非突破繼續
+                direction        = "空"
+                _is_div_signal   = False
+                _vol_confirmed_d = True
                 div_desc  = (f"HTF{_htf_bar_d}Fib{_htf_fib_lbl_short}壓力+超買"
                              f"(RSI {rsi:.0f}>70)")
 
@@ -2547,7 +2559,7 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             "sentiment_note": sentiment_note_d,
             "ls_ratio":       ls_ratio_d,
             "entry_fr":       round(funding_rate_d * 100, 4),
-            "vol_confirmed":  True,
+            "vol_confirmed":  _vol_confirmed_d,  # 路徑A=vol_shrink已驗證；路徑B=量非放大
             "tf_note":        div_desc,
             "tp_count":       _tp_count_d,
             "tp_source":      _tp_src_d,
@@ -3176,7 +3188,7 @@ def run_strategy_scan():
     # ── 背離訊號品質門檻（ADX 20-40，技術分 ≥ 62）──
     div_signals.sort(key=lambda x: x['score'], reverse=True)
     div_signals_raw = div_signals[:]
-    div_signals = [s for s in div_signals if s['win_rate'] >= 62]
+    div_signals = [s for s in div_signals if s['win_rate'] >= 64]  # 函數內部已過濾 <64，統一
 
     # ── SMC 訊號品質門檻 ──
     # 趨勢市停用 SMC（結構上逆趨勢策略在強趨勢中成功率極低）。
