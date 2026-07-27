@@ -7557,6 +7557,14 @@ def handle_telegram_updates():
 
                         elif text.lower().startswith("/losses") or text.lower().startswith("/loss"):
                             print(f"🔴 收到 /losses 指令，執行敗場深度分析")
+                            try:
+                                requests.post(
+                                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                    json={"chat_id": chat_id, "text": "🔴 收到 /losses，分析中..."},
+                                    timeout=5
+                                )
+                            except Exception:
+                                pass
                             t = threading.Thread(target=send_loss_analysis, args=(chat_id,))
                             t.daemon = True
                             t.start()
