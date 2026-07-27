@@ -3323,6 +3323,7 @@ def save_positions(positions):
 
 active_positions = load_positions()   # 啟動時從檔案恢復
 active_positions_lock = threading.Lock()
+_last_position_added_ts = 0   # 最近一次新增倉位的時間戳，用於觸發快速監控
 
 # ==================== 📈 勝率統計系統 ====================
 STATS_FILE = os.path.join(_DATA_DIR, "trade_stats.json")
@@ -5851,6 +5852,8 @@ def _scan_worker_thread_impl(msg_title, target_chat_id, silent_on_empty=False, i
                             'entry_fr':       sig.get('entry_fr'),
                         }
                         active_positions.append(new_pos)
+                        global _last_position_added_ts
+                        _last_position_added_ts = time.time()
                         auto_added.append(f"{sig['asset']}{sig['dir']}")
                 if auto_added:
                     save_positions(active_positions)
@@ -6351,6 +6354,8 @@ def handle_open_command(text, chat_id):
         ]
         active_positions.append(new_pos)
         save_positions(active_positions)
+        global _last_position_added_ts
+        _last_position_added_ts = time.time()
 
     print(f"📌 /open {symbol} {direction} 已加入監控（{tf_label} {anchor_label}={format_price(entry)}），共 {len(active_positions)} 筆")
     requests.post(send_url, json={"chat_id": chat_id, "text": confirm_text, "parse_mode": "HTML"})
@@ -7498,12 +7503,19 @@ def handle_telegram_updates():
                 t.daemon = True
                 t.start()
 
-            # B. 持倉監控（Plan B 動態間隔）
-            # 掛單等待 / TP1-TP2 已命中 → 5 分鐘；已成交未到 TP1 → 10 分鐘
+            # B. 持倉監控（動態間隔）
+            # 剛新增倉位（90 秒內）→ 30 秒：新倉最容易在訊號觸發後快速穿越 SL，需即時偵測
+            # 有未填倉位（掛單等待中）→ 60 秒：等待成交或 SL breach 需要較快反應
+            # 一般已成交持倉         → 180 秒：TP/SL 不會在幾秒內觸發，不需高頻輪詢
             with active_positions_lock:
-                has_tp_hit   = any(p.get('tp1_hit') or p.get('tp2_hit') for p in active_positions)
                 has_unfilled = any(not p.get('filled', False) for p in active_positions)
-            monitor_interval = 180  # 每 3 分鐘監控一次（掛單等待 / 持倉均適用）
+            _since_added = now_ts - _last_position_added_ts
+            if _since_added < 90:
+                monitor_interval = 30    # 剛建倉：30 秒快速監控，防止 SL 被快速穿越未及偵測
+            elif has_unfilled:
+                monitor_interval = 60    # 有掛單等待：60 秒
+            else:
+                monitor_interval = 180   # 一般持倉：3 分鐘
             if now_ts - last_monitor_time >= monitor_interval:
                 print(f"🔍 觸發持倉監控：{now_la.strftime('%H:%M')}")
                 t = threading.Thread(target=run_position_monitor)
@@ -7582,6 +7594,8 @@ def handle_telegram_updates():
                                         with active_positions_lock:
                                             active_positions.append(new_pos_cb)
                                             save_positions(active_positions)
+                                        global _last_position_added_ts
+                                        _last_position_added_ts = time.time()
                                         answer_callback(cb_id, f"⏳ {asset_cb}{dir_cb} 掛單監控已開始！", alert=True)
                                         print(f"📌 按鈕追蹤：{asset_cb} {dir_cb}")
                                     else:
