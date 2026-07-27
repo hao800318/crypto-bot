@@ -1488,6 +1488,33 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 if direction == "空" and current_price > c_ema200 * 1.005:
                     return None   # 大趨勢仍多頭，空單勝率大幅降低
 
+            # ⑧ 市場結構完整性：確認仍維持 HH/HL（多）或 LH/LL（空）結構
+            # 邏輯：掃最近 80 根找最近兩個擺動高/低點。
+            #   多頭：最近擺動低點 < 上一個擺動低點 → Lower Low = CHoCH，趨勢特徵轉換 → 拒絕
+            #   空頭：最近擺動高點 > 上一個擺動高點 → Higher High = CHoCH → 拒絕
+            # 不套用容忍帶：若結構已明顯破壞，任何容忍都是自欺欺人。
+            _ms_arr_l = df['low'].values.astype(float)
+            _ms_arr_h = df['high'].values.astype(float)
+            _ms_n     = len(_ms_arr_l)
+            _ms_sw    = 3    # 擺動確認：左右各 3 根
+            _ms_lows, _ms_highs = [], []
+            for _mi in range(_ms_n - _ms_sw - 1, max(_ms_n - 81, _ms_sw - 1), -1):
+                _lo_s = max(0, _mi - _ms_sw); _hi_s = min(_ms_n, _mi + _ms_sw + 1)
+                if _ms_arr_l[_mi] == min(_ms_arr_l[_lo_s:_hi_s]) and len(_ms_lows)  < 2:
+                    _ms_lows.append(_ms_arr_l[_mi])
+                if _ms_arr_h[_mi] == max(_ms_arr_h[_lo_s:_hi_s]) and len(_ms_highs) < 2:
+                    _ms_highs.append(_ms_arr_h[_mi])
+                if len(_ms_lows) >= 2 and len(_ms_highs) >= 2:
+                    break
+            # _ms_lows[0]  = 最近擺動低點，_ms_lows[1]  = 前次擺動低點
+            # _ms_highs[0] = 最近擺動高點，_ms_highs[1] = 前次擺動高點
+            if direction == "多" and len(_ms_lows) >= 2:
+                if _ms_lows[0] < _ms_lows[1]:
+                    return None   # Lower Low：上升趨勢結構已破壞，拒絕多頭訊號
+            if direction == "空" and len(_ms_highs) >= 2:
+                if _ms_highs[0] > _ms_highs[1]:
+                    return None   # Higher High：下降趨勢結構已破壞，拒絕空頭訊號
+
             # ── 技術強度基礎評分（ADX 趨勢強度 + RSI 進場位置，有實際 TA 依據）──
             #
             # ADX 元件（0-65）：衡量趨勢有多強，已硬過濾 <20
