@@ -7627,27 +7627,33 @@ def handle_telegram_updates():
                                 "📖 <b>指令說明</b>\n"
                                 "─────────────────────────\n"
                                 "🔍 <b>掃描與訊號</b>\n"
-                                "/scan — 全網掃描，精選最高技術分訊號（趨勢/區間/背離）\n"
-                                "/[幣種] — 單幣分析，例如 /btc /eth /sol\n\n"
+                                "/scan — 全網掃描，精選最高分訊號（趨勢/區間/背離/SMC 四策略）\n"
+                                "/[幣種] — 單幣深度分析，例如 /btc  /eth  /sol  /doge\n"
+                                "/fib618 — 全市場掃描 Fib 0.618 回踩進場機會\n"
+                                "/fibcheck [幣種] [時框] — 核對指定幣種 Fib 高低點與回撤位\n"
+                                "　例：/fibcheck BTC 4H　（時框：15M / 30M / 1H / 4H / 1D）\n\n"
                                 "📌 <b>持倉管理</b>\n"
-                                "/open [幣種] [方向] — 確認開倉並加入 TP/SL 監控\n"
+                                "/open [幣種] [方向] — 手動登記開倉，加入 TP/SL 自動監控\n"
                                 "　例：/open BTC 多　或　/open ETH 空\n"
                                 "/close [幣種] [方向] — 平倉後解除監控\n"
                                 "　例：/close BTC 多\n"
-                                "/holding — 查看目前所有持倉的監控狀態\n\n"
+                                "/holding — 查看所有持倉狀態（含成交確認/持倉時長/TP 進度）\n\n"
                                 "👁 <b>自選監控</b>\n"
-                                "/watch [幣種] — 加入自選監控（定時掃描通知）\n"
+                                "/watch [幣種] — 加入自選監控（每輪掃描優先分析）\n"
                                 "/unwatch [幣種] — 移除自選監控\n"
-                                "/watching — 查看自選監控清單\n\n"
-                                "📊 <b>統計與備份</b>\n"
-                                "/stats — 近 30 天勝率統計（含 ADX/評分/持倉時長分段）\n"
+                                "/watching — 查看目前自選監控清單\n\n"
+                                "📊 <b>統計與分析</b>\n"
+                                "/stats — 近 30 天整體勝率統計（含 ADX/評分/持倉時長分段）\n"
+                                "/breakdown — 各策略深度分析：趨勢/區間/背離/SMC 各自勝敗比、\n"
+                                "　　　　　　 常見失效模式、市價 vs 限價、有量 vs 無量對比\n"
                                 "/losses — 最近 20 筆敗場深度分析（失效因子統計）\n"
-                                "/export_data — 匯出完整交易記錄 JSON（人工備份）\n"
+                                "/export_data — 匯出完整交易記錄 JSON\n"
                                 "/resetstats — 清空歷史勝率紀錄，重新開始累積\n\n"
                                 "─────────────────────────\n"
-                                "<i>TP/SL 觸發、市場惡化時系統自動推播\n"
-                                "TP1 達標後止損自動移至成本價（保本）\n"
-                                "槓桿建議僅供參考，請自行控管風險</i>"
+                                "<i>• TP/SL 觸發、市場惡化時系統自動推播\n"
+                                "• TP1 達標後止損自動移至成本價（保本）\n"
+                                "• 進場由 1m K 棒收盤確認成交，防假突破觸發\n"
+                                "• 槓桿建議僅供參考，請自行控管風險</i>"
                             )
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -7774,7 +7780,7 @@ def handle_telegram_updates():
                         elif text.startswith("/") and len(text) > 1:
                             # 通用幣種查詢：/eth /btc /sol /doge 等
                             coin_cmd = text.split()[0].lstrip("/").split("@")[0]
-                            if coin_cmd and coin_cmd.isalpha() and coin_cmd.lower() not in ("open","close","scan","holding","watch","unwatch","watching","stats","resetstats","help","fib618","fib","losses","loss"):
+                            if coin_cmd and coin_cmd.isalpha() and coin_cmd.lower() not in ("open","close","scan","holding","watch","unwatch","watching","stats","resetstats","help","fib618","fib","fibcheck","losses","loss","breakdown","exportdata","export"):
                                 print(f"🔍 收到幣種查詢指令：/{coin_cmd.upper()}")
                                 requests.post(
                                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
