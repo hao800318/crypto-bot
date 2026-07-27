@@ -1497,11 +1497,11 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             btc_bonus = 0
             btc_risk_note = ""
             if _rt == "bear" and direction == "多":
-                btc_bonus     = -20   # 從 -12 加強：生態鏈偏空仍做多失敗率高
-                btc_risk_note = f" ⚠️{ref_coin}偏空"
+                # 生態鏈偏空仍做多 → 歷史敗場率高，硬擋（原為 -20 扣分仍可繞過）
+                return None
             elif _rt == "bull" and direction == "空":
-                btc_bonus     = -20   # 從 -12 加強
-                btc_risk_note = f" ⚠️{ref_coin}偏多"
+                # 生態鏈偏多仍做空 → 逆勢，硬擋
+                return None
             elif _rt == "bull" and direction == "多":
                 btc_bonus     = +5
             elif _rt == "bear" and direction == "空":
@@ -1521,11 +1521,17 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                 elif market_fr >= 0.0008:  fr_bonus = +8   # 全市場多頭過熱 → 空單逆向機會
 
             # ── 個幣費率硬封鎖（極端擁擠直接拒絕，不給評分繞過的機會）──
-            # 損場均費率 +0.303%（0.003）→ 設硬門檻於 0.002（0.2%），保留小幅緩衝
+            # 多頭擁擠（FR≥+0.20%）：多單不進
+            # 空頭擁擠（FR≤-0.20%）：空單不進
+            # 逆勢做空（FR≥+0.20% 市場偏多卻做空）：敗場資料顯示此為最高頻失敗原因之一
             if funding_rate >= 0.002 and direction == "多":
-                return None  # 個幣費率 ≥+0.20%，多頭嚴重擁擠，拒絕多單
+                return None  # 個幣多頭嚴重擁擠，拒絕多單
+            if funding_rate >= 0.002 and direction == "空":
+                return None  # 市場偏多（FR≥+0.20%）卻做空 → 逆勢高風險，拒絕空單
             if funding_rate <= -0.002 and direction == "空":
-                return None  # 個幣費率 ≤-0.20%，空頭嚴重擁擠，拒絕空單
+                return None  # 個幣空頭嚴重擁擠，拒絕空單
+            if funding_rate <= -0.002 and direction == "多":
+                return None  # 市場偏空（FR≤-0.20%）卻做多 → 逆勢高風險，拒絕多單
 
             sentiment_note, sentiment_bonus = build_sentiment_note(direction, funding_rate, ls_ratio)
 
@@ -3141,11 +3147,14 @@ def run_strategy_scan():
     elapsed = time.time() - scan_start
     print(f"\n✨ 全網掃描完畢！耗時：{elapsed:.1f} 秒（共 {len(all_assets)} 支幣種 × 5 時框）")
 
-    # ── 趨勢訊號品質門檻（維持原有嚴格條件）──
+    # ── 趨勢訊號品質門檻 ──
+    # vol_confirmed 加入硬門檻：40% 敗場無量，量能確認是最高頻失效因子
     trend_signals.sort(key=lambda x: x['score'], reverse=True)
     trend_signals_raw = trend_signals[:]          # 篩選前原始清單（供大幣保底使用）
     trend_signals = [s for s in trend_signals
-                     if s['win_rate'] >= MIN_WIN_RATE and s['adx'] >= MIN_ADX]
+                     if s['win_rate'] >= MIN_WIN_RATE
+                     and s['adx'] >= MIN_ADX
+                     and s.get('vol_confirmed', False)]  # 量能確認硬門檻
 
     # ── 區間訊號品質門檻（ADX 15-28，技術分 ≥ 60）──
     range_signals.sort(key=lambda x: x['score'], reverse=True)
@@ -3157,10 +3166,14 @@ def run_strategy_scan():
     div_signals_raw = div_signals[:]
     div_signals = [s for s in div_signals if s['win_rate'] >= 62]
 
-    # ── SMC 訊號品質門檻（ADX ≥ 20 + 技術分 ≥ 60）──
-    # ADX<20 的市場接近無方向性，CHoCH/流動性獵取後容易假突破回頭（實際敗場：ADX12/ADX17）
+    # ── SMC 訊號品質門檻 ──
+    # 歷史數據：SMC 在趨勢市 5/5 全敗（100% 敗場率）。
+    # 趨勢市停用 SMC；震盪市維持但大幅提高門檻（win_rate≥85, ADX≥30）。
     smc_signals.sort(key=lambda x: x['score'], reverse=True)
-    smc_signals = [s for s in smc_signals if s['win_rate'] >= 60 and s['adx'] >= 20]
+    if market_regime == 'ranging':
+        smc_signals = [s for s in smc_signals if s['win_rate'] >= 85 and s['adx'] >= 30]
+    else:
+        smc_signals = []   # 趨勢市 SMC 停用
 
     print(f"   趨勢候選 {len(trend_signals)} 組 | 區間候選 {len(range_signals)} 組 | 背離候選 {len(div_signals)} 組 | SMC候選 {len(smc_signals)} 組")
 
@@ -3404,8 +3417,8 @@ near_miss_lock  = threading.Lock()
 recently_sent_signals: dict = {}
 recently_sent_lock = threading.Lock()
 SIGNAL_COOLDOWN_SECS = 90 * 60  # 90 分鐘
-MIN_WIN_RATE = 90                     # 低於此勝率的訊號不推播
-MIN_ADX      = 40                     # 只推播強勢趨勢（ADX ≥ 40）
+MIN_WIN_RATE = 80                     # 廣播門檻：已有 FR/BTC趨勢/量能 硬門檻補防護，不需要 90
+MIN_ADX      = 28                     # 與 fetch_trend_signal 入場 ADX 下限一致（15m=28，其餘=25）
 WATCH_FILE = os.path.join(_DATA_DIR, "watch_list.json")
 
 def load_watch_list():
