@@ -822,11 +822,11 @@ def fvg_check(fvg_lo, fvg_hi, entry):
     return 0, ""
 
 
-def get_candle_range_since(inst_id, since_ts, bar="1H", no_margin=False):
+def get_candle_range_since(inst_id, since_ts, bar="1H", no_margin=False, return_closes=False):
     """取得 since_ts 以來所有 K 線的最高價和最低價。
     用於偵測監控間隔中曾觸碰的價格極值，防止漏掉 TP/SL/填單事件。
     no_margin=True：嚴格只取 since_ts 之後開始的 K 棒（用於填單判定，避免納入舊棒）。
-    回傳 (range_high, range_low) 或 (None, None)。
+    return_closes=True：額外回傳 (high, low, close_min, close_max)，用於閉盤確認填單。
     limit=100：覆蓋最近 100 根 K 棒（1m = 100 分鐘），確保監控間隔內的極值不被遺漏。
     """
     try:
@@ -835,22 +835,28 @@ def get_candle_range_since(inst_id, since_ts, bar="1H", no_margin=False):
         if res.get('code') == '0' and res['data']:
             df = pd.DataFrame(res['data'],
                               columns=['ts','open','high','low','close','vol','volCcy','volCcyQuote','state'])
-            df['ts']   = df['ts'].astype(float) / 1000   # ms → seconds
-            df['high'] = df['high'].astype(float)
-            df['low']  = df['low'].astype(float)
+            df['ts']    = df['ts'].astype(float) / 1000   # ms → seconds
+            df['high']  = df['high'].astype(float)
+            df['low']   = df['low'].astype(float)
+            df['close'] = df['close'].astype(float)
             if no_margin:
                 # 嚴格過濾：只包含在 since_ts 之後「開盤」的 K 棒
                 df = df[df['ts'] >= since_ts]
             else:
                 # 包含 since_ts 之前 1 根 K 線（防止 TP/SL 事件在兩次監控間被漏掉）
-                # margin = 各 bar 對應的一個週期長度（確保回看不超過一根 K 線）
                 _bar_secs = {"15m": 900, "30m": 1800, "1H": 3600, "4H": 14400, "1D": 86400}
                 margin = _bar_secs.get(bar, 3600)
                 df = df[df['ts'] >= since_ts - margin]
             if not df.empty:
-                return float(df['high'].max()), float(df['low'].min())
+                h = float(df['high'].max())
+                l = float(df['low'].min())
+                if return_closes:
+                    return h, l, float(df['close'].min()), float(df['close'].max())
+                return h, l
     except:
         pass
+    if return_closes:
+        return None, None, None, None
     return None, None
 
 def check_market_deterioration(inst_id, direction, tf):
@@ -3609,56 +3615,45 @@ def analyze_position(pos):
         # 對齊 K 棒開盤會把訊號發出「之前」的 K 棒價格（例如 4H bar 前 30 分鐘）
         # 誤算進去，導致還沒到進場點就判定已成交。
         fill_since = int(reported_at)
-        # ── 填單判定只用 1m K 棒 ──
-        # 移除原始時框（1H/4H）的補充抓取：大時框單根棒範圍過寬，
-        # 可能在同一棒內同時包含「low ≤ 進場點」和「high ≥ TP1」，
-        # 導致填單和止盈在相鄰兩次監控週期連發，進場根本沒真正碰到就誤判成交。
-        # 1m K 棒 limit=100 = 100 分鐘，足以覆蓋任何正常監控間隔。
-        fill_high, fill_low = get_candle_range_since(inst_id, fill_since, '1m', no_margin=True)
-        fill_eff_high = fill_high  # 純 1m K 棒最高點
-        fill_eff_low  = fill_low   # 純 1m K 棒最低點
+        # ── 填單判定只用 1m K 棒（含閉盤確認）──
+        # 影線（wick）短暫碰到進場點不算成交；需至少一根 1m 棒「收盤在進場點另一側」才確認。
+        # 閉盤確認邏輯：
+        #   多頭回調：close_min <= entry（有 1m 棒收盤在進場點以下）
+        #   多頭突破：close_max >= entry（有 1m 棒收盤在進場點以上）
+        #   空頭回調：close_max >= entry（有 1m 棒收盤在進場點以上）
+        #   空頭突破：close_min <= entry（有 1m 棒收盤在進場點以下）
+        fill_high, fill_low, fill_close_min, fill_close_max = get_candle_range_since(
+            inst_id, fill_since, '1m', no_margin=True, return_closes=True)
+        fill_eff_high = fill_high
+        fill_eff_low  = fill_low
 
-        # 填單方向判斷：依「訊號時現價 vs 進場點」區分突破 / 回調類型
-        #   多頭突破（進場 > signal_price）→ 等價格「漲」到進場：high ≥ entry
-        #   多頭回調（進場 ≤ signal_price）→ 等價格「跌」到進場：low  ≤ entry
-        #   空頭突破（進場 < signal_price）→ 等價格「跌」到進場：low  ≤ entry
-        #   空頭回調（進場 ≥ signal_price）→ 等價格「漲」到進場：high ≥ entry
-        # ── 重要：回調型的「未成交」狀態本來就是現價在進場點另一側 ──
-        # 不可加 fallback（「現價已過進場點」），否則回調型一開始就誤判已成交。
         signal_price = pos.get('signal_price', entry)  # 無記錄時 fallback = entry
-        # ── 填單判定規則 ──
-        # 優先用 K 線極值（fill_eff_high/low）；K 線 API 失敗時才用現價 fallback。
-        # 不把 current_price 與 K 線資料並列 OR：K 線有資料時以 K 線為準，
-        # 避免現價短暫剛好踩到進場點就誤判成交。
+
         if dir == "多":
             if entry > signal_price:
-                # 突破多：等 K 線最高點升到進場點才成交
-                if fill_eff_high is not None:
-                    filled_by_candle = fill_eff_high >= entry
+                # 突破多：1m 收盤 >= entry（收盤確認站穩進場點上方）
+                if fill_high is not None:
+                    filled_by_candle = (fill_close_max is not None and fill_close_max >= entry)
                 else:
-                    # K 線 API 失敗 → 用現價保底；需明顯高於進場點（+0.1%）才確認
                     filled_by_candle = current_price >= entry * 1.001
             else:
-                # 回調多：等 K 線最低點跌到進場點才成交
-                if fill_eff_low is not None:
-                    filled_by_candle = fill_eff_low <= entry
+                # 回調多：1m 收盤 <= entry（收盤確認跌破進場點）
+                if fill_low is not None:
+                    filled_by_candle = (fill_close_min is not None and fill_close_min <= entry)
                 else:
-                    # K 線 API 失敗 → 用現價保底；需明顯低於進場點（-0.1%）才確認
                     filled_by_candle = current_price <= entry * 0.999
         else:  # 空
             if entry < signal_price:
-                # 突破空：等 K 線最低點跌到進場點才成交
-                if fill_eff_low is not None:
-                    filled_by_candle = fill_eff_low <= entry
+                # 突破空：1m 收盤 <= entry
+                if fill_low is not None:
+                    filled_by_candle = (fill_close_min is not None and fill_close_min <= entry)
                 else:
-                    # K 線 API 失敗 → 用現價保底；需明顯低於進場點（-0.1%）才確認
                     filled_by_candle = current_price <= entry * 0.999
             else:
-                # 回調空：等 K 線最高點漲到進場點才成交
-                if fill_eff_high is not None:
-                    filled_by_candle = fill_eff_high >= entry
+                # 回調空：1m 收盤 >= entry
+                if fill_high is not None:
+                    filled_by_candle = (fill_close_max is not None and fill_close_max >= entry)
                 else:
-                    # K 線 API 失敗 → 用現價保底；需明顯高於進場點（+0.1%）才確認
                     filled_by_candle = current_price >= entry * 1.001
         if filled_by_candle:
             pos['filled']          = True
@@ -3752,16 +3747,10 @@ def analyze_position(pos):
     # 改為：K 棒資料存在時以 K 棒為準；API 失敗才以現價兜底。
     effective_high = effective_high if effective_high is not None else current_price
     effective_low  = effective_low  if effective_low  is not None else current_price
-    # 原始時框補充：since_ts 與 fill_ts 取較晚者，同樣避免重抓成交 K 棒
-    _bar_secs = {"15m": 900, "30m": 1800, "1H": 3600, "4H": 14400, "1D": 86400}
-    _bar_dur  = _bar_secs.get(bar, 3600)
-    _tf_since = int(max(since_ts, fill_ts)) if fill_ts > 0 else int(since_ts)
-    _rng_h, _rng_l = get_candle_range_since(inst_id, _tf_since, bar, no_margin=True)
-    if _rng_h is not None:
-        effective_high = max(effective_high, _rng_h)
-        _candle_api_ok = True
-    if _rng_l is not None:
-        effective_low  = min(effective_low,  _rng_l)
+    # 原始時框（30M/1H/4H）補抓已永久移除：
+    # 大時框單棒範圍過寬，fill 剛確認後下一個 cycle 同一根棒的 high/low
+    # 就能同時覆蓋 entry 和 TP1，造成「沒觸及進場點就報 TP」的假象。
+    # TP/SL 全部依賴 1m K 棒（精度最高，不受大時框 wick 誤差影響）。
     if _candle_api_ok:
         pos['last_checked_ts'] = time.time()  # 只在拿到有效資料後才推進時間窗口
 
