@@ -5804,6 +5804,7 @@ def scan_worker_thread(msg_title, target_chat_id, silent_on_empty=False, include
         import traceback; traceback.print_exc()
 
 def _scan_worker_thread_impl(msg_title, target_chat_id, silent_on_empty=False, include_news=False, auto_track=False, include_fib=False):
+    global _last_position_added_ts
     valid_signals = run_strategy_scan()
     if valid_signals:
         send_html_report_via_requests(valid_signals, mode_title=msg_title,
@@ -5852,7 +5853,6 @@ def _scan_worker_thread_impl(msg_title, target_chat_id, silent_on_empty=False, i
                             'entry_fr':       sig.get('entry_fr'),
                         }
                         active_positions.append(new_pos)
-                        global _last_position_added_ts
                         _last_position_added_ts = time.time()
                         auto_added.append(f"{sig['asset']}{sig['dir']}")
                 if auto_added:
@@ -6192,6 +6192,7 @@ def handle_open_command(text, chat_id):
     /open ETH 多     → 指定方向（若與指標方向相反會警告）
     每次都即時重算，保證點位穩定且基於當前市況。
     """
+    global _last_position_added_ts
     send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     parts = text.strip().split()
     if len(parts) < 2:
@@ -6354,7 +6355,6 @@ def handle_open_command(text, chat_id):
         ]
         active_positions.append(new_pos)
         save_positions(active_positions)
-        global _last_position_added_ts
         _last_position_added_ts = time.time()
 
     print(f"📌 /open {symbol} {direction} 已加入監控（{tf_label} {anchor_label}={format_price(entry)}），共 {len(active_positions)} 筆")
@@ -7445,6 +7445,7 @@ def run_watchlist_check():
 
 
 def handle_telegram_updates():
+    global _last_position_added_ts
     print("🤖 幣圈分析師【勝率精選 5 幣版 + 主力動向確認 + 持倉監控版】雷達正在開機...")
     offset = None
     la_tz = pytz.timezone('America/Los_Angeles')
@@ -7594,7 +7595,6 @@ def handle_telegram_updates():
                                         with active_positions_lock:
                                             active_positions.append(new_pos_cb)
                                             save_positions(active_positions)
-                                        global _last_position_added_ts
                                         _last_position_added_ts = time.time()
                                         answer_callback(cb_id, f"⏳ {asset_cb}{dir_cb} 掛單監控已開始！", alert=True)
                                         print(f"📌 按鈕追蹤：{asset_cb} {dir_cb}")
