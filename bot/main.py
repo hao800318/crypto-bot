@@ -3716,8 +3716,16 @@ def analyze_position(pos):
                 (dir == "空" and sl_eff_high >= sl)
             )
             if sl_breached:
-                note = (f"⛔ 現價 {format_price(current_price)} 已突破止損位 {format_price(sl)}，"
-                        f"進場點 {format_price(entry)} 訊號作廢\n<b>已自動取消掛單追蹤</b>")
+                if _is_mkt_pos:
+                    # 市價訊號：進場點已觸及（或緊貼），但市場快速穿越止損位，填單未獲確認即失效
+                    note = (f"⛔ 訊號觸發後市場快速下穿支撐，現價 {format_price(current_price)} "
+                            f"已突破止損位 {format_price(sl)}\n"
+                            f"進場點 {format_price(entry)} <b>未填單即作廢</b>（支撐破位，非有效進場）\n"
+                            f"<b>已自動取消監控</b>")
+                else:
+                    # 限價掛單：現價跌穿止損，掛單失效
+                    note = (f"⛔ 現價 {format_price(current_price)} 已突破止損位 {format_price(sl)}，"
+                            f"限價掛單 {format_price(entry)} 訊號作廢\n<b>已自動取消掛單追蹤</b>")
                 return "🚫 掛單已取消", note, True
 
             # 2. 等待逾時（1H→2H、4H/手動→8H）→ 自動取消
@@ -5236,9 +5244,8 @@ def send_html_report_via_requests(valid_signals, mode_title="實時雷達速報"
         html_message += "┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         # ── 進場 / 止損 / TP（等寬對齊，CJK=2格 ASCII=1格，統一補至6格） ──
         _tc = item.get('tp_count', 3)
-        _mkt_tag = "(市價)" if item.get('is_market_entry') else ""
         html_message += "<pre>"
-        html_message += f"進場  {format_price(item['entry'])}{_mkt_tag}\n"
+        html_message += f"進場  {format_price(item['entry'])}\n"
         html_message += f"止損  {format_price(item['sl'])}\n"
         if _tc == 1:
             html_message += f"TP1   {format_price(item['tp1'])}  (全倉平倉)\n"
