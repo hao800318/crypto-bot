@@ -1018,6 +1018,32 @@ def score_to_leverage(win_rate, max_leverage, signal_type='trend'):
     lev = max(1, round(max_leverage * ratio))
     return f"{lev}x"
 
+
+def cap_leverage_by_sl(leverage_str, entry, sl):
+    """
+    依 SL 距離反推最高安全槓桿，防止 SL 過寬時倉位在止損觸發前即遭強平。
+    公式：max_lev = floor(0.80 / sl_dist_pct)
+      → lev × sl% ≤ 80%，確保持倉可以撐到 SL 而非先被強平。
+    範例：SL 距離 2%  → 最高 40x
+          SL 距離 5%  → 最高 16x
+          SL 距離 10% → 最高 8x
+          SL 距離 34% → 最高 2x（如 1D 回踩訊號常見的大 SL）
+    """
+    try:
+        entry, sl = float(entry), float(sl)
+        if entry <= 0 or sl <= 0 or entry == sl:
+            return leverage_str
+        sl_dist_pct = abs(entry - sl) / entry
+        if sl_dist_pct <= 0:
+            return leverage_str
+        max_lev_by_sl = max(1, int(0.80 / sl_dist_pct))
+        raw_lev = int(str(leverage_str).replace('x', ''))
+        capped  = min(raw_lev, max_lev_by_sl)
+        return f"{capped}x"
+    except Exception:
+        return leverage_str
+
+
 _TF_BAR   = {"15m": "15m", "30m": "30m", "1h": "1H", "4h": "4H", "1d": "1D"}   # OKX bar param
 _TF_LABEL = {"15m": "15M", "30m": "30M", "1h": "1H", "4h": "4H", "1d": "1D"}   # display label
 _TF_HTF   = {"15m": "1H",  "30m": "1H", "1h": "4H", "4h": "1D", "1d": "1W"}    # 高一級時框
@@ -1599,6 +1625,14 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
                     sl_price = round_to_tick(_sl_fib, asset)
                 else:
                     sl_price = sl_ms
+
+                # ── Fib 路徑 R:R 安全網（與備援路徑邏輯一致，以 TP2 作有效目標）──
+                # TP1 是最近結構位，可能很近；TP2 才是 Fib 第一有效擴展目標
+                _fib_risk  = abs(entry_price - sl_price)
+                _fib_tp2_d = abs(tp2 - entry_price)
+                if _fib_tp2_d < _fib_risk * 0.8:
+                    return None   # TP2 R:R 不足，拒絕
+
             else:
                 # Fib 計算失敗 → SL/TP 全降回結構水位
                 sl_price = sl_ms
@@ -1740,6 +1774,8 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             tp3         = round_to_tick(tp3,         asset)
             if tp4 is not None:
                 tp4     = round_to_tick(tp4,         asset)
+            # ── SL 距離限制槓桿：防止強平發生在止損觸發前 ──
+            leverage = cap_leverage_by_sl(leverage, entry_price, sl_price)
             return {
                 "asset":          asset.split('-')[0],
                 "dir":            direction,
@@ -2146,6 +2182,8 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
             funding_rate_r, ls_ratio_r = 0.0, 1.0
         sentiment_note_r, _ = build_sentiment_note(direction, funding_rate_r, ls_ratio_r)
 
+        # ── SL 距離限制槓桿：防止強平發生在止損觸發前 ──
+        leverage = cap_leverage_by_sl(leverage, price, sl_price)
         return {
             "asset":          asset.split('-')[0],
             "dir":            direction,
@@ -2536,6 +2574,8 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
         sentiment_note_d, _ = build_sentiment_note(direction, funding_rate_d, ls_ratio_d)
 
         _tp_count_d = 4 if (adx >= 35 and tp4_d is not None) else 3
+        # ── SL 距離限制槓桿：防止強平發生在止損觸發前 ──
+        leverage = cap_leverage_by_sl(leverage, price, sl_price)
         return {
             "asset":          asset.split('-')[0],
             "dir":            direction,
@@ -2929,6 +2969,8 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
 
                     _loc = "OB回踩" if _in_ob else ("FVG回補" if _in_fvg else "Fib回調")
                     _fvg_label = f"FVG:{format_price(_fvg_lo)}-{format_price(_fvg_hi)}" if _fvg_lo else ""
+                    # ── SL 距離限制槓桿：防止強平發生在止損觸發前 ──
+                    leverage = cap_leverage_by_sl(leverage, entry_price, sl_price)
                     return {
                         "asset": asset.split('-')[0], "dir": "多",
                         "leverage": leverage, "win_rate": win_rate,
@@ -3053,6 +3095,8 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
 
                     _loc = "OB回踩" if _in_ob else ("FVG回補" if _in_fvg else "Fib回調")
                     _fvg_label = f"FVG:{format_price(_fvg_lo)}-{format_price(_fvg_hi)}" if _fvg_lo else ""
+                    # ── SL 距離限制槓桿：防止強平發生在止損觸發前 ──
+                    leverage = cap_leverage_by_sl(leverage, entry_price, sl_price)
                     return {
                         "asset": asset.split('-')[0], "dir": "空",
                         "leverage": leverage, "win_rate": win_rate,
