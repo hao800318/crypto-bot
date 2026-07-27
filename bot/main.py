@@ -3611,10 +3611,15 @@ def analyze_position(pos):
     # 避免舊棒高低點（訊號出現前）被誤判為已觸碰進場點。
     if not pos.get('filled', False):
         reported_at   = pos.get('reported_at', time.time())
-        # 填單起始點 = 訊號發出的秒數（精確到秒，不對齊 K 棒開盤）
-        # 對齊 K 棒開盤會把訊號發出「之前」的 K 棒價格（例如 4H bar 前 30 分鐘）
-        # 誤算進去，導致還沒到進場點就判定已成交。
-        fill_since = int(reported_at)
+        _is_mkt_pos   = pos.get('is_market_entry', False)
+        # ── 填單起始點 ──
+        # 限價單：訊號發出後的 K 棒（不往前，避免把訊號前的舊棒誤判為成交）
+        # 市價單：訊號發出前 120 秒，確保訊號時刻那根 1m 棒被納入範圍
+        #         （市價單的成交就在訊號時刻附近，fill_since 必須往前才能抓到那根棒）
+        if _is_mkt_pos:
+            fill_since = int(reported_at - 120)
+        else:
+            fill_since = int(reported_at)
         # ── 填單判定只用 1m K 棒（含閉盤確認）──
         # 影線（wick）短暫碰到進場點不算成交；需至少一根 1m 棒「收盤在進場點另一側」才確認。
         # 閉盤確認邏輯：
@@ -3670,10 +3675,14 @@ def analyze_position(pos):
                     extreme_str = f"（K線最低達 <code>{format_price(fill_eff_low)}</code>）"
                 else:                      # 回調進場 → 顯示高點
                     extreme_str = f"（K線最高達 <code>{format_price(fill_eff_high)}</code>）"
-            print(f"✅ {pos['asset']} {dir}單：K線已穿越進場點 {format_price(entry)}，開始監控 TP/SL")
+            _fill_type_str = "市價單已成交" if _is_mkt_pos else "限價單應已成交"
+            print(f"✅ {pos['asset']} {dir}單：K線已穿越進場點 {format_price(entry)} "
+                  f"[{'市價' if _is_mkt_pos else '限價'}] "
+                  f"close_min={fill_close_min} close_max={fill_close_max} "
+                  f"eff_low={fill_eff_low} eff_high={fill_eff_high}，開始監控 TP/SL")
             action = (f"🎯 K線已穿越進場點 <code>{format_price(entry)}</code>{extreme_str}\n"
                       f"現價 <code>{format_price(current_price)}</code>\n"
-                      f"<b>限價單應已成交，開始監控 TP/SL</b>")
+                      f"<b>{_fill_type_str}，開始監控 TP/SL</b>")
             return "✅ 已觸及進場點", action, True  # 推送進場確認，下次監控再做 TP/SL
         else:
             # ── 掛單尚未成交 ──
@@ -5808,8 +5817,9 @@ def _scan_worker_thread_impl(msg_title, target_chat_id, silent_on_empty=False, i
                             'win_rate':       sig.get('win_rate', 0),
                             'reported_at':    sent_at,
                             'last_checked_ts': sent_at,
-                            'filled':         _is_mkt,
-                            'fill_ts':        sent_at if _is_mkt else 0,
+                            'is_market_entry': _is_mkt,
+                            'filled':         False,   # 一律從未成交開始，fill detection 統一驗證
+                            'fill_ts':        0,
                             'entry_fr':       sig.get('entry_fr'),
                         }
                         active_positions.append(new_pos)
@@ -6301,8 +6311,9 @@ def handle_open_command(text, chat_id):
         'entry_fr':        best.get('entry_fr'),
         'reported_at':     now_ts,
         'last_checked_ts': now_ts,
-        'filled':          _is_mkt_open,
-        'fill_ts':         now_ts if _is_mkt_open else 0,
+        'is_market_entry': _is_mkt_open,
+        'filled':          False,   # 一律從未成交開始，fill detection 統一驗證
+        'fill_ts':         0,
     }
 
     with active_positions_lock:
@@ -7384,8 +7395,9 @@ def handle_telegram_updates():
                                             'atr_trail':      sig_cb.get('atr_trail', 0),
                                             'reported_at': now_ts_cb,
                                             'last_checked_ts': now_ts_cb,
-                                            'filled': _is_mkt_cb,  # 市價進場：立即視為已成交
-                                            'fill_ts': now_ts_cb if _is_mkt_cb else 0,
+                                            'is_market_entry': _is_mkt_cb,
+                                            'filled': False,   # 一律從未成交開始，fill detection 統一驗證
+                                            'fill_ts': 0,
                                             'entry_fr': sig_cb.get('entry_fr'),
                                         }
                                         with active_positions_lock:
