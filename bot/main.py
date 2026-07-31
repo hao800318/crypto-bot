@@ -1865,6 +1865,14 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             tp3         = round_to_tick(tp3,         asset)
             if tp4 is not None:
                 tp4     = round_to_tick(tp4,         asset)
+            # ── TP 順序保證：多頭升序（TP1最近entry），空頭降序 ──
+            _tp_sorted = sorted([tp1, tp2, tp3], reverse=(direction == "空"))
+            tp1, tp2, tp3 = _tp_sorted
+            if tp4 is not None:
+                if direction == "空" and tp4 >= tp3:
+                    tp4 = None
+                elif direction == "多" and tp4 <= tp3:
+                    tp4 = None
             # ── SL 距離限制槓桿：防止強平發生在止損觸發前 ──
             leverage = cap_leverage_by_sl(leverage, entry_price, sl_price)
             return {
@@ -2273,6 +2281,8 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
             funding_rate_r, ls_ratio_r = 0.0, 1.0
         sentiment_note_r, _ = build_sentiment_note(direction, funding_rate_r, ls_ratio_r)
 
+        # ── TP 順序保證：多頭升序（TP1最近entry），空頭降序 ──
+        tp1, tp2, tp3 = sorted([tp1, tp2, tp3], reverse=(direction == "空"))
         # ── SL 距離限制槓桿：防止強平發生在止損觸發前 ──
         leverage = cap_leverage_by_sl(leverage, price, sl_price)
         return {
@@ -2666,6 +2676,14 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
 
         _tp_count_d = 4 if (adx >= 35 and tp4_d is not None) else 3
         # ── SL 距離限制槓桿：防止強平發生在止損觸發前 ──
+        # ── TP 順序保證：多頭升序（TP1最近entry），空頭降序 ──
+        _tp_sorted_d = sorted([tp1, tp2, tp3], reverse=(direction == "空"))
+        tp1, tp2, tp3 = _tp_sorted_d
+        if tp4_d is not None:
+            if direction == "空" and tp4_d >= tp3:
+                tp4_d = None
+            elif direction == "多" and tp4_d <= tp3:
+                tp4_d = None
         leverage = cap_leverage_by_sl(leverage, price, sl_price)
         return {
             "asset":          asset.split('-')[0],
@@ -3060,6 +3078,8 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
 
                     _loc = "OB回踩" if _in_ob else ("FVG回補" if _in_fvg else "Fib回調")
                     _fvg_label = f"FVG:{format_price(_fvg_lo)}-{format_price(_fvg_hi)}" if _fvg_lo else ""
+                    # ── TP 順序保證（多頭升序）──
+                    tp1, tp2, tp3 = sorted([tp1, tp2, tp3])
                     # ── SL 距離限制槓桿：防止強平發生在止損觸發前 ──
                     leverage = cap_leverage_by_sl(leverage, entry_price, sl_price)
                     return {
@@ -3186,6 +3206,8 @@ def fetch_smc_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0)
 
                     _loc = "OB回踩" if _in_ob else ("FVG回補" if _in_fvg else "Fib回調")
                     _fvg_label = f"FVG:{format_price(_fvg_lo)}-{format_price(_fvg_hi)}" if _fvg_lo else ""
+                    # ── TP 順序保證（空頭降序）──
+                    tp1, tp2, tp3 = sorted([tp1, tp2, tp3], reverse=True)
                     # ── SL 距離限制槓桿：防止強平發生在止損觸發前 ──
                     leverage = cap_leverage_by_sl(leverage, entry_price, sl_price)
                     return {
