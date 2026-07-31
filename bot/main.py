@@ -1639,14 +1639,16 @@ def fetch_candle_sync(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.0
             # 多頭擁擠（FR≥+0.20%）：多單不進
             # 空頭擁擠（FR≤-0.20%）：空單不進
             # 逆勢做空（FR≥+0.20% 市場偏多卻做空）：敗場資料顯示此為最高頻失敗原因之一
-            if funding_rate >= 0.002 and direction == "多":
-                return None  # 個幣多頭嚴重擁擠，拒絕多單
-            if funding_rate >= 0.002 and direction == "空":
-                return None  # 市場偏多（FR≥+0.20%）卻做空 → 逆勢高風險，拒絕空單
-            if funding_rate <= -0.002 and direction == "空":
-                return None  # 個幣空頭嚴重擁擠，拒絕空單
-            if funding_rate <= -0.002 and direction == "多":
-                return None  # 市場偏空（FR≤-0.20%）卻做多 → 逆勢高風險，拒絕多單
+            # FR 硬封鎖（±0.10%）：原±0.20% 門檻太寬，敗場資料顯示 BEAT +0.50%、SKHYNIX +1.43%
+            # 均造成嚴重虧損。±0.10% 與 build_sentiment_note 的「嚴重擁擠」定義一致。
+            if funding_rate >= 0.001 and direction == "多":
+                return None  # 個幣多頭擁擠（FR≥+0.10%），被清洗風險高
+            if funding_rate >= 0.001 and direction == "空":
+                return None  # 偏多市場做空（FR≥+0.10%），軋空風險高
+            if funding_rate <= -0.001 and direction == "空":
+                return None  # 個幣空頭擁擠（FR≤-0.10%），拒絕空單
+            if funding_rate <= -0.001 and direction == "多":
+                return None  # 偏空市場做多（FR≤-0.10%），軋多風險高
 
             sentiment_note, sentiment_bonus = build_sentiment_note(direction, funding_rate, ls_ratio)
 
@@ -2279,6 +2281,11 @@ def fetch_range_signal(asset, tf, max_leverage=20, ref_trends=None, market_fr=0.
             funding_rate_r, ls_ratio_r = get_market_sentiment(asset)
         except Exception:
             funding_rate_r, ls_ratio_r = 0.0, 1.0
+        # FR 硬封鎖（與趨勢策略對齊，±0.10%）
+        if funding_rate_r >= 0.001 and direction == "多": return None
+        if funding_rate_r >= 0.001 and direction == "空": return None
+        if funding_rate_r <= -0.001 and direction == "空": return None
+        if funding_rate_r <= -0.001 and direction == "多": return None
         sentiment_note_r, _ = build_sentiment_note(direction, funding_rate_r, ls_ratio_r)
 
         # ── TP 順序保證：多頭升序（TP1最近entry），空頭降序 ──
@@ -2672,6 +2679,11 @@ def fetch_divergence_signal(asset, tf, max_leverage=20, ref_trends=None, market_
             funding_rate_d, ls_ratio_d = get_market_sentiment(asset)
         except Exception:
             funding_rate_d, ls_ratio_d = 0.0, 1.0
+        # FR 硬封鎖（與趨勢策略對齊，±0.10%）
+        if funding_rate_d >= 0.001 and direction == "多": return None
+        if funding_rate_d >= 0.001 and direction == "空": return None
+        if funding_rate_d <= -0.001 and direction == "空": return None
+        if funding_rate_d <= -0.001 and direction == "多": return None
         sentiment_note_d, _ = build_sentiment_note(direction, funding_rate_d, ls_ratio_d)
 
         _tp_count_d = 4 if (adx >= 35 and tp4_d is not None) else 3
@@ -3347,17 +3359,10 @@ def run_strategy_scan():
     div_signals_raw = div_signals[:]
     div_signals = [s for s in div_signals if s['win_rate'] >= 64]  # 函數內部已過濾 <64，統一
 
-    # ── SMC 訊號品質門檻 ──
-    # 趨勢市停用 SMC（結構上逆趨勢策略在強趨勢中成功率極低）。
-    # 震盪市：ADX 評分已修正（高 ADX 不再加分），門檻調整為 win_rate≥72 / ADX≥22 / vol_confirmed
-    smc_signals.sort(key=lambda x: x['score'], reverse=True)
-    if market_regime == 'ranging':
-        smc_signals = [s for s in smc_signals
-                       if s['win_rate'] >= 72
-                       and s['adx'] >= 22
-                       and s.get('vol_confirmed', False)]  # 掃除棒須有放量確認
-    else:
-        smc_signals = []   # 趨勢市 SMC 停用（逆趨勢掃除後動能常不足）
+    # ── SMC 全面停用（勝率 2/13 = 15%，遠低於隨機水準）──
+    # 敗場分析：趨勢市逆勢進場 36%、震盪市掃除後動能也不足；
+    # 兩種市場環境下均無正期望值，暫時全面下架，等結構性修改後再啟用。
+    smc_signals = []
 
     print(f"   趨勢候選 {len(trend_signals)} 組 | 區間候選 {len(range_signals)} 組 | 背離候選 {len(div_signals)} 組 | SMC候選 {len(smc_signals)} 組")
 
@@ -3432,6 +3437,19 @@ def run_strategy_scan():
         print(f"   📋 板塊去重後：{len(deduped)} → {len(sector_deduped)} 個訊號")
     deduped = sector_deduped
 
+    # ── SL 距離硬性上限（4.5%）──
+    # 敗場分析：KORU −10.1%、LA −8.7%、ZAMA −8.1%、DRAM −6.0%、BEAT −5.8%
+    # 均為異常/低流動性幣種，止損位算不準，SL > 4.5% 一律拒絕
+    _SL_MAX_PCT = 0.045
+    _cnt_before_sl = len(deduped)
+    deduped = [
+        s for s in deduped
+        if s.get('entry') and s.get('sl')
+        and abs(s['sl'] - s['entry']) / s['entry'] <= _SL_MAX_PCT
+    ]
+    if len(deduped) < _cnt_before_sl:
+        print(f"   🚫 SL過寬過濾：移除 {_cnt_before_sl - len(deduped)} 個訊號（SL>{_SL_MAX_PCT*100:.1f}%）")
+
     now_ts = time.time()
     _MAJOR_COINS_COOL = {'BTC', 'ETH'}
     with recently_sent_lock:
@@ -3444,6 +3462,7 @@ def run_strategy_scan():
         if (s['asset'], s['dir']) not in busy_pairs
         and s['asset'] not in watch_assets
         and (s['asset'], s['dir']) not in cooled_pairs
+        and not is_in_loss_cooldown(s['asset'], s['dir'])
     ]
 
     excluded = len(deduped) - len(top_signals)
@@ -3500,6 +3519,24 @@ def save_stats(records):
             json.dump(records, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"⚠️ 儲存統計檔案失敗：{e}")
+
+def is_in_loss_cooldown(asset, direction, cooldown_hours=4):
+    """
+    同幣種同方向 SL 出場後，cooldown_hours 小時內不再進場。
+    防止連續雙向被打（如 XRP 多 SL → XRP 空 SL 同日，BEAT 多空同天各打一次）。
+    """
+    try:
+        cutoff = time.time() - cooldown_hours * 3600
+        return any(
+            r.get('asset') == asset
+            and r.get('dir') == direction
+            and r.get('outcome') == 'loss'
+            and r.get('exit_type') == 'sl'
+            and r.get('timestamp', 0) >= cutoff
+            for r in load_stats()
+        )
+    except Exception:
+        return False
 
 def record_trade_outcome(pos, outcome, exit_type=None):
     """
